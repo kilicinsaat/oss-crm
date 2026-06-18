@@ -1,0 +1,1183 @@
+import { useState } from "react";
+import { supabase } from "./lib/supabase";
+import * as XLSX from "xlsx";
+
+const COMPANY_MESSAGE = `
+🏢 KILIÇ İNŞAAT MİMARLIK
+
+📞 İletişim:
+0 (530) 350 12 76
+
+🌐 Web Sitesi:
+https://www.kilicinsaatmimarlik.com
+
+📧 Mail:
+info@kilicinsaatmimarlik.com
+
+📍 Adres:
+Namık Kemal Mah. 68. Sokak No:34513
+Lotus Çarşı Kat: 8 Daire: 36
+Esenyurt / İstanbul
+
+Herhangi bir sorunuz olursa bize ulaşabilirsiniz.
+`;
+
+function App() {
+  const [customerLogs, setCustomerLogs] = useState([]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkEmployee, setBulkEmployee] = useState("");
+  const [importing, setImporting] = useState(false);
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [profile, setProfile] = useState(null);
+  const [customers, setCustomers] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+
+  const [loading, setLoading] = useState(false);
+  const [activePage, setActivePage] = useState("dashboard");
+  const [customerFilter, setCustomerFilter] = useState("all");
+
+  const [form, setForm] = useState({
+    first_name: "",
+    last_name: "",
+    email: "",
+    phone: "",
+    phone_2: "",
+    tc_no: "",
+    appointment_date: "",
+    info_note: "",
+    batch_name: "",
+    batch_page: "",
+    website: "",
+    address: "",
+  });
+
+  const [staffForm, setStaffForm] = useState({
+    id: "",
+    email: "",
+    full_name: "",
+    role: "employee",
+  });
+
+  async function login(e) {
+    e.preventDefault();
+    setLoading(true);
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      setLoading(false);
+      alert("Giriş hatası: " + error.message);
+      return;
+    }
+
+    const { data: userProfile, error: profileError } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", data.user.id)
+      .maybeSingle();
+
+    setLoading(false);
+
+    if (profileError || !userProfile) {
+      alert("Profil bulunamadı.");
+      return;
+    }
+
+    setProfile(userProfile);
+    await loadCustomers();
+    await loadUsers();
+  }
+
+  async function logout() {
+    await supabase.auth.signOut();
+    setProfile(null);
+    setCustomers([]);
+    setUsers([]);
+    setCustomerLogs([]);
+    setSelectedIds([]);
+  }
+
+  async function loadCustomers() {
+    const { data, error } = await supabase
+      .from("customers")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (!error) setCustomers(data || []);
+  }
+
+  async function loadUsers() {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (!error) setUsers(data || []);
+  }
+
+  async function loadCustomerLogs(customerId) {
+  const { data, error } = await supabase
+    .from("customer_logs")
+    .select("*")
+    .eq("customer_id", customerId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    alert("Geçmiş okunamadı: " + error.message);
+    return;
+  }
+
+  setCustomerLogs(data || []);
+}
+  async function importExcel(e) {
+    const file = e.target.files[0];
+    if (!file || !profile) return;
+
+    try {
+      setImporting(true);
+
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+
+      const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
+      const isPhone = (value) => {
+        const d = cleanDigits(value);
+        return d.length === 10 && d.startsWith("5");
+      };
+      const isTc = (value) => {
+        const d = cleanDigits(value);
+        return d.length === 11 && !d.startsWith("05");
+      };
+
+      const mappedRows = rows
+        .map((row, index) => {
+          const values = Object.values(row);
+          const keys = Object.keys(row);
+
+          const getByHeader = (names) => {
+            const key = keys.find((k) =>
+              names.some((n) =>
+                k.toString().toLowerCase().includes(n.toLowerCase())
+              )
+            );
+            return key ? row[key] : "";
+          };
+
+          const fullName =
+            getByHeader(["adı soyadı", "adi soyadi", "ad soyad", "müşteri", "musteri"]) ||
+            values.find((v) => {
+              const text = String(v || "").trim();
+              return text && /[a-zA-ZğüşöçıİĞÜŞÖÇ]/.test(text);
+            }) ||
+            "";
+
+          const phoneValues = values
+            .map((v) => cleanDigits(v))
+            .filter((v) => isPhone(v));
+
+          const headerPhone = cleanDigits(
+            getByHeader(["cep tel", "cep", "telefon", "tel"])
+          );
+
+          const phoneValue = isPhone(headerPhone) ? headerPhone : phoneValues[0] || "";
+          const phone2Value = phoneValues.find((p) => p !== phoneValue) || "";
+
+          const tcValue =
+            cleanDigits(getByHeader(["tc", "t.c", "kimlik"])) ||
+            values.map((v) => cleanDigits(v)).find((v) => isTc(v)) ||
+            "";
+
+          if (!fullName && !phoneValue) return null;
+
+          const parts = String(fullName).trim().split(/\s+/);
+
+          return {
+            first_name: parts.slice(0, -1).join(" ") || String(fullName),
+            last_name: parts.length > 1 ? parts.at(-1) : "",
+            phone: phoneValue,
+            phone_2: phone2Value,
+            tc_no: tcValue,
+            email: "",
+            batch_name: file.name,
+            batch_page: index + 1,
+            info_note: "",
+            status: "pool",
+            approved: false,
+            payment_received: false,
+            created_by: profile.id,
+            last_action_by: profile.id,
+          };
+        })
+        .filter(Boolean);
+
+      const phoneList = mappedRows.map((r) => r.phone).filter(Boolean);
+      const { data: existing } = await supabase
+        .from("customers")
+        .select("phone")
+        .in("phone", phoneList);
+
+      const existingPhones = new Set((existing || []).map((x) => x.phone));
+      const cleanRows = mappedRows.filter((r) => !existingPhones.has(r.phone));
+
+      let imported = 0;
+
+      for (let i = 0; i < cleanRows.length; i += 100) {
+        const chunk = cleanRows.slice(i, i + 100);
+        const { error } = await supabase.from("customers").insert(chunk);
+
+        if (error) {
+          alert("Yükleme hatası: " + error.message);
+          setImporting(false);
+          return;
+        }
+
+        imported += chunk.length;
+      }
+
+      alert(`${imported} müşteri yüklendi. ${mappedRows.length - cleanRows.length} mükerrer atlandı.`);
+      await loadCustomers();
+    } catch (err) {
+      alert("Excel okunamadı: " + err.message);
+    } finally {
+      setImporting(false);
+      e.target.value = "";
+    }
+  }
+
+  async function addCustomer(e) {
+    e.preventDefault();
+    if (!profile) return;
+
+    const { error } = await supabase.from("customers").insert({
+      ...form,
+      batch_page: form.batch_page ? Number(form.batch_page) : null,
+      appointment_date: form.appointment_date || null,
+      status: "pool",
+      approved: false,
+      payment_received: false,
+      created_by: profile.id,
+      last_action_by: profile.id,
+    });
+
+    if (error) {
+      alert("Müşteri eklenemedi: " + error.message);
+      return;
+    }
+
+    setForm({
+      first_name: "",
+      last_name: "",
+      email: "",
+      phone: "",
+      phone_2: "",
+      tc_no: "",
+      appointment_date: "",
+      info_note: "",
+      batch_name: "",
+      batch_page: "",
+      website: "",
+      address: "",
+    });
+
+    await loadCustomers();
+  }
+
+  async function addStaff(e) {
+    e.preventDefault();
+    if (!profile) return;
+
+    const { error } = await supabase.from("profiles").insert({
+      id: staffForm.id,
+      email: staffForm.email,
+      full_name: staffForm.full_name,
+      role: staffForm.role,
+      is_active: true,
+      created_by: profile.id,
+    });
+
+    if (error) {
+      alert("Kullanıcı eklenemedi: " + error.message);
+      return;
+    }
+
+    alert("Kullanıcı profili eklendi.");
+    setStaffForm({ id: "", email: "", full_name: "", role: "employee" });
+    await loadUsers();
+  }
+
+  async function assignCustomer(customerId, employeeId) {
+    if (!profile) return;
+
+    const { error } = await supabase
+      .from("customers")
+      .update({
+        assigned_employee: employeeId || null,
+        status: employeeId ? "assigned" : "pool",
+        assigned_at: employeeId ? new Date().toISOString() : null,
+        last_action_by: profile.id,
+      })
+      .eq("id", customerId);
+
+    if (!error) await loadCustomers();
+  }
+
+  async function bulkAssignCustomers() {
+    if (!bulkEmployee || selectedIds.length === 0 || !profile) {
+      alert("Müşteri ve rep seç.");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("customers")
+      .update({
+        assigned_employee: bulkEmployee,
+        status: "assigned",
+        assigned_at: new Date().toISOString(),
+        last_action_by: profile.id,
+      })
+      .in("id", selectedIds);
+
+    if (error) {
+      alert("Toplu atama hatası: " + error.message);
+      return;
+    }
+
+    alert(`${selectedIds.length} müşteri atandı.`);
+    setSelectedIds([]);
+    setBulkEmployee("");
+    await loadCustomers();
+  }
+
+  async function updateCustomer(customerId, updates) {
+    if (!profile) return;
+
+    const { error } = await supabase
+      .from("customers")
+      .update({ ...updates, last_action_by: profile.id })
+      .eq("id", customerId);
+
+    if (error) {
+      alert("Müşteri güncellenemedi: " + error.message);
+      return;
+    }
+
+    console.log("LOG INSERT TEST", {
+  customer_id: customerId,
+  user_id: profile.id,
+  old_status: selectedCustomer?.status,
+  new_status: updates.status,
+  note: updates.info_note,
+});
+
+    const { error: logError } = await supabase
+  .from("customer_logs")
+  .insert({
+    customer_id: customerId,
+    user_id: profile.id,
+    old_status: selectedCustomer?.status || null,
+    new_status: updates.status || null,
+    note: updates.info_note || "",
+  });
+
+console.log("LOG ERROR", logError);
+
+    if (logError) {
+      alert("Log kaydedilemedi: " + logError.message);
+      return;
+    }
+
+    await loadCustomers();
+    await loadCustomerLogs(customerId);
+
+    setSelectedCustomer((prev) => prev ? { ...prev, ...updates } : prev);
+    alert("Kaydedildi.");
+  }
+
+  if (!profile) {
+    return (
+      <div style={loginPage}>
+        <div style={loginLeft}>
+          <div style={brandBadge}>OSS CONTROL CENTER</div>
+          <h1 style={loginHeroTitle}>Satış ekibini tek panelden yönet.</h1>
+          <p style={loginHeroText}>
+            Müşteri havuzu, rep performansı, randevular ve satış durumları tek ekranda.
+          </p>
+          <div style={loginFeatureGrid}>
+            <div style={loginFeature}>Müşteri Havuzu</div>
+            <div style={loginFeature}>Rep Takibi</div>
+            <div style={loginFeature}>Excel Data Yükleme</div>
+            <div style={loginFeature}>Güvenli Giriş</div>
+          </div>
+        </div>
+
+        <form onSubmit={login} style={loginCard}>
+          <h2>Hoş geldin</h2>
+          <p style={{ opacity: 0.65 }}>OSS paneline giriş yap</p>
+          <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} style={loginInput} />
+          <input placeholder="Şifre" type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={loginInput} />
+          <button disabled={loading} style={loginButton}>
+            {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  const employees = users.filter((u) => u.role === "employee");
+
+  const visibleCustomers =
+    profile.role === "employee"
+      ? customers.filter((c) => c.assigned_employee === profile.id)
+      : customers;
+
+  const filteredCustomers = visibleCustomers
+    .filter((c) => {
+      if (customerFilter === "all") return true;
+      if (customerFilter === "pool") return c.status === "pool";
+      if (customerFilter === "assigned") return !!c.assigned_employee;
+      if (customerFilter === "approved") return c.approved;
+      if (customerFilter === "paid") return c.payment_received;
+      return true;
+    })
+    .filter((c) =>
+      `${c.first_name || ""} ${c.last_name || ""} ${c.phone || ""} ${c.phone_2 || ""} ${c.tc_no || ""} ${c.batch_name || ""}`
+        .toLowerCase()
+        .includes(searchTerm.toLowerCase())
+    );
+
+  const followUps = customers.filter((c) =>
+    ["called", "appointment", "meeting_done", "not_approved"].includes(c.status)
+  );
+
+  const pageTitle =
+    profile.role === "boss"
+      ? "Boss Panel"
+      : profile.role === "manager"
+      ? "Manager Panel"
+      : "Rep Panel";
+
+  return (
+    <div style={appShell}>
+      <aside style={sidebar}>
+        <h2 style={logoText}>OSS</h2>
+        <p style={sideEmail}>{profile.email}</p>
+
+        <MenuButton title="Dashboard" page="dashboard" activePage={activePage} setActivePage={setActivePage} />
+        <MenuButton title="Müşteriler" page="customers" activePage={activePage} setActivePage={setActivePage} onClickExtra={() => setCustomerFilter("all")} />
+
+{profile.role === "employee" && (
+  <>
+    <MenuButton title="Yeni Gelenler" page="rep_new" activePage={activePage} setActivePage={setActivePage} />
+    <MenuButton title="Arandı" page="rep_called" activePage={activePage} setActivePage={setActivePage} />
+    <MenuButton title="Randevu" page="rep_appointment" activePage={activePage} setActivePage={setActivePage} />
+    <MenuButton title="Yapmayacak" page="rep_not_approved" activePage={activePage} setActivePage={setActivePage} />
+    <MenuButton title="Satış" page="rep_paid" activePage={activePage} setActivePage={setActivePage} />
+  </>
+)}
+
+        {profile.role !== "employee" && (
+          <MenuButton title="Havuz" page="pool" activePage={activePage} setActivePage={setActivePage} />
+        )}
+
+        {profile.role !== "employee" && (
+          <MenuButton title={`Takip Gerekenler (${followUps.length})`} page="followups" activePage={activePage} setActivePage={setActivePage} />
+        )}
+
+        {profile.role !== "employee" && (
+          <MenuButton title="Çalışanlar" page="employees" activePage={activePage} setActivePage={setActivePage} />
+        )}
+
+        <MenuButton title="Raporlar" page="reports" activePage={activePage} setActivePage={setActivePage} />
+      </aside>
+
+      <main style={mainArea}>
+        <header style={topbar}>
+          <div>
+            <h1>{pageTitle}</h1>
+            <p style={{ opacity: 0.7 }}>{roleName(profile.role)}</p>
+          </div>
+          <button onClick={logout} style={logoutButton}>Çıkış</button>
+        </header>
+
+        {activePage === "dashboard" && (
+          <>
+            <div style={statsGrid}>
+              <ClickStat title={profile.role === "employee" ? "Benim Müşterilerim" : "Toplam Müşteri"} value={visibleCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
+              <ClickStat title="Havuz" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("customers"); }} />
+              <ClickStat title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
+              <ClickStat title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
+              <ClickStat title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
+            </div>
+
+            <div style={dashboardGrid}>
+              <div style={panelCard}>
+                <h2>Operasyon Pipeline</h2>
+                <p>Havuz: {customers.filter(c => c.status === "pool").length}</p>
+                <p>Atandı: {customers.filter(c => c.status === "assigned").length}</p>
+                <p>Arandı: {customers.filter(c => c.status === "called").length}</p>
+                <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
+                <p>Yapmayacak: {customers.filter(c => c.status === "not_approved").length}</p>
+                <p>Onaylandı: {customers.filter(c => c.status === "approved").length}</p>
+                <p>Para Alındı: {customers.filter(c => c.status === "paid").length}</p>
+              </div>
+
+              <div style={panelCard}>
+                <h2>🏆 Top Rep</h2>
+                {users
+                  .filter((u) => u.role === "employee")
+                  .map((u) => ({ ...u, stats: getUserStats(customers, u.id) }))
+                  .sort((a, b) => b.stats.paid - a.stats.paid)
+                  .slice(0, 5)
+                  .map((u, index) => (
+                    <div key={u.id} style={topRepRow}>
+                      <strong>#{index + 1} {u.full_name || u.email}</strong>
+                      <span>Satış: {u.stats.paid}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            {profile.role === "boss" && (
+              <div style={{ ...panelCard, marginTop: 20 }}>
+                <h2>Excel / CSV Data Yükle</h2>
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={importExcel} style={inputStyle} />
+                {importing && <p>Yükleniyor, bekle kanka...</p>}
+              </div>
+            )}
+
+            {(profile.role === "boss" || profile.role === "manager") && (
+              <CustomerForm form={form} setForm={setForm} addCustomer={addCustomer} />
+            )}
+          </>
+        )}
+
+        {activePage === "customers" && (
+          <CustomerTable
+            title="Müşteriler"
+            data={filteredCustomers}
+            employees={employees}
+            profile={profile}
+            assignCustomer={assignCustomer}
+            setSelectedCustomer={setSelectedCustomer}
+            loadCustomerLogs={loadCustomerLogs}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
+            bulkEmployee={bulkEmployee}
+            setBulkEmployee={setBulkEmployee}
+            bulkAssignCustomers={bulkAssignCustomers}
+          />
+        )}
+
+        {activePage === "rep_new" && (
+  <CustomerTable
+    title="Yeni Gelen Müşteriler"
+    data={visibleCustomers.filter((c) => c.status === "assigned")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
+{activePage === "rep_called" && (
+  <CustomerTable
+    title="Aranan Müşteriler"
+    data={visibleCustomers.filter((c) => c.status === "called")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
+{activePage === "rep_appointment" && (
+  <CustomerTable
+    title="Randevulu Müşteriler"
+    data={visibleCustomers.filter((c) => c.status === "appointment")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
+{activePage === "rep_not_approved" && (
+  <CustomerTable
+    title="Yapmayacak Müşteriler"
+    data={visibleCustomers.filter((c) => c.status === "not_approved")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
+{activePage === "rep_paid" && (
+  <CustomerTable
+    title="Satış Yapılan Müşteriler"
+    data={visibleCustomers.filter((c) => c.status === "paid")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
+        {activePage === "pool" && (
+          <CustomerTable
+            title="Havuz / Bekleme Odası"
+            data={customers.filter((c) => c.status === "pool")}
+            employees={employees}
+            profile={profile}
+            assignCustomer={assignCustomer}
+            setSelectedCustomer={setSelectedCustomer}
+            loadCustomerLogs={loadCustomerLogs}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
+            bulkEmployee={bulkEmployee}
+            setBulkEmployee={setBulkEmployee}
+            bulkAssignCustomers={bulkAssignCustomers}
+          />
+        )}
+
+        {activePage === "followups" && (
+          <CustomerTable
+            title="Takip Gerekenler"
+            data={followUps}
+            employees={employees}
+            profile={profile}
+            assignCustomer={assignCustomer}
+            setSelectedCustomer={setSelectedCustomer}
+            loadCustomerLogs={loadCustomerLogs}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
+            bulkEmployee={bulkEmployee}
+            setBulkEmployee={setBulkEmployee}
+            bulkAssignCustomers={bulkAssignCustomers}
+          />
+        )}
+
+        {activePage === "employees" && (
+          <div style={panelCard}>
+            <h2>Çalışanlar ve Managerlar</h2>
+
+            {profile.role === "boss" && (
+              <form onSubmit={addStaff} style={staffFormBox}>
+                <h3>Yeni Kullanıcı Profili Ekle</h3>
+                <div style={formGrid}>
+                  <input placeholder="Auth UID" value={staffForm.id} onChange={(e) => setStaffForm({ ...staffForm, id: e.target.value })} style={inputStyle} />
+                  <input placeholder="Ad Soyad" value={staffForm.full_name} onChange={(e) => setStaffForm({ ...staffForm, full_name: e.target.value })} style={inputStyle} />
+                  <input placeholder="Email" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} style={inputStyle} />
+                  <select value={staffForm.role} onChange={(e) => setStaffForm({ ...staffForm, role: e.target.value })} style={inputStyle}>
+                    <option value="employee">Rep</option>
+                    <option value="manager">Manager</option>
+                  </select>
+                </div>
+                <button style={primaryButton}>Kullanıcı Profili Ekle</button>
+              </form>
+            )}
+
+            {users.map((u) => {
+              const stats = getUserStats(customers, u.id);
+              return (
+                <div key={u.id} style={employeeRow}>
+                  <div>
+                    <strong>{u.full_name || "İsimsiz kullanıcı"}</strong>
+                    <p style={{ margin: 0, opacity: 0.7 }}>{u.email}</p>
+                    <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 13 }}>
+                      Müşteri: {stats.total} | Aranan: {stats.called} | Randevu: {stats.appointment} | Satış: {stats.paid}
+                    </p>
+                  </div>
+                  <span style={roleBadge}>{roleName(u.role)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {activePage === "reports" && (
+          <div style={panelCard}>
+            <h2>Rapor Merkezi</h2>
+            <p>Toplam Müşteri: {customers.length}</p>
+            <p>Havuz: {customers.filter(c => c.status === "pool").length}</p>
+            <p>Aranan: {customers.filter(c => c.status === "called").length}</p>
+            <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
+            <p>Yapmayacak: {customers.filter(c => c.status === "not_approved").length}</p>
+            <p>Onaylanan: {customers.filter(c => c.status === "approved").length}</p>
+            <p>Satış: {customers.filter(c => c.status === "paid").length}</p>
+          </div>
+        )}
+
+        {selectedCustomer && (
+         <CustomerModal
+  selectedCustomer={selectedCustomer}
+  setSelectedCustomer={setSelectedCustomer}
+  customerLogs={customerLogs}
+  updateCustomer={updateCustomer}
+  users={users}
+/>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function CustomerForm({ form, setForm, addCustomer }) {
+  return (
+    <form onSubmit={addCustomer} style={{ ...panelCard, marginTop: 20 }}>
+      <h2>Manuel Müşteri Kartı Ekle</h2>
+      <div style={formGrid}>
+        <input placeholder="Data adı / parti adı" value={form.batch_name} onChange={(e) => setForm({ ...form, batch_name: e.target.value })} style={inputStyle} />
+        <input placeholder="Sayfa no" value={form.batch_page} onChange={(e) => setForm({ ...form, batch_page: e.target.value })} style={inputStyle} />
+        <input placeholder="Ad" value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} style={inputStyle} />
+        <input placeholder="Soyad" value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} style={inputStyle} />
+        <input placeholder="TC No" value={form.tc_no} onChange={(e) => setForm({ ...form, tc_no: e.target.value })} style={inputStyle} />
+        <input placeholder="Telefon" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} style={inputStyle} />
+        <input placeholder="Telefon 2" value={form.phone_2} onChange={(e) => setForm({ ...form, phone_2: e.target.value })} style={inputStyle} />
+        <input placeholder="Web Sitesi" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} style={inputStyle} />
+        <input placeholder="Adres" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} style={inputStyle} />
+        <input type="datetime-local" value={form.appointment_date} onChange={(e) => setForm({ ...form, appointment_date: e.target.value })} style={inputStyle} />
+      </div>
+      <textarea placeholder="Not" value={form.info_note} onChange={(e) => setForm({ ...form, info_note: e.target.value })} style={{ ...inputStyle, height: 100 }} />
+      <button style={primaryButton}>Müşteri Ekle</button>
+    </form>
+  );
+}
+
+function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users }) {
+  return (
+    <div style={modalBg}>
+      <div style={modalCard}>
+        <button onClick={() => setSelectedCustomer(null)} style={closeButton}>X</button>
+
+        <div style={customerHero}>
+          <h2 style={customerHeroTitle}>
+            {selectedCustomer.first_name} {selectedCustomer.last_name}
+          </h2>
+          <div style={customerInfoGrid}>
+            <div style={infoPill}>📞 {selectedCustomer.phone || "-"}</div>
+            <div style={infoPill}>📱 {selectedCustomer.phone_2 || "-"}</div>
+            <div style={infoPill}>🪪 TC: {selectedCustomer.tc_no || "-"}</div>
+            <div style={infoPill}>📁 {selectedCustomer.batch_name || "-"} / Sayfa {selectedCustomer.batch_page || "-"}</div>
+          </div>
+        </div>
+
+        <div style={quickActions}>
+          <a href={`tel:${selectedCustomer.phone}`} style={quickActionButton}>Ara</a>
+
+          <a
+            href={`https://wa.me/90${String(selectedCustomer.phone || "").replace(/\D/g, "")}`}
+            target="_blank"
+            rel="noreferrer"
+            style={quickActionButton}
+          >
+            WhatsApp
+          </a>
+
+          <button
+            type="button"
+            style={quickActionButton}
+            onClick={() => {
+              const phone = String(selectedCustomer.phone || "").replace(/\D/g, "");
+              window.open(`https://wa.me/90${phone}?text=${encodeURIComponent(COMPANY_MESSAGE)}`, "_blank");
+            }}
+          >
+            Bilgileri Gönder
+          </button>
+
+          <button type="button" style={quickActionButton}>Konum</button>
+          <button type="button" style={quickActionButton}>Web Sitesi</button>
+        </div>
+
+        <textarea defaultValue={selectedCustomer.info_note || ""} id="detailNote" placeholder="Müşteri notu..." style={{ ...inputStyle, height: 160 }} />
+
+        <select id="detailStatus" defaultValue={selectedCustomer.status} style={inputStyle}>
+          <option value="pool">Havuz / Aranmadı</option>
+          <option value="called">Arandı</option>
+          <option value="appointment">Randevu</option>
+          <option value="not_approved">Yapmayacak</option>
+          <option value="approved">Onaylandı</option>
+          <option value="paid">Para Alındı</option>
+        </select>
+
+        <button
+          style={primaryButton}
+          onClick={() =>
+            updateCustomer(selectedCustomer.id, {
+              info_note: document.getElementById("detailNote").value,
+              status: document.getElementById("detailStatus").value,
+              approved: ["approved", "paid"].includes(document.getElementById("detailStatus").value),
+              payment_received: document.getElementById("detailStatus").value === "paid",
+            })
+          }
+        >
+          Kaydet
+        </button>
+
+        <h3 style={{ marginTop: 20 }}>İşlem Geçmişi</h3>
+
+        {customerLogs.length === 0 && <p style={{ opacity: 0.7 }}>Henüz işlem yok.</p>}
+
+        {customerLogs.map((log) => (
+          <div key={log.id} style={logBox}>
+            <strong>
+  İşlem yapan: {
+    users.find((u) => u.id === log.user_id)?.full_name ||
+    users.find((u) => u.id === log.user_id)?.email ||
+    "Bilinmeyen kullanıcı"
+  }
+</strong>
+            <p style={{ margin: "6px 0" }}>Durum: {statusLabel(log.old_status)} → {statusLabel(log.new_status)}</p>
+            <p style={{ margin: "6px 0" }}>Not: {log.note || "-"}</p>
+            <small>{new Date(log.created_at).toLocaleString("tr-TR")}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CustomerTable({
+  title,
+  data,
+  employees,
+  profile,
+  assignCustomer,
+  setSelectedCustomer,
+  loadCustomerLogs,
+  searchTerm,
+  setSearchTerm,
+  selectedIds,
+  setSelectedIds,
+  bulkEmployee,
+  setBulkEmployee,
+  bulkAssignCustomers,
+}) {
+  const canManage = profile.role === "boss" || profile.role === "manager";
+
+  function toggleSelected(id) {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  }
+
+  return (
+    <div style={panelCard}>
+      <h2>{title}</h2>
+
+      <input
+        placeholder="Müşteri ara: isim, telefon, TC, data adı..."
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        style={searchInput}
+      />
+
+      {canManage && (
+  <div style={bulkBar}>
+    <strong>Seçili: {selectedIds.length}</strong>
+
+    <button
+      type="button"
+      style={smallButton}
+      onClick={() => {
+        const ids = data.map((c) => c.id);
+        const allSelected = ids.every((id) => selectedIds.includes(id));
+        setSelectedIds(allSelected ? [] : ids);
+      }}
+    >
+      Tümünü Seç
+    </button>
+
+    <select
+      value={bulkEmployee}
+      onChange={(e) => setBulkEmployee(e.target.value)}
+      style={selectStyle}
+    >
+      <option value="">Rep seç</option>
+      {employees.map((emp) => (
+        <option key={emp.id} value={emp.id}>
+          {emp.full_name || emp.email}
+        </option>
+      ))}
+    </select>
+
+    <button onClick={bulkAssignCustomers} style={smallButton}>
+      Seçilenleri Ata
+    </button>
+  </div>
+)}
+
+      <div style={tableWrapper}>
+        <div style={tableHeader}>
+          {canManage && <div>Seç</div>}
+          <div>Müşteri</div>
+          <div>Telefon</div>
+          <div>Telefon 2</div>
+          <div>TC No</div>
+          <div>Data</div>
+          <div>Durum</div>
+          <div>Atanan</div>
+          <div>İşlem</div>
+        </div>
+
+        {data.map((c) => (
+          <div key={c.id} style={tableRow}>
+            {canManage && (
+              <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleSelected(c.id)} />
+            )}
+
+            <div style={{ fontWeight: "bold" }}>{c.first_name} {c.last_name}</div>
+
+            <div>{c.phone ? <a href={`tel:${c.phone}`} style={phoneLink}>{c.phone}</a> : "-"}</div>
+            <div>{c.phone_2 ? <a href={`tel:${c.phone_2}`} style={phoneLink}>{c.phone_2}</a> : "-"}</div>
+            <div>{c.tc_no || "-"}</div>
+            <div>{c.batch_name || "-"}</div>
+            <div><span style={statusBadge(c.status)}>{statusLabel(c.status)}</span></div>
+
+            <div>
+              {canManage ? (
+                <select value={c.assigned_employee || ""} onChange={(e) => assignCustomer(c.id, e.target.value)} style={selectStyle}>
+                  <option value="">Havuzda</option>
+                  {employees.map((emp) => (
+                    <option key={emp.id} value={emp.id}>{emp.full_name || emp.email}</option>
+                  ))}
+                </select>
+              ) : "Ben"}
+            </div>
+
+            <div>
+              <button
+                onClick={() => {
+                  setSelectedCustomer(c);
+                  loadCustomerLogs(c.id);
+                }}
+                style={smallButton}
+              >
+                Detay
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MenuButton({ title, page, activePage, setActivePage, onClickExtra }) {
+  return (
+    <button
+      onClick={() => {
+        if (onClickExtra) onClickExtra();
+        setActivePage(page);
+      }}
+      style={activePage === page ? menuButtonActive : menuButton}
+    >
+      {title}
+    </button>
+  );
+}
+
+function ClickStat({ title, value, onClick }) {
+  return (
+    <div style={statCard} onClick={onClick}>
+      <p style={{ opacity: 0.75 }}>{title}</p>
+      <h2>{value}</h2>
+    </div>
+  );
+}
+
+function getUserStats(customers, userId) {
+  const myCustomers = customers.filter((c) => c.assigned_employee === userId);
+  return {
+    total: myCustomers.length,
+    called: myCustomers.filter((c) => c.status === "called").length,
+    appointment: myCustomers.filter((c) => c.status === "appointment").length,
+    approved: myCustomers.filter((c) => c.approved).length,
+    paid: myCustomers.filter((c) => c.payment_received).length,
+  };
+}
+
+function roleName(role) {
+  if (role === "boss") return "👑 Boss";
+  if (role === "manager") return "📋 Manager";
+  if (role === "employee") return "📞 Rep";
+  return role;
+}
+
+function statusLabel(status) {
+  const labels = {
+    pool: "Aranmadı",
+    assigned: "Yeni",
+    called: "Arandı",
+    appointment: "Randevu",
+    meeting_done: "Görüşüldü",
+    not_approved: "Yapmayacak",
+    approved: "Onaylandı",
+    paid: "Para Alındı",
+  };
+  return labels[status] || status || "-";
+}
+
+function statusBadge(status) {
+  const colors = {
+    pool: "#64748b",
+    assigned: "#2563eb",
+    called: "#0ea5e9",
+    appointment: "#f59e0b",
+    not_approved: "#ef4444",
+    approved: "#22c55e",
+    paid: "#16a34a",
+  };
+
+  return {
+    background: colors[status] || "#334155",
+    padding: "6px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+    color: "white",
+    fontWeight: "bold",
+    display: "inline-block",
+  };
+}
+
+const parliament = "#123b7a";
+const parliamentDark = "#061834";
+const parliamentMid = "#0b2b5f";
+const cardBlue = "#10284f";
+
+const appShell = { minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Arial" };
+const sidebar = { width: 250, background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)" };
+const logoText = { fontSize: 32, letterSpacing: 2, marginBottom: 8 };
+const sideEmail = { fontSize: 12, opacity: 0.65, marginBottom: 25 };
+const mainArea = { flex: 1, padding: 28, overflowX: "hidden" };
+const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 };
+const menuButton = { width: "100%", padding: 13, marginBottom: 11, background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.12)", borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: "bold" };
+const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 0 0 2px rgba(37,99,235,0.18)" };
+const logoutButton = { padding: "12px 22px", borderRadius: 12, border: "none", cursor: "pointer", fontWeight: "bold" };
+const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
+const statCard = { background: `linear-gradient(135deg, ${cardBlue}, ${parliament})`, padding: 20, borderRadius: 18, border: "1px solid rgba(147,197,253,0.25)", cursor: "pointer", boxShadow: "0 12px 30px rgba(0,0,0,0.2)" };
+const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
+const panelCard = { background: "rgba(16,40,79,0.88)", padding: 22, borderRadius: 18, border: "1px solid rgba(147,197,253,0.22)", boxShadow: "0 20px 45px rgba(0,0,0,0.22)" };
+const formGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 };
+const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #cbd5e1" };
+const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
+const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "none", cursor: "pointer", fontWeight: "bold", background: "linear-gradient(135deg,#e0f2fe,#ffffff)" };
+const tableWrapper = { width: "100%", overflowX: "auto", background: "#071a36", borderRadius: 14 };
+const tableHeader = {
+  display: "grid",
+  gridTemplateColumns: "140px 110px 110px 115px 120px 95px 120px 75px",
+  gap: 6,
+  padding: 10,
+  background: parliamentMid,
+  fontWeight: "bold",
+  minWidth: 885,
+  fontSize: 12,
+};
+
+const tableRow = {
+  display: "grid",
+  gridTemplateColumns: "140px 110px 110px 115px 120px 95px 120px 75px",
+  gap: 6,
+  alignItems: "center",
+  padding: 10,
+  background: "#10284f",
+  borderBottom: "1px solid rgba(147,197,253,0.16)",
+  minWidth: 885,
+  fontSize: 12,
+};
+const selectStyle = { width: "100%", padding: 8, borderRadius: 8 };
+const smallButton = { padding: "8px 12px", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: "bold" };
+const phoneLink = { color: "#7dd3fc", fontWeight: "bold" };
+const bulkBar = {
+  display: "grid",
+  gridTemplateColumns: "120px 150px 1fr 150px",
+  gap: 10,
+  alignItems: "center",
+  marginBottom: 12,
+  background: "#071a36",
+  padding: 12,
+  borderRadius: 12,
+};
+const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 14, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const roleBadge = { background: "#2563eb", padding: "6px 12px", borderRadius: 999, fontSize: 13 };
+const staffFormBox = { background: "#071a36", padding: 18, borderRadius: 14, marginBottom: 20, border: "1px solid rgba(147,197,253,0.18)" };
+const modalBg = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 999 };
+const modalCard = { width: 760, maxWidth: "92%", maxHeight: "90vh", overflowY: "auto", background: `linear-gradient(135deg, ${cardBlue}, #0f172a)`, padding: 25, borderRadius: 20, border: "1px solid rgba(147,197,253,0.25)" };
+const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: "none" };
+const customerHero = { background: `linear-gradient(135deg, ${parliamentDark}, ${parliament})`, padding: 18, borderRadius: 16, marginBottom: 16, border: "1px solid #60a5fa" };
+const customerHeroTitle = { color: "white", textAlign: "center", marginBottom: 15, fontSize: 28 };
+const customerInfoGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 };
+const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 12, color: "#e0f2fe", textAlign: "center", border: "1px solid rgba(147,197,253,0.22)" };
+const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
+const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: "bold" };
+const logBox = { background: "#071a36", padding: 12, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+
+const loginPage = { minHeight: "100vh", background: `radial-gradient(circle at top left, ${parliament} 0, ${parliamentDark} 38%, #020617 100%)`, display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: "white", fontFamily: "Arial" };
+const loginLeft = { maxWidth: 620 };
+const brandBadge = { display: "inline-block", background: "rgba(37,99,235,0.25)", border: "1px solid rgba(147,197,253,0.35)", padding: "8px 14px", borderRadius: 999, fontSize: 13, letterSpacing: 1, marginBottom: 22 };
+const loginHeroTitle = { fontSize: 56, lineHeight: 1.05, margin: "0 0 20px 0" };
+const loginHeroText = { fontSize: 18, lineHeight: 1.6, opacity: 0.75, maxWidth: 520 };
+const loginFeatureGrid = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, marginTop: 35, maxWidth: 500 };
+const loginFeature = { background: "rgba(15,23,42,0.7)", border: "1px solid rgba(148,163,184,0.2)", padding: 16, borderRadius: 16 };
+const loginCard = { background: "rgba(15,23,42,0.82)", border: "1px solid rgba(148,163,184,0.25)", boxShadow: "0 30px 80px rgba(0,0,0,0.45)", backdropFilter: "blur(16px)", padding: 34, borderRadius: 24 };
+const loginInput = { width: "100%", padding: "14px 15px", marginBottom: 16, boxSizing: "border-box", borderRadius: 12, border: "1px solid #334155", background: "#020617", color: "white" };
+const loginButton = { width: "100%", padding: 14, borderRadius: 12, border: "none", background: "linear-gradient(135deg,#2563eb,#123b7a)", color: "white", fontWeight: "bold", cursor: "pointer" };
+const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 12, borderRadius: 10, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+
+export default App;
