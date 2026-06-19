@@ -40,6 +40,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
   const [customerFilter, setCustomerFilter] = useState("all");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
   const [form, setForm] = useState({
     first_name: "",
@@ -515,41 +516,51 @@ const reportStats = [
 
   return (
     <div style={appShell}>
-      <aside style={sidebar}>
-        <h2 style={logoText}>OSS</h2>
-        <p style={sideEmail}>{roleName(profile.role)}</p>
+      <aside style={{ ...sidebar, width: sidebarCollapsed ? 72 : 250, padding: sidebarCollapsed ? 12 : 24 }}>
+        <div style={sidebarTopRow}>
+          {!sidebarCollapsed && <div><h2 style={logoText}>OSS</h2><p style={sideEmail}>{roleName(profile.role)}</p></div>}
+          <button
+            type="button"
+            title={sidebarCollapsed ? "Menüyü aç" : "Menüyü kapat"}
+            aria-label={sidebarCollapsed ? "Menüyü aç" : "Menüyü kapat"}
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            style={menuToggle}
+          >
+            ☰
+          </button>
+        </div>
 
-        <MenuButton title="Dashboard" page="dashboard" activePage={activePage} setActivePage={setActivePage} />
-        <MenuButton title="Müşteriler" page="customers" activePage={activePage} setActivePage={setActivePage} onClickExtra={() => setCustomerFilter("all")} />
+        <MenuButton icon="▦" title="Dashboard" page="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="◉" title="Müşteriler" page="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
 
 {profile.role === "employee" && (
   <>
-    <MenuButton title="Yeni Gelenler" page="rep_new" activePage={activePage} setActivePage={setActivePage} />
-    <MenuButton title="Arandı" page="rep_called" activePage={activePage} setActivePage={setActivePage} />
-    <MenuButton title="Randevu" page="rep_appointment" activePage={activePage} setActivePage={setActivePage} />
-    <MenuButton title="Sözleşmeli Randevu" page="rep_contract" activePage={activePage} setActivePage={setActivePage} />
-<MenuButton title="Tekrar Aranacak" page="rep_callback" activePage={activePage} setActivePage={setActivePage} />
-    <MenuButton title="Yapmayacak" page="rep_not_approved" activePage={activePage} setActivePage={setActivePage} />
-    <MenuButton title="Satış" page="rep_paid" activePage={activePage} setActivePage={setActivePage} />
+    <MenuButton icon="+" title="Yeni Müşteriler" page="rep_new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+    <MenuButton icon="✓" title="Arandı" page="rep_called" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+    <MenuButton icon="◷" title="Randevu" page="rep_appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+    <MenuButton icon="□" title="Sözleşmeli Randevu" page="rep_contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+    <MenuButton icon="↶" title="Tekrar Aranacak" page="rep_callback" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+    <MenuButton icon="×" title="Yapmayacak" page="rep_not_approved" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+    <MenuButton icon="₺" title="Satış" page="rep_paid" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
   </>
 )}
 
         {profile.role !== "employee" && (
-          <MenuButton title="Havuz" page="pool" activePage={activePage} setActivePage={setActivePage} />
+          <MenuButton icon="+" title="Yeni Müşteri Havuzu" page="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
         {profile.role !== "employee" && (
-          <MenuButton title={`Takip Gerekenler (${followUps.length})`} page="followups" activePage={activePage} setActivePage={setActivePage} />
+          <MenuButton icon="!" title={`Takip Gerekenler (${followUps.length})`} page="followups" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
-        <MenuButton title={`Hatırlatmalar (${todayReminders.length})`} page="reminders" activePage={activePage} setActivePage={setActivePage} />
-        <MenuButton title="Takvim" page="calendar" activePage={activePage} setActivePage={setActivePage} />
+        <MenuButton icon="◷" title={`Hatırlatmalar (${todayReminders.length})`} page="reminders" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="▣" title="Takvim" page="calendar" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
         {profile.role !== "employee" && (
-          <MenuButton title="Çalışanlar" page="employees" activePage={activePage} setActivePage={setActivePage} />
+          <MenuButton icon="◎" title="Çalışanlar" page="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
-        <MenuButton title="Raporlar" page="reports" activePage={activePage} setActivePage={setActivePage} />
+        <MenuButton icon="▤" title="Raporlar" page="reports" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
       </aside>
 
       <main style={mainArea}>
@@ -566,7 +577,7 @@ const reportStats = [
           <>
             <div style={statsGrid}>
               <ClickStat title={profile.role === "employee" ? "Benim Müşterilerim" : "Toplam Müşteri"} value={visibleCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
-              <ClickStat title="Havuz" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("customers"); }} />
+              {profile.role !== "employee" && <ClickStat title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
               <ClickStat title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
               <ClickStat title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
               <ClickStat title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
@@ -575,7 +586,7 @@ const reportStats = [
             <div style={dashboardGrid}>
               <div style={panelCard}>
                 <h2>Operasyon Pipeline</h2>
-                <p>Havuz: {customers.filter(c => c.status === "pool").length}</p>
+                {profile.role !== "employee" && <p>Yeni Müşteriler: {customers.filter(c => c.status === "pool").length}</p>}
                 <p>Atandı: {customers.filter(c => c.status === "assigned").length}</p>
                 <p>Arandı: {customers.filter(c => c.status === "called").length}</p>
                 <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
@@ -768,7 +779,7 @@ const reportStats = [
 
         {activePage === "pool" && (
           <CustomerTable
-            title="Havuz / Bekleme Odası"
+            title="Yeni Müşteri Havuzu"
             data={customers.filter((c) => c.status === "pool")}
             employees={employees}
             profile={profile}
@@ -1237,16 +1248,19 @@ function CustomerTable({
   );
 }
 
-function MenuButton({ title, page, activePage, setActivePage, onClickExtra }) {
+function MenuButton({ icon, title, page, activePage, setActivePage, onClickExtra, collapsed }) {
   return (
     <button
       onClick={() => {
         if (onClickExtra) onClickExtra();
         setActivePage(page);
       }}
-      style={activePage === page ? menuButtonActive : menuButton}
+      title={title}
+      aria-label={title}
+      style={{ ...(activePage === page ? menuButtonActive : menuButton), ...(collapsed ? menuButtonCollapsed : {}) }}
     >
-      {title}
+      <span style={menuIcon}>{icon}</span>
+      {!collapsed && <span>{title}</span>}
     </button>
   );
 }
@@ -1372,7 +1386,8 @@ const parliamentMid = "#0b2b5f";
 const cardBlue = "#10284f";
 
 const appShell = { minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Arial" };
-const sidebar = { width: 250, background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)" };
+const sidebar = { background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)", transition: "width 180ms ease, padding 180ms ease", flexShrink: 0 };
+const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
 const logoText = { fontSize: 32, letterSpacing: 2, marginBottom: 8 };
 const sideEmail = { fontSize: 12, opacity: 0.65, marginBottom: 25 };
 const mainArea = { flex: 1, padding: 28, overflowX: "hidden" };
@@ -1381,8 +1396,11 @@ const welcomeBlock = { minWidth: 0 };
 const welcomeEyebrow = { display: "block", fontSize: 13, opacity: 0.65, marginBottom: 4 };
 const welcomeTitle = { margin: 0, fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
 const welcomeMeta = { margin: "6px 0 0", opacity: 0.7 };
-const menuButton = { width: "100%", padding: 13, marginBottom: 11, background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.12)", borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: "bold" };
+const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.22)", borderRadius: 8, cursor: "pointer", fontSize: 20 };
+const menuButton = { width: "100%", minHeight: 46, display: "flex", alignItems: "center", gap: 11, padding: 13, marginBottom: 9, background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.12)", borderRadius: 8, cursor: "pointer", textAlign: "left", fontWeight: "bold" };
 const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 0 0 2px rgba(37,99,235,0.18)" };
+const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
+const menuIcon = { width: 22, height: 22, display: "grid", placeItems: "center", borderRadius: 6, background: "rgba(125,211,252,0.14)", color: "#bae6fd", fontSize: 14, lineHeight: 1 };
 const logoutButton = { padding: "12px 22px", borderRadius: 12, border: "none", cursor: "pointer", fontWeight: "bold" };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
 const statCard = { background: `linear-gradient(135deg, ${cardBlue}, ${parliament})`, padding: 20, borderRadius: 18, border: "1px solid rgba(147,197,253,0.25)", cursor: "pointer", boxShadow: "0 12px 30px rgba(0,0,0,0.2)" };
