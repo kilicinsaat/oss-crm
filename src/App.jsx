@@ -1015,7 +1015,7 @@ function CustomerForm({ form, setForm, addCustomer }) {
 
 function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
-  const [detailNote, setDetailNote] = useState(selectedCustomer.info_note || "");
+  const [detailNote, setDetailNote] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
   const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
   const heat = customerHeat(selectedCustomer.status);
@@ -1031,19 +1031,26 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
       return;
     }
 
-    updateCustomer(selectedCustomer.id, {
-      info_note: detailNote.trim(),
+    const updates = {
       appointment_date: appointmentDate || null,
       status: detailStatus,
       approved: ["approved", "paid"].includes(detailStatus),
       payment_received: detailStatus === "paid",
-    });
+    };
+
+    if (detailNote.trim()) updates.info_note = detailNote.trim();
+    updateCustomer(selectedCustomer.id, updates);
   }
 
   return (
-    <div style={modalBg}>
-      <div style={modalCard}>
-        <button onClick={() => setSelectedCustomer(null)} style={closeButton}>X</button>
+    <div
+      style={modalBg}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setSelectedCustomer(null);
+      }}
+    >
+      <div style={modalCard} onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" onClick={() => setSelectedCustomer(null)} style={closeButton} aria-label="Detayı kapat">X</button>
 
         <div style={customerHero}>
           <div style={{ ...customerHeatBar, background: heat.color }} />
@@ -1095,7 +1102,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
         <textarea
           value={detailNote}
           onChange={(e) => setDetailNote(e.target.value)}
-          placeholder={detailStatus === "not_approved" ? "Müşteri neden yapmayacağını yazın..." : "Müşteri notu..."}
+          placeholder={detailStatus === "not_approved" ? "Müşteri neden yapmayacağını yazın..." : "Bu işlem için yeni not bırakın..."}
           style={{ ...inputStyle, height: 140 }}
         />
 
@@ -1456,7 +1463,7 @@ const panelCard = { background: "rgba(16,40,79,0.88)", padding: 22, borderRadius
 const formGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 };
 const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #cbd5e1" };
 const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
-const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "none", cursor: "pointer", fontWeight: "bold", background: "linear-gradient(135deg,#e0f2fe,#ffffff)" };
+const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "1px solid #7dd3fc", cursor: "pointer", fontWeight: 700, background: "linear-gradient(135deg,#38bdf8,#2563eb)", color: "#ffffff", boxShadow: "0 8px 18px rgba(37,99,235,0.28)" };
 const tableWrapper = { width: "100%", overflowX: "auto", background: "#071a36", borderRadius: 14 };
 const tableHeader = {
   display: "grid",
