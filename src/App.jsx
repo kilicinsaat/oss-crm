@@ -1016,6 +1016,9 @@ function CustomerForm({ form, setForm, addCustomer }) {
 function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState(selectedCustomer.info_note || "");
+  const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
+  const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
+  const heat = customerHeat(selectedCustomer.status);
 
   function saveCustomer() {
     if (detailStatus === "not_approved" && !detailNote.trim()) {
@@ -1023,9 +1026,14 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
       return;
     }
 
+    if (needsAppointment && !appointmentDate) {
+      alert("Randevu kaydı için randevu tarihi ve saati zorunlu.");
+      return;
+    }
+
     updateCustomer(selectedCustomer.id, {
       info_note: detailNote.trim(),
-      appointment_date: document.getElementById("detailAppointment").value || null,
+      appointment_date: appointmentDate || null,
       status: detailStatus,
       approved: ["approved", "paid"].includes(detailStatus),
       payment_received: detailStatus === "paid",
@@ -1038,9 +1046,14 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
         <button onClick={() => setSelectedCustomer(null)} style={closeButton}>X</button>
 
         <div style={customerHero}>
+          <div style={{ ...customerHeatBar, background: heat.color }} />
           <h2 style={customerHeroTitle}>
             {selectedCustomer.first_name} {selectedCustomer.last_name}
           </h2>
+          <div style={customerSummary}>
+            <span style={{ ...heatBadge, background: heat.background, color: heat.color }}>{heat.label}</span>
+            <span style={customerSummaryText}>{customerLogs.length ? `${customerLogs.length} işlem kaydı var` : "Henüz işlem kaydı yok"}</span>
+          </div>
           <div style={customerInfoGrid}>
             <div style={infoPill}>📞 {selectedCustomer.phone || "-"}</div>
             <div style={infoPill}>📱 {selectedCustomer.phone_2 || "-"}</div>
@@ -1086,12 +1099,14 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           style={{ ...inputStyle, height: 140 }}
         />
 
-        <label style={fieldLabel}>Geri arama / randevu tarihi</label>
+        <label style={fieldLabel}>{needsAppointment ? "Randevu tarihi ve saati (zorunlu)" : "Geri arama / randevu tarihi"}</label>
         <input
           id="detailAppointment"
           type="datetime-local"
-          defaultValue={toDateTimeInputValue(selectedCustomer.appointment_date)}
-          style={inputStyle}
+          value={appointmentDate}
+          onChange={(e) => setAppointmentDate(e.target.value)}
+          required={needsAppointment}
+          style={{ ...inputStyle, borderColor: needsAppointment ? "#fbbf24" : "#cbd5e1" }}
         />
 
         <select value={detailStatus} onChange={(e) => setDetailStatus(e.target.value)} style={inputStyle}>
@@ -1112,22 +1127,22 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           Kaydet
         </button>
 
-        <h3 style={{ marginTop: 20 }}>İşlem Geçmişi</h3>
+        <h3 style={historyTitle}>İşlem Geçmişi</h3>
 
         {customerLogs.length === 0 && <p style={{ opacity: 0.7 }}>Henüz işlem yok.</p>}
 
         {customerLogs.map((log) => (
-          <div key={log.id} style={logBox}>
-            <strong>
+          <div key={log.id} style={{ ...logBox, borderLeft: `4px solid ${customerHeat(log.new_status).color}` }}>
+            <strong style={logUser}>
   İşlem yapan: {
     users.find((u) => u.id === log.user_id)?.full_name ||
     users.find((u) => u.id === log.user_id)?.email ||
     "Bilinmeyen kullanıcı"
   }
 </strong>
-            <p style={{ margin: "6px 0" }}>Durum: {statusLabel(log.old_status)} → {statusLabel(log.new_status)}</p>
-            <p style={{ margin: "6px 0" }}>Not: {log.note || "-"}</p>
-            <small>{new Date(log.created_at).toLocaleString("tr-TR")}</small>
+            <p style={logStatusRow}>Durum: {statusLabel(log.old_status)} → <span style={statusBadge(log.new_status)}>{statusLabel(log.new_status)}</span></p>
+            {log.note ? <p style={logNote}>{log.note}</p> : <p style={logEmptyNote}>Not bırakılmadı.</p>}
+            <small style={logTime}>{formatDateTime(log.created_at)}</small>
           </div>
         ))}
       </div>
@@ -1220,7 +1235,7 @@ function CustomerTable({
         </div>
 
         {data.map((c) => (
-          <div key={c.id} style={tableRow}>
+          <div key={c.id} style={{ ...tableRow, borderLeft: `4px solid ${customerHeat(c.status).color}` }}>
             <div>
             {canManage && (
               <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleSelected(c.id)} />
@@ -1397,12 +1412,27 @@ function statusBadge(status) {
   };
 }
 
+function customerHeat(status) {
+  const levels = {
+    pool: { label: "Soğuk müşteri", color: "#60a5fa", background: "rgba(96,165,250,0.14)" },
+    assigned: { label: "Soğuk müşteri", color: "#60a5fa", background: "rgba(96,165,250,0.14)" },
+    called: { label: "Ilık müşteri", color: "#fb923c", background: "rgba(251,146,60,0.14)" },
+    callback: { label: "Ilık müşteri", color: "#c084fc", background: "rgba(192,132,252,0.14)" },
+    appointment: { label: "Sıcak müşteri", color: "#fbbf24", background: "rgba(251,191,36,0.14)" },
+    contract_appointment: { label: "Çok sıcak", color: "#f97316", background: "rgba(249,115,22,0.14)" },
+    approved: { label: "Onaylandı", color: "#4ade80", background: "rgba(74,222,128,0.14)" },
+    paid: { label: "Satış tamamlandı", color: "#34d399", background: "rgba(52,211,153,0.14)" },
+    not_approved: { label: "Kapandı", color: "#f87171", background: "rgba(248,113,113,0.14)" },
+  };
+  return levels[status] || { label: "Yeni müşteri", color: "#94a3b8", background: "rgba(148,163,184,0.14)" };
+}
+
 const parliament = "#123b7a";
 const parliamentDark = "#061834";
 const parliamentMid = "#0b2b5f";
 const cardBlue = "#10284f";
 
-const appShell = { minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Arial" };
+const appShell = { minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Segoe UI, Arial, sans-serif" };
 const sidebar = { background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)", transition: "width 180ms ease, padding 180ms ease", flexShrink: 0 };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
 const logoText = { fontSize: 32, letterSpacing: 2, marginBottom: 8 };
@@ -1475,7 +1505,17 @@ const customerInfoGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fi
 const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 12, color: "#e0f2fe", textAlign: "center", border: "1px solid rgba(147,197,253,0.22)" };
 const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
 const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: "bold" };
-const logBox = { background: "#071a36", padding: 12, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const customerHeatBar = { height: 4, borderRadius: 999, marginBottom: 16, opacity: 0.95 };
+const customerSummary = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 9, margin: "-4px 0 16px" };
+const heatBadge = { padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600 };
+const customerSummaryText = { color: "#cbd5e1", fontSize: 13 };
+const historyTitle = { margin: "24px 0 12px", fontSize: 18, fontWeight: 600, letterSpacing: 0 };
+const logBox = { background: "rgba(7,26,54,0.72)", padding: "14px 16px", borderRadius: 10, marginBottom: 10, border: "1px solid rgba(147,197,253,0.16)", boxShadow: "0 6px 18px rgba(0,0,0,0.12)" };
+const logUser = { display: "block", fontSize: 14, fontWeight: 600, color: "#e0f2fe" };
+const logStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 7, margin: "10px 0 0", color: "#cbd5e1", fontSize: 13 };
+const logNote = { margin: "12px 0 0", color: "#f1f5f9", fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" };
+const logEmptyNote = { margin: "12px 0 0", color: "#94a3b8", fontSize: 13, fontStyle: "italic" };
+const logTime = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 12 };
 const fieldLabel = { display: "block", margin: "12px 0 6px", fontWeight: "bold", fontSize: 13, color: "#bfdbfe" };
 const reportsLayout = { display: "grid", gap: 18 };
 const sectionHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, marginBottom: 18 };
