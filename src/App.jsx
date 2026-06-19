@@ -316,20 +316,33 @@ function App() {
   }
 
   async function assignCustomer(customerId, employeeId) {
-    if (!profile) return;
+  if (!profile) return;
 
-    const { error } = await supabase
-      .from("customers")
-      .update({
-        assigned_employee: employeeId || null,
-        status: employeeId ? "assigned" : "pool",
-        assigned_at: employeeId ? new Date().toISOString() : null,
-        last_action_by: profile.id,
-      })
-      .eq("id", customerId);
-
-    if (!error) await loadCustomers();
+  if (!employeeId) {
+    alert("Rep seçilmedi.");
+    return;
   }
+
+  const { data, error } = await supabase
+    .from("customers")
+    .update({
+      assigned_employee: employeeId,
+      status: "assigned",
+      assigned_at: new Date().toISOString(),
+      last_action_by: profile.id,
+    })
+    .eq("id", customerId)
+    .select();
+
+  if (error) {
+    alert("Atama hatası: " + error.message);
+    return;
+  }
+
+  console.log("ATAMA SONUCU:", data);
+  alert("Müşteri rep'e atandı.");
+  await loadCustomers();
+}
 
   async function bulkAssignCustomers() {
     if (!bulkEmployee || selectedIds.length === 0 || !profile) {
@@ -408,15 +421,15 @@ console.log("LOG ERROR", logError);
       <div style={loginPage}>
         <div style={loginLeft}>
           <div style={brandBadge}>OSS CONTROL CENTER</div>
-          <h1 style={loginHeroTitle}>Satış ekibini tek panelden yönet.</h1>
-          <p style={loginHeroText}>
-            Müşteri havuzu, rep performansı, randevular ve satış durumları tek ekranda.
-          </p>
+          <h1 style={loginHeroTitle}>Müşteri takip sistemi.</h1>
+<p style={loginHeroText}>
+  Müşterilerinizi, görüşme notlarını, randevuları ve satış süreçlerini tek ekrandan takip edin.
+</p>
           <div style={loginFeatureGrid}>
-            <div style={loginFeature}>Müşteri Havuzu</div>
-            <div style={loginFeature}>Rep Takibi</div>
-            <div style={loginFeature}>Excel Data Yükleme</div>
-            <div style={loginFeature}>Güvenli Giriş</div>
+            <div style={loginFeature}>Müşteri Takibi</div>
+<div style={loginFeature}>Görüşme Notları</div>
+<div style={loginFeature}>Randevu Yönetimi</div>
+<div style={loginFeature}>Güvenli Giriş</div>
           </div>
         </div>
 
@@ -456,21 +469,21 @@ console.log("LOG ERROR", logError);
     );
 
   const followUps = customers.filter((c) =>
-    ["called", "appointment", "meeting_done", "not_approved"].includes(c.status)
+    ["called", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(c.status)
   );
 
-  const pageTitle =
-    profile.role === "boss"
-      ? "Boss Panel"
-      : profile.role === "manager"
-      ? "Manager Panel"
-      : "Rep Panel";
+const pageTitle =
+  profile.role === "boss"
+    ? `Hoşgeldiniz ${welcomeName}`
+    : profile.role === "manager"
+    ? `Hoşgeldiniz ${welcomeName}`
+    : `Hoşgeldiniz ${welcomeName}`;
 
   return (
     <div style={appShell}>
       <aside style={sidebar}>
         <h2 style={logoText}>OSS</h2>
-        <p style={sideEmail}>{profile.email}</p>
+        <p style={sideEmail}>{roleName(profile.role)}</p>
 
         <MenuButton title="Dashboard" page="dashboard" activePage={activePage} setActivePage={setActivePage} />
         <MenuButton title="Müşteriler" page="customers" activePage={activePage} setActivePage={setActivePage} onClickExtra={() => setCustomerFilter("all")} />
@@ -480,6 +493,8 @@ console.log("LOG ERROR", logError);
     <MenuButton title="Yeni Gelenler" page="rep_new" activePage={activePage} setActivePage={setActivePage} />
     <MenuButton title="Arandı" page="rep_called" activePage={activePage} setActivePage={setActivePage} />
     <MenuButton title="Randevu" page="rep_appointment" activePage={activePage} setActivePage={setActivePage} />
+    <MenuButton title="Sözleşmeli Randevu" page="rep_contract" activePage={activePage} setActivePage={setActivePage} />
+<MenuButton title="Tekrar Aranacak" page="rep_callback" activePage={activePage} setActivePage={setActivePage} />
     <MenuButton title="Yapmayacak" page="rep_not_approved" activePage={activePage} setActivePage={setActivePage} />
     <MenuButton title="Satış" page="rep_paid" activePage={activePage} setActivePage={setActivePage} />
   </>
@@ -656,6 +671,44 @@ console.log("LOG ERROR", logError);
   />
 )}
 
+{activePage === "rep_contract" && (
+  <CustomerTable
+    title="Sözleşmeli Randevular"
+    data={visibleCustomers.filter((c) => c.status === "contract_appointment")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
+{activePage === "rep_callback" && (
+  <CustomerTable
+    title="Tekrar Aranacaklar"
+    data={visibleCustomers.filter((c) => c.status === "callback")}
+    employees={employees}
+    profile={profile}
+    assignCustomer={assignCustomer}
+    setSelectedCustomer={setSelectedCustomer}
+    loadCustomerLogs={loadCustomerLogs}
+    searchTerm={searchTerm}
+    setSearchTerm={setSearchTerm}
+    selectedIds={selectedIds}
+    setSelectedIds={setSelectedIds}
+    bulkEmployee={bulkEmployee}
+    setBulkEmployee={setBulkEmployee}
+    bulkAssignCustomers={bulkAssignCustomers}
+  />
+)}
+
 {activePage === "rep_paid" && (
   <CustomerTable
     title="Satış Yapılan Müşteriler"
@@ -752,17 +805,34 @@ console.log("LOG ERROR", logError);
         )}
 
         {activePage === "reports" && (
-          <div style={panelCard}>
-            <h2>Rapor Merkezi</h2>
-            <p>Toplam Müşteri: {customers.length}</p>
-            <p>Havuz: {customers.filter(c => c.status === "pool").length}</p>
-            <p>Aranan: {customers.filter(c => c.status === "called").length}</p>
-            <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
-            <p>Yapmayacak: {customers.filter(c => c.status === "not_approved").length}</p>
-            <p>Onaylanan: {customers.filter(c => c.status === "approved").length}</p>
-            <p>Satış: {customers.filter(c => c.status === "paid").length}</p>
-          </div>
-        )}
+  <div style={panelCard}>
+    <h2>Rapor Merkezi</h2>
+
+    {profile.role === "employee" ? (
+      <>
+        <p>Bana Atanan: {visibleCustomers.length}</p>
+        <p>Yeni: {visibleCustomers.filter(c => c.status === "assigned").length}</p>
+        <p>Aranan: {visibleCustomers.filter(c => c.status === "called").length}</p>
+        <p>Tekrar Aranacak: {visibleCustomers.filter(c => c.status === "callback").length}</p>
+        <p>Randevu: {visibleCustomers.filter(c => c.status === "appointment").length}</p>
+        <p>Sözleşmeli Randevu: {visibleCustomers.filter(c => c.status === "contract_appointment").length}</p>
+        <p>Yapmayacak: {visibleCustomers.filter(c => c.status === "not_approved").length}</p>
+        <p>Satış: {visibleCustomers.filter(c => c.status === "paid").length}</p>
+      </>
+    ) : (
+      <>
+        <p>Toplam Müşteri: {customers.length}</p>
+        <p>Havuz: {customers.filter(c => c.status === "pool").length}</p>
+        <p>Aranan: {customers.filter(c => c.status === "called").length}</p>
+        <p>Tekrar Aranacak: {customers.filter(c => c.status === "callback").length}</p>
+        <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
+        <p>Sözleşmeli Randevu: {customers.filter(c => c.status === "contract_appointment").length}</p>
+        <p>Yapmayacak: {customers.filter(c => c.status === "not_approved").length}</p>
+        <p>Satış: {customers.filter(c => c.status === "paid").length}</p>
+      </>
+    )}
+  </div>
+)}
 
         {selectedCustomer && (
          <CustomerModal
@@ -848,12 +918,14 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
         <textarea defaultValue={selectedCustomer.info_note || ""} id="detailNote" placeholder="Müşteri notu..." style={{ ...inputStyle, height: 160 }} />
 
         <select id="detailStatus" defaultValue={selectedCustomer.status} style={inputStyle}>
-          <option value="pool">Havuz / Aranmadı</option>
-          <option value="called">Arandı</option>
-          <option value="appointment">Randevu</option>
-          <option value="not_approved">Yapmayacak</option>
-          <option value="approved">Onaylandı</option>
-          <option value="paid">Para Alındı</option>
+          <option value="assigned">Yeni</option>
+<option value="called">Arandı</option>
+<option value="callback">Tekrar Aranacak</option>
+<option value="appointment">Randevu</option>
+<option value="contract_appointment">Sözleşmeli Randevu</option>
+<option value="not_approved">Yapmayacak</option>
+<option value="approved">Onaylandı</option>
+<option value="paid">Para Alındı</option>
         </select>
 
         <button
@@ -1066,6 +1138,8 @@ function statusLabel(status) {
     assigned: "Yeni",
     called: "Arandı",
     appointment: "Randevu",
+    contract_appointment: "Sözleşmeli Randevu",
+callback: "Tekrar Aranacak",
     meeting_done: "Görüşüldü",
     not_approved: "Yapmayacak",
     approved: "Onaylandı",
@@ -1075,15 +1149,17 @@ function statusLabel(status) {
 }
 
 function statusBadge(status) {
-  const colors = {
-    pool: "#64748b",
-    assigned: "#2563eb",
-    called: "#0ea5e9",
-    appointment: "#f59e0b",
-    not_approved: "#ef4444",
-    approved: "#22c55e",
-    paid: "#16a34a",
-  };
+ const colors = {
+  pool: "#64748b",
+  assigned: "#2563eb",
+  called: "#f97316",
+  callback: "#a855f7",
+  appointment: "#eab308",
+  contract_appointment: "#06b6d4",
+  not_approved: "#ef4444",
+  approved: "#22c55e",
+  paid: "#059669",
+};
 
   return {
     background: colors[status] || "#334155",
@@ -1172,10 +1248,10 @@ const loginPage = { minHeight: "100vh", background: `radial-gradient(circle at t
 const loginLeft = { maxWidth: 620 };
 const brandBadge = { display: "inline-block", background: "rgba(37,99,235,0.25)", border: "1px solid rgba(147,197,253,0.35)", padding: "8px 14px", borderRadius: 999, fontSize: 13, letterSpacing: 1, marginBottom: 22 };
 const loginHeroTitle = { fontSize: 56, lineHeight: 1.05, margin: "0 0 20px 0" };
-const loginHeroText = { fontSize: 18, lineHeight: 1.6, opacity: 0.75, maxWidth: 520 };
+const loginHeroText = { fontSize: 18, lineHeight: 1.6, opacity: 0.9, maxWidth: 520 };
 const loginFeatureGrid = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, marginTop: 35, maxWidth: 500 };
 const loginFeature = { background: "rgba(15,23,42,0.7)", border: "1px solid rgba(148,163,184,0.2)", padding: 16, borderRadius: 16 };
-const loginCard = { background: "rgba(15,23,42,0.82)", border: "1px solid rgba(148,163,184,0.25)", boxShadow: "0 30px 80px rgba(0,0,0,0.45)", backdropFilter: "blur(16px)", padding: 34, borderRadius: 24 };
+const loginCard = { background: "rgba(15,23,42,0.82)", border: "1px solid rgba(148,163,184,0.25)", boxShadow: "0 30px 80px rgba(0,0,0,0.45)",  backdropFilter: "blur(16px)", padding: 34, borderRadius: 24 ,color: "white", };
 const loginInput = { width: "100%", padding: "14px 15px", marginBottom: 16, boxSizing: "border-box", borderRadius: 12, border: "1px solid #334155", background: "#020617", color: "white" };
 const loginButton = { width: "100%", padding: 14, borderRadius: 12, border: "none", background: "linear-gradient(135deg,#2563eb,#123b7a)", color: "white", fontWeight: "bold", cursor: "pointer" };
 const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 12, borderRadius: 10, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
