@@ -416,6 +416,25 @@ console.log("LOG ERROR", logError);
     alert("Kaydedildi.");
   }
 
+  function exportCustomersToExcel(data, fileName = "oss-crm-rapor.xlsx") {
+    const rows = data.map((c) => ({
+      "Ad Soyad": `${c.first_name || ""} ${c.last_name || ""}`.trim(),
+      Telefon: c.phone || "",
+      "Telefon 2": c.phone_2 || "",
+      "TC No": c.tc_no || "",
+      Data: c.batch_name || "",
+      "Sayfa No": c.batch_page || "",
+      Durum: statusLabel(c.status),
+      "Takip Tarihi": formatDateTime(c.appointment_date),
+      "Atanan": users.find((u) => u.id === c.assigned_employee)?.full_name || "",
+      Not: c.info_note || "",
+    }));
+    const sheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "Musteriler");
+    XLSX.writeFile(workbook, fileName);
+  }
+
   if (!profile) {
     return (
       <div style={loginPage}>
@@ -474,12 +493,25 @@ console.log("LOG ERROR", logError);
 
 const welcomeName = profile.full_name || profile.email || "Kullanıcı";
 
-const pageTitle =
-  profile.role === "boss"
-    ? `Hoşgeldiniz ${welcomeName}`
-    : profile.role === "manager"
-    ? `Hoşgeldiniz ${welcomeName}`
-    : `Hoşgeldiniz ${welcomeName}`;
+const today = new Date();
+const reminderCustomers = visibleCustomers
+  .filter((c) => c.appointment_date && ["callback", "appointment", "contract_appointment"].includes(c.status))
+  .sort((a, b) => new Date(a.appointment_date) - new Date(b.appointment_date));
+const todayReminders = reminderCustomers.filter((c) => isSameDay(c.appointment_date, today));
+const reportCustomers = profile.role === "employee" ? visibleCustomers : customers;
+const repStats = users
+  .filter((u) => u.role === "employee")
+  .map((u) => ({ ...u, stats: getUserStats(customers, u.id) }))
+  .sort((a, b) => b.stats.paid - a.stats.paid || b.stats.appointment - a.stats.appointment);
+const reportStats = [
+  { key: "pool", title: "Havuz", value: reportCustomers.filter((c) => c.status === "pool").length },
+  { key: "called", title: "Aranan", value: reportCustomers.filter((c) => c.status === "called").length },
+  { key: "callback", title: "Tekrar Aranacak", value: reportCustomers.filter((c) => c.status === "callback").length },
+  { key: "appointment", title: "Randevu", value: reportCustomers.filter((c) => c.status === "appointment").length },
+  { key: "contract_appointment", title: "Sözleşmeli Randevu", value: reportCustomers.filter((c) => c.status === "contract_appointment").length },
+  { key: "not_approved", title: "Yapmayacak", value: reportCustomers.filter((c) => c.status === "not_approved").length },
+  { key: "paid", title: "Satış", value: reportCustomers.filter((c) => c.status === "paid").length },
+];
 
   return (
     <div style={appShell}>
@@ -510,6 +542,9 @@ const pageTitle =
           <MenuButton title={`Takip Gerekenler (${followUps.length})`} page="followups" activePage={activePage} setActivePage={setActivePage} />
         )}
 
+        <MenuButton title={`Hatırlatmalar (${todayReminders.length})`} page="reminders" activePage={activePage} setActivePage={setActivePage} />
+        <MenuButton title="Takvim" page="calendar" activePage={activePage} setActivePage={setActivePage} />
+
         {profile.role !== "employee" && (
           <MenuButton title="Çalışanlar" page="employees" activePage={activePage} setActivePage={setActivePage} />
         )}
@@ -519,9 +554,10 @@ const pageTitle =
 
       <main style={mainArea}>
         <header style={topbar}>
-          <div>
-            <h1>{pageTitle}</h1>
-            <p style={{ opacity: 0.7 }}>{roleName(profile.role)}</p>
+          <div style={welcomeBlock}>
+            <span style={welcomeEyebrow}>Hoş geldiniz</span>
+            <h1 style={welcomeTitle}>{welcomeName}</h1>
+            <p style={welcomeMeta}>{roleName(profile.role)}</p>
           </div>
           <button onClick={logout} style={logoutButton}>Çıkış</button>
         </header>
@@ -768,6 +804,33 @@ const pageTitle =
           />
         )}
 
+        {activePage === "reminders" && (
+          <CustomerTable
+            title="Bugünkü Hatırlatmalar"
+            data={todayReminders}
+            employees={employees}
+            profile={profile}
+            assignCustomer={assignCustomer}
+            setSelectedCustomer={setSelectedCustomer}
+            loadCustomerLogs={loadCustomerLogs}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
+            bulkEmployee={bulkEmployee}
+            setBulkEmployee={setBulkEmployee}
+            bulkAssignCustomers={bulkAssignCustomers}
+          />
+        )}
+
+        {activePage === "calendar" && (
+          <CalendarView
+            customers={reminderCustomers}
+            setSelectedCustomer={setSelectedCustomer}
+            loadCustomerLogs={loadCustomerLogs}
+          />
+        )}
+
         {activePage === "employees" && (
           <div style={panelCard}>
             <h2>Çalışanlar ve Managerlar</h2>
@@ -807,34 +870,14 @@ const pageTitle =
         )}
 
         {activePage === "reports" && (
-  <div style={panelCard}>
-    <h2>Rapor Merkezi</h2>
-
-    {profile.role === "employee" ? (
-      <>
-        <p>Bana Atanan: {visibleCustomers.length}</p>
-        <p>Yeni: {visibleCustomers.filter(c => c.status === "assigned").length}</p>
-        <p>Aranan: {visibleCustomers.filter(c => c.status === "called").length}</p>
-        <p>Tekrar Aranacak: {visibleCustomers.filter(c => c.status === "callback").length}</p>
-        <p>Randevu: {visibleCustomers.filter(c => c.status === "appointment").length}</p>
-        <p>Sözleşmeli Randevu: {visibleCustomers.filter(c => c.status === "contract_appointment").length}</p>
-        <p>Yapmayacak: {visibleCustomers.filter(c => c.status === "not_approved").length}</p>
-        <p>Satış: {visibleCustomers.filter(c => c.status === "paid").length}</p>
-      </>
-    ) : (
-      <>
-        <p>Toplam Müşteri: {customers.length}</p>
-        <p>Havuz: {customers.filter(c => c.status === "pool").length}</p>
-        <p>Aranan: {customers.filter(c => c.status === "called").length}</p>
-        <p>Tekrar Aranacak: {customers.filter(c => c.status === "callback").length}</p>
-        <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
-        <p>Sözleşmeli Randevu: {customers.filter(c => c.status === "contract_appointment").length}</p>
-        <p>Yapmayacak: {customers.filter(c => c.status === "not_approved").length}</p>
-        <p>Satış: {customers.filter(c => c.status === "paid").length}</p>
-      </>
-    )}
-  </div>
-)}
+          <ReportsView
+            profile={profile}
+            customers={reportCustomers}
+            reportStats={reportStats}
+            repStats={repStats}
+            exportCustomersToExcel={exportCustomersToExcel}
+          />
+        )}
 
         {selectedCustomer && (
          <CustomerModal
@@ -846,6 +889,93 @@ const pageTitle =
 />
         )}
       </main>
+    </div>
+  );
+}
+
+function ReportsView({ profile, customers, reportStats, repStats, exportCustomersToExcel }) {
+  const maxValue = Math.max(...reportStats.map((item) => item.value), 1);
+
+  return (
+    <div style={reportsLayout}>
+      <section style={panelCard}>
+        <div style={sectionHeader}>
+          <div>
+            <h2 style={sectionTitle}>Rapor Merkezi</h2>
+            <p style={mutedText}>{profile.role === "employee" ? "Kendi müşteri performansın" : "Genel operasyon özeti"}</p>
+          </div>
+          <button type="button" onClick={() => exportCustomersToExcel(customers)} style={smallButton}>
+            Excel Dışa Aktar
+          </button>
+        </div>
+
+        <div style={chartList}>
+          {reportStats.map((item) => (
+            <div key={item.key} style={chartRow}>
+              <div style={chartLabel}>
+                <strong>{item.title}</strong>
+                <span>{item.value}</span>
+              </div>
+              <div style={chartTrack}>
+                <div style={{ ...chartBar, width: `${Math.max((item.value / maxValue) * 100, item.value ? 8 : 0)}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {profile.role !== "employee" && (
+        <section style={panelCard}>
+          <h2 style={sectionTitle}>En İyi Rep Tablosu</h2>
+          {repStats.length === 0 && <p style={mutedText}>Henüz rep bulunmuyor.</p>}
+          {repStats.map((rep, index) => (
+            <div key={rep.id} style={leaderRow}>
+              <strong>#{index + 1} {rep.full_name || rep.email}</strong>
+              <span>Müşteri: {rep.stats.total}</span>
+              <span>Randevu: {rep.stats.appointment}</span>
+              <span>Satış: {rep.stats.paid}</span>
+            </div>
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function CalendarView({ customers, setSelectedCustomer, loadCustomerLogs }) {
+  const grouped = customers.reduce((acc, customer) => {
+    const key = formatDate(customer.appointment_date);
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(customer);
+    return acc;
+  }, {});
+  const days = Object.keys(grouped).sort((a, b) => new Date(a) - new Date(b));
+
+  return (
+    <div style={panelCard}>
+      <h2 style={sectionTitle}>Takvim</h2>
+      {days.length === 0 && <p style={mutedText}>Planlanmış geri arama veya randevu yok.</p>}
+      <div style={calendarGrid}>
+        {days.map((day) => (
+          <div key={day} style={calendarDay}>
+            <h3>{day}</h3>
+            {grouped[day].map((customer) => (
+              <button
+                key={customer.id}
+                type="button"
+                style={calendarItem}
+                onClick={() => {
+                  setSelectedCustomer(customer);
+                  loadCustomerLogs(customer.id);
+                }}
+              >
+                <strong>{customer.first_name} {customer.last_name}</strong>
+                <span>{formatTime(customer.appointment_date)} - {statusLabel(customer.status)}</span>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -917,7 +1047,16 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           <button type="button" style={quickActionButton}>Web Sitesi</button>
         </div>
 
-        <textarea defaultValue={selectedCustomer.info_note || ""} id="detailNote" placeholder="Müşteri notu..." style={{ ...inputStyle, height: 160 }} />
+        <label style={fieldLabel}>Tarihli not</label>
+        <textarea defaultValue={selectedCustomer.info_note || ""} id="detailNote" placeholder="Müşteri notu..." style={{ ...inputStyle, height: 140 }} />
+
+        <label style={fieldLabel}>Geri arama / randevu tarihi</label>
+        <input
+          id="detailAppointment"
+          type="datetime-local"
+          defaultValue={toDateTimeInputValue(selectedCustomer.appointment_date)}
+          style={inputStyle}
+        />
 
         <select id="detailStatus" defaultValue={selectedCustomer.status} style={inputStyle}>
           <option value="assigned">Yeni</option>
@@ -935,6 +1074,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           onClick={() =>
             updateCustomer(selectedCustomer.id, {
               info_note: document.getElementById("detailNote").value,
+              appointment_date: document.getElementById("detailAppointment").value || null,
               status: document.getElementById("detailStatus").value,
               approved: ["approved", "paid"].includes(document.getElementById("detailStatus").value),
               payment_received: document.getElementById("detailStatus").value === "paid",
@@ -1039,12 +1179,13 @@ function CustomerTable({
 
       <div style={tableWrapper}>
         <div style={tableHeader}>
-          {canManage && <div>Seç</div>}
+          <div>{canManage ? "Seç" : ""}</div>
           <div>Müşteri</div>
           <div>Telefon</div>
           <div>Telefon 2</div>
           <div>TC No</div>
           <div>Data</div>
+          <div>Takip</div>
           <div>Durum</div>
           <div>Atanan</div>
           <div>İşlem</div>
@@ -1052,9 +1193,11 @@ function CustomerTable({
 
         {data.map((c) => (
           <div key={c.id} style={tableRow}>
+            <div>
             {canManage && (
               <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleSelected(c.id)} />
             )}
+            </div>
 
             <div style={{ fontWeight: "bold" }}>{c.first_name} {c.last_name}</div>
 
@@ -1062,6 +1205,7 @@ function CustomerTable({
             <div>{c.phone_2 ? <a href={`tel:${c.phone_2}`} style={phoneLink}>{c.phone_2}</a> : "-"}</div>
             <div>{c.tc_no || "-"}</div>
             <div>{c.batch_name || "-"}</div>
+            <div>{formatDateTime(c.appointment_date)}</div>
             <div><span style={statusBadge(c.status)}>{statusLabel(c.status)}</span></div>
 
             <div>
@@ -1114,6 +1258,54 @@ function ClickStat({ title, value, onClick }) {
       <h2>{value}</h2>
     </div>
   );
+}
+
+function toDateTimeInputValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return offsetDate.toISOString().slice(0, 16);
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDate(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleDateString("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
+
+function formatTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function isSameDay(value, date) {
+  if (!value) return false;
+  const target = new Date(value);
+  if (Number.isNaN(target.getTime())) return false;
+  return target.getFullYear() === date.getFullYear() &&
+    target.getMonth() === date.getMonth() &&
+    target.getDate() === date.getDate();
 }
 
 function getUserStats(customers, userId) {
@@ -1184,7 +1376,11 @@ const sidebar = { width: 250, background: `linear-gradient(180deg, ${parliamentD
 const logoText = { fontSize: 32, letterSpacing: 2, marginBottom: 8 };
 const sideEmail = { fontSize: 12, opacity: 0.65, marginBottom: 25 };
 const mainArea = { flex: 1, padding: 28, overflowX: "hidden" };
-const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 };
+const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24 };
+const welcomeBlock = { minWidth: 0 };
+const welcomeEyebrow = { display: "block", fontSize: 13, opacity: 0.65, marginBottom: 4 };
+const welcomeTitle = { margin: 0, fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
+const welcomeMeta = { margin: "6px 0 0", opacity: 0.7 };
 const menuButton = { width: "100%", padding: 13, marginBottom: 11, background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.12)", borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: "bold" };
 const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 0 0 2px rgba(37,99,235,0.18)" };
 const logoutButton = { padding: "12px 22px", borderRadius: 12, border: "none", cursor: "pointer", fontWeight: "bold" };
@@ -1199,24 +1395,24 @@ const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "n
 const tableWrapper = { width: "100%", overflowX: "auto", background: "#071a36", borderRadius: 14 };
 const tableHeader = {
   display: "grid",
-  gridTemplateColumns: "140px 110px 110px 115px 120px 95px 120px 75px",
+  gridTemplateColumns: "62px 150px 112px 112px 112px 130px 135px 115px 130px 80px",
   gap: 6,
   padding: 10,
   background: parliamentMid,
   fontWeight: "bold",
-  minWidth: 885,
+  minWidth: 1140,
   fontSize: 12,
 };
 
 const tableRow = {
   display: "grid",
-  gridTemplateColumns: "140px 110px 110px 115px 120px 95px 120px 75px",
+  gridTemplateColumns: "62px 150px 112px 112px 112px 130px 135px 115px 130px 80px",
   gap: 6,
   alignItems: "center",
   padding: 10,
   background: "#10284f",
   borderBottom: "1px solid rgba(147,197,253,0.16)",
-  minWidth: 885,
+  minWidth: 1140,
   fontSize: 12,
 };
 const selectStyle = { width: "100%", padding: 8, borderRadius: 8 };
@@ -1245,6 +1441,20 @@ const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 
 const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
 const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: "bold" };
 const logBox = { background: "#071a36", padding: 12, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const fieldLabel = { display: "block", margin: "12px 0 6px", fontWeight: "bold", fontSize: 13, color: "#bfdbfe" };
+const reportsLayout = { display: "grid", gap: 18 };
+const sectionHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, marginBottom: 18 };
+const sectionTitle = { marginTop: 0, marginBottom: 6 };
+const mutedText = { margin: 0, opacity: 0.7 };
+const chartList = { display: "grid", gap: 14 };
+const chartRow = { display: "grid", gap: 8 };
+const chartLabel = { display: "flex", justifyContent: "space-between", gap: 12 };
+const chartTrack = { height: 12, borderRadius: 999, background: "#071a36", overflow: "hidden", border: "1px solid rgba(147,197,253,0.18)" };
+const chartBar = { height: "100%", borderRadius: 999, background: "linear-gradient(90deg,#38bdf8,#22c55e)" };
+const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px", gap: 10, alignItems: "center", background: "#071a36", padding: 12, borderRadius: 12, marginTop: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginTop: 16 };
+const calendarDay = { background: "#071a36", padding: 14, borderRadius: 14, border: "1px solid rgba(147,197,253,0.18)" };
+const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: "1px solid rgba(147,197,253,0.18)", background: "#10284f", color: "white", cursor: "pointer" };
 
 const loginPage = { minHeight: "100vh", background: `radial-gradient(circle at top left, ${parliament} 0, ${parliamentDark} 38%, #020617 100%)`, display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: "white", fontFamily: "Arial" };
 const loginLeft = { maxWidth: 620 };
