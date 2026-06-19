@@ -472,6 +472,8 @@ console.log("LOG ERROR", logError);
     ["called", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(c.status)
   );
 
+const welcomeName = profile.full_name || profile.email || "Kullanıcı";
+
 const pageTitle =
   profile.role === "boss"
     ? `Hoşgeldiniz ${welcomeName}`
