@@ -1014,6 +1014,24 @@ function CustomerForm({ form, setForm, addCustomer }) {
 }
 
 function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users }) {
+  const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
+  const [detailNote, setDetailNote] = useState(selectedCustomer.info_note || "");
+
+  function saveCustomer() {
+    if (detailStatus === "not_approved" && !detailNote.trim()) {
+      alert("Yapmayacak durumunda rep, nedeni not olarak yazmalı.");
+      return;
+    }
+
+    updateCustomer(selectedCustomer.id, {
+      info_note: detailNote.trim(),
+      appointment_date: document.getElementById("detailAppointment").value || null,
+      status: detailStatus,
+      approved: ["approved", "paid"].includes(detailStatus),
+      payment_received: detailStatus === "paid",
+    });
+  }
+
   return (
     <div style={modalBg}>
       <div style={modalCard}>
@@ -1058,8 +1076,15 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           <button type="button" style={quickActionButton}>Web Sitesi</button>
         </div>
 
-        <label style={fieldLabel}>Tarihli not</label>
-        <textarea defaultValue={selectedCustomer.info_note || ""} id="detailNote" placeholder="Müşteri notu..." style={{ ...inputStyle, height: 140 }} />
+        <label style={fieldLabel}>
+          {detailStatus === "not_approved" ? "Yapmama nedeni (zorunlu)" : "İşlem notu"}
+        </label>
+        <textarea
+          value={detailNote}
+          onChange={(e) => setDetailNote(e.target.value)}
+          placeholder={detailStatus === "not_approved" ? "Müşteri neden yapmayacağını yazın..." : "Müşteri notu..."}
+          style={{ ...inputStyle, height: 140 }}
+        />
 
         <label style={fieldLabel}>Geri arama / randevu tarihi</label>
         <input
@@ -1069,7 +1094,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           style={inputStyle}
         />
 
-        <select id="detailStatus" defaultValue={selectedCustomer.status} style={inputStyle}>
+        <select value={detailStatus} onChange={(e) => setDetailStatus(e.target.value)} style={inputStyle}>
           <option value="assigned">Yeni</option>
 <option value="called">Arandı</option>
 <option value="callback">Tekrar Aranacak</option>
@@ -1082,15 +1107,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
 
         <button
           style={primaryButton}
-          onClick={() =>
-            updateCustomer(selectedCustomer.id, {
-              info_note: document.getElementById("detailNote").value,
-              appointment_date: document.getElementById("detailAppointment").value || null,
-              status: document.getElementById("detailStatus").value,
-              approved: ["approved", "paid"].includes(document.getElementById("detailStatus").value),
-              payment_received: document.getElementById("detailStatus").value === "paid",
-            })
-          }
+          onClick={saveCustomer}
         >
           Kaydet
         </button>
