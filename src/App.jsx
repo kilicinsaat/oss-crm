@@ -26,6 +26,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkEmployee, setBulkEmployee] = useState("");
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(null);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -106,12 +107,27 @@ function App() {
   }
 
   async function loadCustomers() {
-    const { data, error } = await supabase
-      .from("customers")
-      .select("*")
-      .order("created_at", { ascending: false });
+    const pageSize = 1000;
+    const allCustomers = [];
 
-    if (!error) setCustomers(data || []);
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await supabase
+        .from("customers")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, from + pageSize - 1);
+
+      if (error) {
+        alert("Müşteriler yüklenemedi: " + error.message);
+        return;
+      }
+
+      allCustomers.push(...(data || []));
+      if (!data || data.length < pageSize) break;
+    }
+
+    setCustomers(allCustomers);
   }
 
   async function loadUsers() {
@@ -143,24 +159,34 @@ function App() {
 
     try {
       setImporting(true);
+      setImportProgress({ phase: "Excel okunuyor", current: 0, total: 0 });
 
       const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer);
+      const workbook = XLSX.read(buffer, { type: "array" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
 
-      const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
       const isPhone = (value) => {
-        const d = cleanDigits(value);
+        const d = normalizePhone(value);
         return d.length === 10 && d.startsWith("5");
       };
       const isTc = (value) => {
-        const d = cleanDigits(value);
+        const d = String(value || "").replace(/\D/g, "");
         return d.length === 11 && !d.startsWith("05");
       };
+      const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
 
-      const mappedRows = rows
-        .map((row, index) => {
+      const preparedRows = [];
+      const filePhones = new Set();
+      const currentPhones = new Set(
+        customers.flatMap((customer) => [customer.phone, customer.phone_2]).map(normalizePhone).filter(Boolean)
+      );
+      let incompleteRows = 0;
+      let duplicateRows = 0;
+
+      setImportProgress({ phase: "Satırlar kontrol ediliyor", current: 0, total: rows.length });
+
+      rows.forEach((row, index) => {
           const values = Object.values(row);
           const keys = Object.keys(row);
 
@@ -197,15 +223,22 @@ function App() {
             values.map((v) => cleanDigits(v)).find((v) => isTc(v)) ||
             "";
 
-          if (!fullName && !phoneValue) return null;
+          const normalizedPhone = normalizePhone(phoneValue);
+          if (normalizedPhone && (filePhones.has(normalizedPhone) || currentPhones.has(normalizedPhone))) {
+            duplicateRows += 1;
+            return;
+          }
+
+          if (!fullName || !normalizedPhone) incompleteRows += 1;
+          if (normalizedPhone) filePhones.add(normalizedPhone);
 
           const parts = String(fullName).trim().split(/\s+/);
 
-          return {
+          preparedRows.push({
             first_name: parts.slice(0, -1).join(" ") || String(fullName),
             last_name: parts.length > 1 ? parts.at(-1) : "",
-            phone: phoneValue,
-            phone_2: phone2Value,
+            phone: normalizedPhone || null,
+            phone_2: normalizePhone(phone2Value) || null,
             tc_no: tcValue,
             email: "",
             batch_name: file.name,
@@ -216,40 +249,40 @@ function App() {
             payment_received: false,
             created_by: profile.id,
             last_action_by: profile.id,
-          };
-        })
-        .filter(Boolean);
+          });
 
-      const phoneList = mappedRows.map((r) => r.phone).filter(Boolean);
-      const { data: existing } = await supabase
-        .from("customers")
-        .select("phone")
-        .in("phone", phoneList);
-
-      const existingPhones = new Set((existing || []).map((x) => x.phone));
-      const cleanRows = mappedRows.filter((r) => !existingPhones.has(r.phone));
+          if ((index + 1) % 1000 === 0 || index === rows.length - 1) {
+            setImportProgress({ phase: "Satırlar kontrol ediliyor", current: index + 1, total: rows.length });
+          }
+        });
 
       let imported = 0;
+      const batchSize = 500;
 
-      for (let i = 0; i < cleanRows.length; i += 100) {
-        const chunk = cleanRows.slice(i, i + 100);
-        const { error } = await supabase.from("customers").insert(chunk);
+      for (let i = 0; i < preparedRows.length; i += batchSize) {
+        const chunk = preparedRows.slice(i, i + batchSize);
+        setImportProgress({ phase: "Supabase'e kaydediliyor", current: i, total: preparedRows.length });
+        const { error } = await supabase
+          .from("customers")
+          .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true });
 
         if (error) {
-          alert("Yükleme hatası: " + error.message);
-          setImporting(false);
+          alert("Yükleme durdu: " + error.message);
           return;
         }
 
         imported += chunk.length;
+        setImportProgress({ phase: "Supabase'e kaydediliyor", current: imported, total: preparedRows.length });
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
 
-      alert(`${imported} müşteri yüklendi. ${mappedRows.length - cleanRows.length} mükerrer atlandı.`);
+      alert(`${imported} müşteri yükleme için işlendi. ${incompleteRows} satırda eksik ad veya telefon var; yine de yüklendi. ${duplicateRows} mükerrer satır atlandı.`);
       await loadCustomers();
     } catch (err) {
       alert("Excel okunamadı: " + err.message);
     } finally {
       setImporting(false);
+      setImportProgress(null);
       e.target.value = "";
     }
   }
@@ -266,6 +299,8 @@ function App() {
 
     const { error } = await supabase.from("customers").insert({
       ...form,
+      phone: normalizePhone(form.phone) || null,
+      phone_2: normalizePhone(form.phone_2) || null,
       batch_page: form.batch_page ? Number(form.batch_page) : null,
       appointment_date: form.appointment_date || null,
       status: "pool",
@@ -350,6 +385,42 @@ function App() {
     alert("Rep profili silindi, atanmış müşteriler havuza döndü.");
     await loadUsers();
     await loadCustomers();
+  }
+
+  async function deleteAllCustomerData() {
+    if (!profile || profile.role !== "boss") return;
+    if (customers.length === 0) {
+      alert("Silinecek müşteri kaydı yok.");
+      return;
+    }
+
+    if (!window.confirm(`${customers.length} müşteri ve tüm işlem geçmişi kalıcı olarak silinsin mi? Bu işlem geri alınamaz.`)) return;
+
+    const { error: logError } = await supabase
+      .from("customer_logs")
+      .delete()
+      .not("id", "is", null);
+
+    if (logError) {
+      alert("İşlem geçmişi silinemedi: " + logError.message);
+      return;
+    }
+
+    const { error } = await supabase
+      .from("customers")
+      .delete()
+      .not("id", "is", null);
+
+    if (error) {
+      alert("Müşteriler silinemedi: " + error.message);
+      return;
+    }
+
+    setSelectedCustomer(null);
+    setCustomerLogs([]);
+    setSelectedIds([]);
+    await loadCustomers();
+    alert("Tüm müşteri verisi temizlendi.");
   }
 
   async function assignCustomer(customerId, employeeId) {
@@ -509,7 +580,10 @@ console.log("LOG ERROR", logError);
     );
   }
 
-  const employees = users.filter((u) => u.role === "employee");
+  const employees = users.filter((u) => ["employee", "manager"].includes(u.role));
+  const managerCustomers = profile.role === "manager"
+    ? customers.filter((customer) => customer.assigned_employee === profile.id)
+    : [];
 
   const visibleCustomers =
     profile.role === "employee"
@@ -584,7 +658,7 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
         </div>
         {sidebarCollapsed && (
           <div style={brandMarkFrame} title="OSS Center">
-            <img src="/oss-center-logo.png" alt="OSS Center" style={brandMark} />
+            <img src="/oss-center-mark.png" alt="OSS Center" style={brandMark} />
           </div>
         )}
 
@@ -602,6 +676,10 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
     <MenuButton icon="₺" title="Satış" page="rep_paid" tone="paid" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
   </>
 )}
+
+        {profile.role === "manager" && (
+          <MenuButton icon="◉" title={`Müşterilerim (${managerCustomers.length})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        )}
 
         {profile.role !== "employee" && (
           <MenuButton icon="+" title="Yeni Müşteri Havuzu" page="pool" tone="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -677,8 +755,22 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
             {profile.role === "boss" && (
               <div style={{ ...panelCard, marginTop: 20 }}>
                 <h2>Excel / CSV Data Yükle</h2>
-                <input type="file" accept=".xlsx,.xls,.csv" onChange={importExcel} style={inputStyle} />
-                {importing && <p>Yükleniyor, bekle kanka...</p>}
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={importExcel} disabled={importing} style={inputStyle} />
+                {importing && (
+                  <div style={importProgressBox}>
+                    <div style={chartLabel}>
+                      <span>{importProgress?.phase || "Yükleniyor"}</span>
+                      <strong>{importProgress?.total ? `${importProgress.current.toLocaleString("tr-TR")} / ${importProgress.total.toLocaleString("tr-TR")}` : "Hazırlanıyor"}</strong>
+                    </div>
+                    <div style={chartTrack}>
+                      <div style={{ ...chartBar, width: `${importProgress?.total ? Math.max((importProgress.current / importProgress.total) * 100, 2) : 12}%` }} />
+                    </div>
+                  </div>
+                )}
+                <div style={dataActions}>
+                  <span style={mutedText}>Yeniden yükleme öncesi mevcut müşteri listesini temizleyebilirsin.</span>
+                  <button type="button" onClick={deleteAllCustomerData} style={deleteAllButton}>Tüm Müşteri Datasını Sil</button>
+                </div>
               </div>
             )}
 
@@ -692,6 +784,25 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
           <CustomerTable
             title="Müşteriler"
             data={filteredCustomers}
+            employees={employees}
+            profile={profile}
+            assignCustomer={assignCustomer}
+            setSelectedCustomer={setSelectedCustomer}
+            loadCustomerLogs={loadCustomerLogs}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
+            bulkEmployee={bulkEmployee}
+            setBulkEmployee={setBulkEmployee}
+            bulkAssignCustomers={bulkAssignCustomers}
+          />
+        )}
+
+        {activePage === "manager_customers" && (
+          <CustomerTable
+            title="Müşterilerim"
+            data={managerCustomers}
             employees={employees}
             profile={profile}
             assignCustomer={assignCustomer}
@@ -1506,7 +1617,7 @@ function CustomerTable({
       onChange={(e) => setBulkEmployee(e.target.value)}
       style={selectStyle}
     >
-      <option value="">Rep seç</option>
+      <option value="">Rep / manager seç</option>
       {employees.map((emp) => (
         <option key={emp.id} value={emp.id}>
           {emp.full_name || emp.email}
@@ -1777,10 +1888,10 @@ const cardBlue = "#10284f";
 const appShell = { width: "100%", minWidth: 0, minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Segoe UI, Arial, sans-serif" };
 const sidebar = { background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)", transition: "width 180ms ease, padding 180ms ease", flexShrink: 0 };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
-const brandBlock = { width: 152, minWidth: 0 };
+const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 8, background: "linear-gradient(135deg,#f0f9ff,#bae6fd)", border: "1px solid rgba(125,211,252,0.72)", boxShadow: "0 8px 20px rgba(2,6,23,0.2)" };
 const brandLogo = { display: "block", width: "100%", height: "auto" };
-const brandMarkFrame = { width: 46, height: 44, overflow: "hidden", margin: "-6px auto 16px", borderRadius: 8 };
-const brandMark = { display: "block", height: 44, width: "auto", maxWidth: "none" };
+const brandMarkFrame = { width: 46, height: 48, display: "grid", placeItems: "center", margin: "-4px auto 14px" };
+const brandMark = { display: "block", width: 42, height: "auto" };
 const sideEmail = { fontSize: 12, color: "#bfdbfe", margin: "6px 0 16px" };
 const mainArea = { flex: 1, minWidth: 0, padding: "24px 32px", overflowX: "hidden" };
 const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24 };
@@ -1883,6 +1994,9 @@ const busyButton = { borderColor: "rgba(251,191,36,0.55)", color: "#fde68a" };
 const callbackButton = { borderColor: "rgba(192,132,252,0.55)", color: "#d8b4fe" };
 const appointmentButton = { borderColor: "rgba(251,191,36,0.6)", background: "rgba(180,83,9,0.32)", color: "#fde68a" };
 const duplicateWarning = { marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", fontSize: 13, lineHeight: 1.45 };
+const dataActions = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8, paddingTop: 14, borderTop: "1px solid rgba(147,197,253,0.16)" };
+const deleteAllButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(252,165,165,0.6)", background: "rgba(127,29,29,0.56)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
+const importProgressBox = { display: "grid", gap: 8, margin: "4px 0 14px", padding: 12, borderRadius: 8, background: "rgba(7,26,54,0.62)", border: "1px solid rgba(125,211,252,0.2)", fontSize: 13 };
 const customerHeatBar = { height: 4, borderRadius: 999, marginBottom: 16, opacity: 0.95 };
 const customerSummary = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 9, margin: "-4px 0 16px" };
 const heatBadge = { padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600 };
