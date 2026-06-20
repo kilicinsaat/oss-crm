@@ -31,8 +31,13 @@ create table if not exists public.app_messages (
   sender_id uuid not null references public.profiles(id) on delete cascade,
   recipient_id uuid references public.profiles(id) on delete cascade,
   body text not null check (char_length(trim(body)) between 1 and 2000),
+  attachment_url text,
+  attachment_name text,
+  attachment_type text,
+  reply_to_id bigint references public.app_messages(id) on delete set null,
   created_at timestamptz not null default now(),
-  read_at timestamptz
+  read_at timestamptz,
+  edited_at timestamptz
 );
 
 create index if not exists app_messages_created_idx
@@ -62,12 +67,21 @@ create policy "Authenticated users send messages"
     and (recipient_id is null or recipient_id <> auth.uid())
   );
 
-drop policy if exists "Recipients mark messages read" on public.app_messages;
-create policy "Recipients mark messages read"
-  on public.app_messages for update
-  to authenticated
-  using (recipient_id = auth.uid())
-  with check (recipient_id = auth.uid());
+create or replace function public.mark_messages_read(p_sender_id uuid)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update public.app_messages
+  set read_at = coalesce(read_at, now())
+  where recipient_id = auth.uid()
+    and sender_id = p_sender_id
+    and read_at is null;
+$$;
+
+revoke all on function public.mark_messages_read(uuid) from public;
+grant execute on function public.mark_messages_read(uuid) to authenticated;
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('avatars', 'avatars', true, 5242880, array['image/jpeg', 'image/png', 'image/webp'])

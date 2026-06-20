@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "./lib/supabase";
 import * as XLSX from "xlsx";
 
@@ -61,6 +61,10 @@ function App() {
   const [onlineUserIds, setOnlineUserIds] = useState([]);
   const [messageTarget, setMessageTarget] = useState("general");
   const [messageBody, setMessageBody] = useState("");
+  const [messageAttachment, setMessageAttachment] = useState(null);
+  const [replyToMessage, setReplyToMessage] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
+  const [sendingMessage, setSendingMessage] = useState(false);
   const [messagingError, setMessagingError] = useState("");
   const [profileForm, setProfileForm] = useState({ full_name: "", job_title: "", phone: "", bio: "", avatar_url: "", availability_status: "online" });
   const [newPassword, setNewPassword] = useState("");
@@ -359,31 +363,106 @@ function App() {
   async function sendMessage(event) {
     event.preventDefault();
     const body = messageBody.trim();
-    if (!body || !profile) return;
+    if ((!body && !messageAttachment) || !profile) return;
+    setSendingMessage(true);
+
+    if (editingMessage) {
+      const { data, error } = await supabase
+        .from("app_messages")
+        .update({ body, edited_at: new Date().toISOString() })
+        .eq("id", editingMessage.id)
+        .eq("sender_id", profile.id)
+        .select("*")
+        .single();
+      setSendingMessage(false);
+      if (error) {
+        setMessagingError("Mesaj düzenlenemedi: " + error.message);
+        return;
+      }
+      setMessages((current) => current.map((message) => message.id === data.id ? data : message));
+      setMessageBody("");
+      setEditingMessage(null);
+      return;
+    }
+
+    let attachment = {};
+    if (messageAttachment) {
+      if (messageAttachment.size > 10 * 1024 * 1024) {
+        setSendingMessage(false);
+        alert("Mesaj eki en fazla 10 MB olabilir.");
+        return;
+      }
+      const safeName = messageAttachment.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+      const path = `${profile.id}/${Date.now()}-${safeName}`;
+      const { error: uploadError } = await supabase.storage.from("chat-files").upload(path, messageAttachment, { cacheControl: "3600" });
+      if (uploadError) {
+        setSendingMessage(false);
+        setMessagingError("Dosya yüklenemedi: " + uploadError.message);
+        return;
+      }
+      const { data: publicData } = supabase.storage.from("chat-files").getPublicUrl(path);
+      attachment = {
+        attachment_url: publicData.publicUrl,
+        attachment_name: messageAttachment.name,
+        attachment_type: messageAttachment.type || "application/octet-stream",
+      };
+    }
+
     const recipientId = messageTarget === "general" ? null : messageTarget;
     const { data, error } = await supabase
       .from("app_messages")
-      .insert({ sender_id: profile.id, recipient_id: recipientId, body })
+      .insert({
+        sender_id: profile.id,
+        recipient_id: recipientId,
+        body: body || messageAttachment?.name || "Dosya",
+        reply_to_id: replyToMessage?.id || null,
+        ...attachment,
+      })
       .select("*")
       .single();
+    setSendingMessage(false);
 
     if (error) {
       setMessagingError("Mesaj gönderilemedi: " + error.message);
       return;
     }
     setMessageBody("");
+    setMessageAttachment(null);
+    setReplyToMessage(null);
     setMessages((current) => current.some((message) => message.id === data.id) ? current : [...current, data]);
+  }
+
+  function beginEditMessage(message) {
+    setEditingMessage(message);
+    setReplyToMessage(null);
+    setMessageAttachment(null);
+    setMessageBody(message.body);
+  }
+
+  async function deleteMessage(message) {
+    if (!profile || message.sender_id !== profile.id) return;
+    if (!confirm("Bu mesaj silinsin mi?")) return;
+    const { error } = await supabase
+      .from("app_messages")
+      .delete()
+      .eq("id", message.id)
+      .eq("sender_id", profile.id);
+    if (error) {
+      setMessagingError("Mesaj silinemedi: " + error.message);
+      return;
+    }
+    setMessages((current) => current.filter((item) => item.id !== message.id));
+    if (replyToMessage?.id === message.id) setReplyToMessage(null);
+    if (editingMessage?.id === message.id) {
+      setEditingMessage(null);
+      setMessageBody("");
+    }
   }
 
   async function selectConversation(targetId) {
     setMessageTarget(targetId);
     if (targetId === "general" || !profile) return;
-    await supabase
-      .from("app_messages")
-      .update({ read_at: new Date().toISOString() })
-      .eq("recipient_id", profile.id)
-      .eq("sender_id", targetId)
-      .is("read_at", null);
+    await supabase.rpc("mark_messages_read", { p_sender_id: targetId });
     setMessages((current) => current.map((message) =>
       message.recipient_id === profile.id && message.sender_id === targetId
         ? { ...message, read_at: message.read_at || new Date().toISOString() }
@@ -1440,6 +1519,15 @@ const unreadMessageCount = messages.filter((message) => message.recipient_id ===
             sendMessage={sendMessage}
             messagingError={messagingError}
             onlineUserIds={onlineUserIds}
+            messageAttachment={messageAttachment}
+            setMessageAttachment={setMessageAttachment}
+            replyToMessage={replyToMessage}
+            setReplyToMessage={setReplyToMessage}
+            editingMessage={editingMessage}
+            setEditingMessage={setEditingMessage}
+            beginEditMessage={beginEditMessage}
+            deleteMessage={deleteMessage}
+            sendingMessage={sendingMessage}
           />
         )}
 
@@ -1584,15 +1672,40 @@ function AccountView({ profile, profileForm, setProfileForm, saveOwnProfile, upl
   );
 }
 
-function MessagingView({ profile, users, messages, messageTarget, selectConversation, messageBody, setMessageBody, sendMessage, messagingError, onlineUserIds }) {
-  const contacts = users.filter((user) => user.id !== profile.id);
-  const activeContact = contacts.find((user) => user.id === messageTarget);
-  const visibleMessages = messages.filter((message) => {
-    if (messageTarget === "general") return message.recipient_id === null;
-    return (message.sender_id === profile.id && message.recipient_id === messageTarget)
-      || (message.sender_id === messageTarget && message.recipient_id === profile.id);
-  });
+function MessagingView({ profile, users, messages, messageTarget, selectConversation, messageBody, setMessageBody, sendMessage, messagingError, onlineUserIds, messageAttachment, setMessageAttachment, replyToMessage, setReplyToMessage, editingMessage, setEditingMessage, beginEditMessage, deleteMessage, sendingMessage }) {
+  const [contactSearch, setContactSearch] = useState("");
+  const [messageSearch, setMessageSearch] = useState("");
+  const messageEndRef = useRef(null);
+  const allContacts = users.filter((user) => user.id !== profile.id);
+  const contacts = allContacts
+    .filter((user) => `${user.full_name || ""} ${user.email || ""}`.toLowerCase().includes(contactSearch.toLowerCase()))
+    .sort((a, b) => {
+      const lastFor = (id) => messages.filter((message) =>
+        (message.sender_id === profile.id && message.recipient_id === id)
+        || (message.sender_id === id && message.recipient_id === profile.id)
+      ).at(-1)?.created_at || "";
+      return lastFor(b.id).localeCompare(lastFor(a.id));
+    });
+  const activeContact = allContacts.find((user) => user.id === messageTarget);
+  const visibleMessages = messages
+    .filter((message) => {
+      if (messageTarget === "general") return message.recipient_id === null;
+      return (message.sender_id === profile.id && message.recipient_id === messageTarget)
+        || (message.sender_id === messageTarget && message.recipient_id === profile.id);
+    })
+    .filter((message) => `${message.body} ${message.attachment_name || ""}`.toLowerCase().includes(messageSearch.toLowerCase()));
   const userMap = new Map([...users, profile].map((user) => [user.id, user]));
+  const messageMap = new Map(messages.map((message) => [message.id, message]));
+
+  useEffect(() => {
+    messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messageTarget, visibleMessages.length]);
+
+  function cancelComposerMode() {
+    setReplyToMessage(null);
+    setEditingMessage(null);
+    setMessageBody("");
+  }
 
   return (
     <div className="messaging-layout" style={messagingLayout}>
@@ -1601,6 +1714,7 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
           <span style={welcomeEyebrow}>İletişim</span>
           <h2 style={sectionTitle}>Mesajlar</h2>
         </div>
+        <input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="Çalışan ara..." style={contactSearchInput} />
         <button type="button" onClick={() => selectConversation("general")} style={messageTarget === "general" ? conversationButtonActive : conversationButton}>
           <span style={generalAvatar}>#</span>
           <span><strong>Genel</strong><small style={contactRole}>Tüm ofis</small></span>
@@ -1608,12 +1722,17 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
         <div style={contactDivider}>Çalışanlar</div>
         {contacts.map((contact) => {
           const unread = messages.filter((message) => message.sender_id === contact.id && message.recipient_id === profile.id && !message.read_at).length;
+          const lastMessage = messages.filter((message) =>
+            (message.sender_id === profile.id && message.recipient_id === contact.id)
+            || (message.sender_id === contact.id && message.recipient_id === profile.id)
+          ).at(-1);
           return (
             <button key={contact.id} type="button" onClick={() => selectConversation(contact.id)} style={messageTarget === contact.id ? conversationButtonActive : conversationButton}>
               <ProfileAvatar user={contact} size={38} />
               <span style={contactCopy}>
                 <strong>{contact.full_name || contact.email}</strong>
                 <small style={contactRole}>{contact.job_title || roleName(contact.role)}</small>
+                {lastMessage && <small style={lastMessagePreview}>{lastMessage.sender_id === profile.id ? "Sen: " : ""}{lastMessage.body}</small>}
                 <PresenceBadge user={contact} onlineUserIds={onlineUserIds} compact />
               </span>
               {unread > 0 && <span style={unreadBadge}>{unread}</span>}
@@ -1631,6 +1750,7 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
               ? <p style={mutedText}>Ofis kanalı</p>
               : <PresenceBadge user={activeContact} onlineUserIds={onlineUserIds} />}
           </div>
+          <input value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Mesajlarda ara..." style={messageSearchInput} />
         </header>
 
         {messagingError ? (
@@ -1638,25 +1758,58 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
         ) : (
           <div style={messageStream}>
             {visibleMessages.length === 0 && <div style={emptyConversation}>Henüz mesaj yok.</div>}
-            {visibleMessages.map((message) => {
+            {visibleMessages.map((message, index) => {
               const mine = message.sender_id === profile.id;
               const sender = userMap.get(message.sender_id);
+              const repliedMessage = message.reply_to_id ? messageMap.get(message.reply_to_id) : null;
+              const previous = visibleMessages[index - 1];
+              const showDate = !previous || formatDate(previous.created_at) !== formatDate(message.created_at);
               return (
-                <div key={message.id} style={{ ...messageLine, justifyContent: mine ? "flex-end" : "flex-start" }}>
-                  <div style={mine ? ownMessageBubble : messageBubble}>
-                    {messageTarget === "general" && !mine && <strong style={messageSender}>{sender?.full_name || sender?.email || "Kullanıcı"}</strong>}
-                    <p style={messageText}>{message.body}</p>
-                    <small style={messageTime}>{formatTime(message.created_at)}</small>
+                <div key={message.id}>
+                  {showDate && <div style={messageDateDivider}><span>{formatDate(message.created_at)}</span></div>}
+                  <div style={{ ...messageLine, justifyContent: mine ? "flex-end" : "flex-start" }}>
+                    <div style={mine ? ownMessageBubble : messageBubble}>
+                      {messageTarget === "general" && !mine && <strong style={messageSender}>{sender?.full_name || sender?.email || "Kullanıcı"}</strong>}
+                      {repliedMessage && <div style={replyPreview}><strong>{userMap.get(repliedMessage.sender_id)?.full_name || "Mesaj"}</strong><span>{repliedMessage.body}</span></div>}
+                      <p style={messageText}>{message.body}</p>
+                      {message.attachment_url && (
+                        message.attachment_type?.startsWith("image/")
+                          ? <a href={message.attachment_url} target="_blank" rel="noreferrer"><img src={message.attachment_url} alt={message.attachment_name || "Mesaj görseli"} style={messageImage} /></a>
+                          : <a href={message.attachment_url} target="_blank" rel="noreferrer" style={fileAttachment}>▤ {message.attachment_name || "Dosyayı aç"}</a>
+                      )}
+                      <div style={messageMetaRow}>
+                        <small style={messageTime}>{message.edited_at ? "düzenlendi · " : ""}{formatTime(message.created_at)}{mine && message.recipient_id ? (message.read_at ? " · Okundu" : " · İletildi") : ""}</small>
+                        <span style={messageActions}>
+                          <button type="button" title="Yanıtla" style={messageActionButton} onClick={() => { setReplyToMessage(message); setEditingMessage(null); }}>↩</button>
+                          {mine && <button type="button" title="Düzenle" style={messageActionButton} onClick={() => beginEditMessage(message)}>✎</button>}
+                          {mine && <button type="button" title="Sil" style={{ ...messageActionButton, color: "#fca5a5" }} onClick={() => deleteMessage(message)}>×</button>}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               );
             })}
+            <div ref={messageEndRef} />
           </div>
         )}
 
         <form onSubmit={sendMessage} style={messageComposer}>
-          <textarea rows={2} maxLength={2000} placeholder="Mesaj yaz..." value={messageBody} onChange={(event) => setMessageBody(event.target.value)} style={messageInput} disabled={!!messagingError} />
-          <button type="submit" style={sendMessageButton} disabled={!messageBody.trim() || !!messagingError} title="Gönder" aria-label="Mesaj gönder">➤</button>
+          {(replyToMessage || editingMessage) && (
+            <div style={composerContext}>
+              <div><strong>{editingMessage ? "Mesaj düzenleniyor" : "Yanıtlanıyor"}</strong><span>{(editingMessage || replyToMessage).body}</span></div>
+              <button type="button" onClick={cancelComposerMode} style={composerCloseButton}>×</button>
+            </div>
+          )}
+          {messageAttachment && <div style={attachmentSelection}><span>▤ {messageAttachment.name}</span><button type="button" style={composerCloseButton} onClick={() => setMessageAttachment(null)}>×</button></div>}
+          <div style={composerRow}>
+            <label style={attachButton} title="Dosya ekle">
+              +
+              <input type="file" accept="image/*,.pdf,.txt,.csv,.xls,.xlsx,.doc,.docx" hidden disabled={!!messagingError || !!editingMessage} onChange={(event) => setMessageAttachment(event.target.files?.[0] || null)} />
+            </label>
+            <textarea rows={2} maxLength={2000} placeholder="Mesaj yaz..." value={messageBody} onChange={(event) => setMessageBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} style={messageInput} disabled={!!messagingError || sendingMessage} />
+            <button type="submit" style={sendMessageButton} disabled={(!messageBody.trim() && !messageAttachment) || !!messagingError || sendingMessage} title="Gönder" aria-label="Mesaj gönder">➤</button>
+          </div>
         </form>
       </section>
     </div>
@@ -2664,23 +2817,38 @@ const availabilityBusyActive = { ...availabilityButton, background: "rgba(194,65
 const messagingLayout = { height: "calc(100vh - 142px)", minHeight: 560, display: "grid", gridTemplateColumns: "280px minmax(0,1fr)", overflow: "hidden", borderRadius: 8, border: "1px solid rgba(147,197,253,0.22)", background: "rgba(7,26,54,0.72)" };
 const conversationSidebar = { minWidth: 0, overflowY: "auto", padding: 12, borderRight: "1px solid rgba(147,197,253,0.18)", background: "rgba(5,20,43,0.88)" };
 const conversationHeading = { padding: "6px 8px 14px" };
+const contactSearchInput = { width: "100%", boxSizing: "border-box", marginBottom: 10, padding: "9px 10px", borderRadius: 7, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
 const conversationButton = { width: "100%", minHeight: 58, display: "flex", alignItems: "center", gap: 10, padding: 9, marginBottom: 6, borderRadius: 8, border: "1px solid transparent", background: "transparent", color: "#e0f2fe", textAlign: "left", cursor: "pointer", font: "inherit" };
 const conversationButtonActive = { ...conversationButton, background: "rgba(37,99,235,0.28)", borderColor: "rgba(125,211,252,0.36)" };
 const generalAvatar = { width: 38, height: 38, minWidth: 38, display: "grid", placeItems: "center", borderRadius: 8, background: "rgba(13,148,136,0.32)", color: "#5eead4", fontSize: 20, fontWeight: 900, border: "1px solid rgba(94,234,212,0.34)" };
 const contactCopy = { minWidth: 0, flex: 1, display: "grid", overflow: "hidden" };
 const contactRole = { display: "block", color: "#94a3b8", fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+const lastMessagePreview = { display: "block", marginTop: 2, color: "#64748b", fontSize: 10, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
 const contactDivider = { margin: "14px 8px 8px", color: "#64748b", fontSize: 11, fontWeight: 800, textTransform: "uppercase" };
 const unreadBadge = { minWidth: 21, height: 21, display: "grid", placeItems: "center", padding: "0 5px", boxSizing: "border-box", borderRadius: 999, background: "#22d3ee", color: "#082f49", fontSize: 11, fontWeight: 900 };
 const chatPanel = { minWidth: 0, minHeight: 0, display: "grid", gridTemplateRows: "auto minmax(0,1fr) auto", background: "linear-gradient(145deg,rgba(16,40,79,0.7),rgba(2,16,39,0.76))" };
 const chatHeader = { display: "flex", alignItems: "center", gap: 11, padding: "13px 16px", borderBottom: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.74)" };
+const messageSearchInput = { width: "min(240px,35%)", marginLeft: "auto", padding: "8px 10px", boxSizing: "border-box", borderRadius: 7, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
 const messageStream = { minHeight: 0, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 9 };
 const messageLine = { display: "flex", width: "100%" };
 const messageBubble = { maxWidth: "min(72%,680px)", padding: "9px 12px", borderRadius: "8px 8px 8px 2px", background: "#17355f", border: "1px solid rgba(147,197,253,0.18)", boxShadow: "0 5px 14px rgba(0,0,0,0.14)" };
 const ownMessageBubble = { ...messageBubble, borderRadius: "8px 8px 2px 8px", background: "linear-gradient(135deg,#1d4ed8,#155e75)", borderColor: "rgba(125,211,252,0.3)" };
 const messageSender = { display: "block", marginBottom: 4, color: "#67e8f9", fontSize: 11 };
 const messageText = { color: "#f8fafc", lineHeight: 1.4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
-const messageTime = { display: "block", marginTop: 4, color: "rgba(226,232,240,0.66)", fontSize: 10, textAlign: "right" };
-const messageComposer = { display: "grid", gridTemplateColumns: "minmax(0,1fr) 48px", gap: 9, padding: 12, borderTop: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.84)" };
+const messageTime = { color: "rgba(226,232,240,0.66)", fontSize: 10 };
+const messageDateDivider = { display: "flex", alignItems: "center", justifyContent: "center", margin: "5px 0 12px", color: "#94a3b8", fontSize: 10 };
+const replyPreview = { display: "grid", gap: 2, marginBottom: 7, padding: "6px 8px", borderLeft: "3px solid #67e8f9", borderRadius: 4, background: "rgba(2,16,39,0.35)", color: "#cbd5e1", fontSize: 10, overflow: "hidden" };
+const messageImage = { display: "block", width: "min(320px,100%)", maxHeight: 240, objectFit: "cover", marginTop: 8, borderRadius: 7, border: "1px solid rgba(186,230,253,0.28)" };
+const fileAttachment = { display: "block", marginTop: 8, padding: "8px 10px", borderRadius: 7, background: "rgba(2,16,39,0.42)", color: "#bae6fd", textDecoration: "none", overflowWrap: "anywhere" };
+const messageMetaRow = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 5 };
+const messageActions = { display: "flex", alignItems: "center", gap: 3 };
+const messageActionButton = { width: 24, height: 24, display: "grid", placeItems: "center", padding: 0, borderRadius: 5, border: "1px solid rgba(147,197,253,0.15)", background: "rgba(2,16,39,0.28)", color: "#bfdbfe", cursor: "pointer", fontSize: 12 };
+const messageComposer = { padding: 12, borderTop: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.84)" };
+const composerRow = { display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 48px", gap: 9, alignItems: "end" };
+const composerContext = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, borderLeft: "3px solid #67e8f9", background: "rgba(8,145,178,0.12)", color: "#cbd5e1", fontSize: 11, overflow: "hidden" };
+const composerCloseButton = { width: 26, height: 26, flexShrink: 0, borderRadius: 5, border: 0, background: "rgba(148,163,184,0.16)", color: "#e2e8f0", cursor: "pointer" };
+const attachmentSelection = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, background: "rgba(37,99,235,0.13)", color: "#bfdbfe", fontSize: 11, overflowWrap: "anywhere" };
+const attachButton = { width: 42, height: 48, display: "grid", placeItems: "center", boxSizing: "border-box", borderRadius: 8, border: "1px solid rgba(125,211,252,0.35)", background: "#10284f", color: "#67e8f9", cursor: "pointer", fontSize: 23, fontWeight: 700 };
 const messageInput = { width: "100%", minHeight: 46, maxHeight: 110, resize: "vertical", boxSizing: "border-box", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.26)", background: "#061834", color: "#f8fafc" };
 const sendMessageButton = { width: 48, height: 48, alignSelf: "end", borderRadius: 8, border: "1px solid rgba(103,232,249,0.46)", background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "white", cursor: "pointer", fontSize: 19 };
 const emptyConversation = { margin: "auto", color: "#64748b", fontSize: 14 };
