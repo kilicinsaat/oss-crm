@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabase";
 import * as XLSX from "xlsx";
 
@@ -20,6 +20,26 @@ Herhangi bir sorunuz olursa bize ulaşabilirsiniz.
 `;
 const COMPANY_LOCATION_URL = "https://maps.app.goo.gl/c8cCAtc2671RzBZC9";
 
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function runWithRetry(operation, attempts = 3) {
+  let lastError;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const result = await operation();
+      if (!result?.error) return result;
+      lastError = result.error;
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < attempts - 1) await wait(400 * (attempt + 1));
+  }
+
+  return { data: null, error: lastError || new Error("Bağlantı kurulamadı.") };
+}
+
 function App() {
   const [customerLogs, setCustomerLogs] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
@@ -27,6 +47,7 @@ function App() {
   const [bulkEmployee, setBulkEmployee] = useState("");
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
+  const [dataLoading, setDataLoading] = useState(false);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -36,6 +57,15 @@ function App() {
   const [users, setUsers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [saleCelebration, setSaleCelebration] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [onlineUserIds, setOnlineUserIds] = useState([]);
+  const [messageTarget, setMessageTarget] = useState("general");
+  const [messageBody, setMessageBody] = useState("");
+  const [messagingError, setMessagingError] = useState("");
+  const [profileForm, setProfileForm] = useState({ full_name: "", job_title: "", phone: "", bio: "", avatar_url: "", availability_status: "online" });
+  const [newPassword, setNewPassword] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
@@ -64,87 +94,311 @@ function App() {
     role: "employee",
   });
 
+  useEffect(() => {
+    function handleEscape(event) {
+      if (event.key !== "Escape") return;
+      if (selectedCustomer) {
+        setSelectedCustomer(null);
+        return;
+      }
+      if (activePage !== "dashboard") setActivePage("dashboard");
+    }
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [activePage, selectedCustomer]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
+    let mounted = true;
+
+    async function refreshMessages() {
+      const { data, error } = await supabase
+        .from("app_messages")
+        .select("*")
+        .order("created_at", { ascending: true })
+        .limit(500);
+
+      if (!mounted) return;
+      if (error) {
+        setMessagingError("Mesajlaşma kurulumu için SQL dosyasını Supabase'te çalıştır.");
+        return;
+      }
+      setMessagingError("");
+      setMessages(data || []);
+    }
+
+    refreshMessages();
+    const channel = supabase
+      .channel(`crm-messages-${profile.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "app_messages" }, refreshMessages)
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
+    const presenceChannel = supabase.channel("office-presence", {
+      config: { presence: { key: profile.id } },
+    });
+
+    presenceChannel
+      .on("presence", { event: "sync" }, () => {
+        setOnlineUserIds(Object.keys(presenceChannel.presenceState()));
+      })
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          await presenceChannel.track({ user_id: profile.id, online_at: new Date().toISOString() });
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(presenceChannel);
+    };
+  }, [profile]);
+
   async function login(e) {
     e.preventDefault();
     setLoading(true);
 
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-    if (error) {
+      if (error) {
+        alert("Giriş hatası: " + error.message);
+        return;
+      }
+
+      const { data: userProfile, error: profileError } = await runWithRetry(() =>
+        supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", data.user.id)
+          .maybeSingle()
+      );
+
+      if (profileError || !userProfile) {
+        alert("Profil bulunamadı.");
+        return;
+      }
+
+      setProfile(userProfile);
+      setProfileForm({
+        full_name: userProfile.full_name || "",
+        job_title: userProfile.job_title || "",
+        phone: userProfile.phone || "",
+        bio: userProfile.bio || "",
+        avatar_url: userProfile.avatar_url || "",
+        availability_status: userProfile.availability_status || "online",
+      });
+      await Promise.all([loadCustomers(), loadUsers()]);
+    } catch (error) {
+      alert("Giriş sırasında bağlantı kurulamadı: " + (error.message || "Tekrar dene."));
+    } finally {
       setLoading(false);
-      alert("Giriş hatası: " + error.message);
-      return;
     }
-
-    const { data: userProfile, error: profileError } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", data.user.id)
-      .maybeSingle();
-
-    setLoading(false);
-
-    if (profileError || !userProfile) {
-      alert("Profil bulunamadı.");
-      return;
-    }
-
-    setProfile(userProfile);
-    await loadCustomers();
-    await loadUsers();
   }
 
   async function logout() {
-    await supabase.auth.signOut();
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      alert("Çıkış yapılamadı: " + error.message);
+      return;
+    }
     setProfile(null);
     setCustomers([]);
     setUsers([]);
     setCustomerLogs([]);
     setSelectedIds([]);
+    setMessages([]);
   }
 
   async function loadCustomers() {
     const pageSize = 1000;
     const allCustomers = [];
+    setDataLoading(true);
 
-    for (let from = 0; ; from += pageSize) {
-      const { data, error } = await supabase
-        .from("customers")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: false })
-        .range(from, from + pageSize - 1);
+    try {
+      for (let from = 0; ; from += pageSize) {
+        const { data, error } = await runWithRetry(() =>
+          supabase
+            .from("customers")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .range(from, from + pageSize - 1)
+        );
 
-      if (error) {
-        alert("Müşteriler yüklenemedi: " + error.message);
-        return;
+        if (error) {
+          alert("Müşteriler yüklenemedi: " + error.message);
+          return;
+        }
+
+        allCustomers.push(...(data || []));
+        if (!data || data.length < pageSize) break;
       }
 
-      allCustomers.push(...(data || []));
-      if (!data || data.length < pageSize) break;
+      setCustomers(allCustomers);
+    } finally {
+      setDataLoading(false);
     }
-
-    setCustomers(allCustomers);
   }
 
   async function loadUsers() {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("*")
-      .order("created_at", { ascending: false });
+    const { data, error } = await runWithRetry(() =>
+      supabase
+        .from("profiles")
+        .select("*")
+        .order("created_at", { ascending: false })
+    );
 
-    if (!error) setUsers(data || []);
+    if (error) {
+      alert("Kullanıcılar yüklenemedi: " + error.message);
+      return;
+    }
+
+    setUsers(data || []);
+  }
+
+  async function saveOwnProfile(event) {
+    event.preventDefault();
+    if (!profile) return;
+    const payload = {
+      full_name: profileForm.full_name.trim(),
+      job_title: profileForm.job_title.trim(),
+      phone: profileForm.phone.trim(),
+      bio: profileForm.bio.trim(),
+      avatar_url: profileForm.avatar_url || null,
+      availability_status: profileForm.availability_status || "online",
+      updated_at: new Date().toISOString(),
+    };
+
+    if (!payload.full_name) {
+      alert("Ad soyad boş bırakılamaz.");
+      return;
+    }
+
+    setSavingProfile(true);
+    const { data, error } = await runWithRetry(() =>
+      supabase.from("profiles").update(payload).eq("id", profile.id).select("*").single()
+    );
+    setSavingProfile(false);
+
+    if (error) {
+      alert("Profil kaydedilemedi: " + error.message);
+      return;
+    }
+
+    setProfile(data);
+    setUsers((current) => current.map((user) => user.id === data.id ? data : user));
+    alert("Profil bilgilerin güncellendi.");
+  }
+
+  async function uploadAvatar(event) {
+    const file = event.target.files?.[0];
+    if (!file || !profile) return;
+    if (!file.type.startsWith("image/")) {
+      alert("Lütfen bir görsel dosyası seç.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert("Profil fotoğrafı en fazla 5 MB olabilir.");
+      return;
+    }
+
+    setUploadingAvatar(true);
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+    const path = `${profile.id}/${Date.now()}-${safeName}`;
+    const { error: uploadError } = await supabase.storage.from("avatars").upload(path, file, { cacheControl: "3600" });
+
+    if (uploadError) {
+      setUploadingAvatar(false);
+      alert("Fotoğraf yüklenemedi: " + uploadError.message);
+      return;
+    }
+
+    const { data: publicData } = supabase.storage.from("avatars").getPublicUrl(path);
+    const avatarUrl = publicData.publicUrl;
+    const { error: profileError } = await runWithRetry(() =>
+      supabase.from("profiles").update({ avatar_url: avatarUrl, updated_at: new Date().toISOString() }).eq("id", profile.id)
+    );
+    setUploadingAvatar(false);
+
+    if (profileError) {
+      alert("Fotoğraf profil bilgisine eklenemedi: " + profileError.message);
+      return;
+    }
+
+    setProfile((current) => ({ ...current, avatar_url: avatarUrl }));
+    setProfileForm((current) => ({ ...current, avatar_url: avatarUrl }));
+    setUsers((current) => current.map((user) => user.id === profile.id ? { ...user, avatar_url: avatarUrl } : user));
+  }
+
+  async function changePassword(event) {
+    event.preventDefault();
+    if (newPassword.length < 6) {
+      alert("Yeni şifre en az 6 karakter olmalı.");
+      return;
+    }
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) {
+      alert("Şifre değiştirilemedi: " + error.message);
+      return;
+    }
+    setNewPassword("");
+    alert("Şifren başarıyla değiştirildi.");
+  }
+
+  async function sendMessage(event) {
+    event.preventDefault();
+    const body = messageBody.trim();
+    if (!body || !profile) return;
+    const recipientId = messageTarget === "general" ? null : messageTarget;
+    const { data, error } = await supabase
+      .from("app_messages")
+      .insert({ sender_id: profile.id, recipient_id: recipientId, body })
+      .select("*")
+      .single();
+
+    if (error) {
+      setMessagingError("Mesaj gönderilemedi: " + error.message);
+      return;
+    }
+    setMessageBody("");
+    setMessages((current) => current.some((message) => message.id === data.id) ? current : [...current, data]);
+  }
+
+  async function selectConversation(targetId) {
+    setMessageTarget(targetId);
+    if (targetId === "general" || !profile) return;
+    await supabase
+      .from("app_messages")
+      .update({ read_at: new Date().toISOString() })
+      .eq("recipient_id", profile.id)
+      .eq("sender_id", targetId)
+      .is("read_at", null);
+    setMessages((current) => current.map((message) =>
+      message.recipient_id === profile.id && message.sender_id === targetId
+        ? { ...message, read_at: message.read_at || new Date().toISOString() }
+        : message
+    ));
   }
 
   async function loadCustomerLogs(customerId) {
-  const { data, error } = await supabase
-    .from("customer_logs")
-    .select("*")
-    .eq("customer_id", customerId)
-    .order("created_at", { ascending: false });
+  const { data, error } = await runWithRetry(() =>
+    supabase
+      .from("customer_logs")
+      .select("*")
+      .eq("customer_id", customerId)
+      .order("created_at", { ascending: false })
+  );
 
   if (error) {
     alert("Geçmiş okunamadı: " + error.message);
@@ -164,7 +418,9 @@ function App() {
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: "array" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error("Excel içinde okunabilir bir sayfa bulunamadı.");
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+      if (rows.length === 0) throw new Error("Excel'in ilk sayfasında yüklenecek satır bulunamadı.");
 
       const isPhone = (value) => {
         const d = normalizePhone(value);
@@ -262,12 +518,14 @@ function App() {
       for (let i = 0; i < preparedRows.length; i += batchSize) {
         const chunk = preparedRows.slice(i, i + batchSize);
         setImportProgress({ phase: "Supabase'e kaydediliyor", current: i, total: preparedRows.length });
-        const { error } = await supabase
-          .from("customers")
-          .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true });
+        const { error } = await runWithRetry(() =>
+          supabase
+            .from("customers")
+            .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true })
+        );
 
         if (error) {
-          alert("Yükleme durdu: " + error.message);
+          alert(`Yükleme ${imported} müşteri sonrasında durdu: ${error.message}`);
           return;
         }
 
@@ -297,21 +555,26 @@ function App() {
       return;
     }
 
-    const { error } = await supabase.from("customers").insert({
-      ...form,
-      phone: normalizePhone(form.phone) || null,
-      phone_2: normalizePhone(form.phone_2) || null,
-      batch_page: form.batch_page ? Number(form.batch_page) : null,
-      appointment_date: form.appointment_date || null,
-      status: "pool",
-      approved: false,
-      payment_received: false,
-      created_by: profile.id,
-      last_action_by: profile.id,
-    });
+    let error;
+    try {
+      ({ error } = await supabase.from("customers").insert({
+        ...form,
+        phone: normalizePhone(form.phone) || null,
+        phone_2: normalizePhone(form.phone_2) || null,
+        batch_page: form.batch_page ? Number(form.batch_page) : null,
+        appointment_date: form.appointment_date || null,
+        status: "pool",
+        approved: false,
+        payment_received: false,
+        created_by: profile.id,
+        last_action_by: profile.id,
+      }));
+    } catch (requestError) {
+      error = requestError;
+    }
 
     if (error) {
-      alert("Müşteri eklenemedi: " + error.message);
+      alert("Müşteri eklenemedi: " + (error.message || "Bağlantı kurulamadı."));
       return;
     }
 
@@ -337,17 +600,27 @@ function App() {
     e.preventDefault();
     if (!profile) return;
 
-    const { error } = await supabase.from("profiles").insert({
-      id: staffForm.id,
-      email: staffForm.email,
-      full_name: staffForm.full_name,
-      role: staffForm.role,
-      is_active: true,
-      created_by: profile.id,
-    });
+    if (!staffForm.id.trim() || !staffForm.email.trim() || !staffForm.full_name.trim()) {
+      alert("Auth UID, ad soyad ve e-posta zorunlu.");
+      return;
+    }
+
+    let error;
+    try {
+      ({ error } = await supabase.from("profiles").insert({
+        id: staffForm.id.trim(),
+        email: staffForm.email.trim(),
+        full_name: staffForm.full_name.trim(),
+        role: staffForm.role,
+        is_active: true,
+        created_by: profile.id,
+      }));
+    } catch (requestError) {
+      error = requestError;
+    }
 
     if (error) {
-      alert("Kullanıcı eklenemedi: " + error.message);
+      alert("Kullanıcı eklenemedi: " + (error.message || "Bağlantı kurulamadı."));
       return;
     }
 
@@ -360,15 +633,15 @@ function App() {
     if (!profile || profile.role !== "boss" || staff.role !== "employee") return;
     if (!window.confirm(`${staff.full_name || staff.email} adlı rep profili silinsin mi? Atanmış müşterileri havuza geri dönecek.`)) return;
 
-    const assignedCustomerIds = customers
-      .filter((customer) => customer.assigned_employee === staff.id)
-      .map((customer) => customer.id);
+    const assignedCustomerCount = customers.filter((customer) => customer.assigned_employee === staff.id).length;
 
-    if (assignedCustomerIds.length > 0) {
-      const { error: customerError } = await supabase
-        .from("customers")
-        .update({ assigned_employee: null, status: "pool", assigned_at: null, last_action_by: profile.id })
-        .in("id", assignedCustomerIds);
+    if (assignedCustomerCount > 0) {
+      const { error: customerError } = await runWithRetry(() =>
+        supabase
+          .from("customers")
+          .update({ assigned_employee: null, status: "pool", assigned_at: null, last_action_by: profile.id })
+          .eq("assigned_employee", staff.id)
+      );
 
       if (customerError) {
         alert("Rep müşterileri havuza alınamadı: " + customerError.message);
@@ -376,7 +649,7 @@ function App() {
       }
     }
 
-    const { error } = await supabase.from("profiles").delete().eq("id", staff.id);
+    const { error } = await runWithRetry(() => supabase.from("profiles").delete().eq("id", staff.id));
     if (error) {
       alert("Rep profili silinemedi: " + error.message);
       return;
@@ -396,20 +669,24 @@ function App() {
 
     if (!window.confirm(`${customers.length} müşteri ve tüm işlem geçmişi kalıcı olarak silinsin mi? Bu işlem geri alınamaz.`)) return;
 
-    const { error: logError } = await supabase
-      .from("customer_logs")
-      .delete()
-      .not("id", "is", null);
+    const { error: logError } = await runWithRetry(() =>
+      supabase
+        .from("customer_logs")
+        .delete()
+        .not("id", "is", null)
+    );
 
     if (logError) {
       alert("İşlem geçmişi silinemedi: " + logError.message);
       return;
     }
 
-    const { error } = await supabase
-      .from("customers")
-      .delete()
-      .not("id", "is", null);
+    const { error } = await runWithRetry(() =>
+      supabase
+        .from("customers")
+        .delete()
+        .not("id", "is", null)
+    );
 
     if (error) {
       alert("Müşteriler silinemedi: " + error.message);
@@ -431,23 +708,23 @@ function App() {
     return;
   }
 
-  const { data, error } = await supabase
-    .from("customers")
-    .update({
-      assigned_employee: employeeId,
-      status: "assigned",
-      assigned_at: new Date().toISOString(),
-      last_action_by: profile.id,
-    })
-    .eq("id", customerId)
-    .select();
+  const { error } = await runWithRetry(() =>
+    supabase
+      .from("customers")
+      .update({
+        assigned_employee: employeeId,
+        status: "assigned",
+        assigned_at: new Date().toISOString(),
+        last_action_by: profile.id,
+      })
+      .eq("id", customerId)
+  );
 
   if (error) {
     alert("Atama hatası: " + error.message);
     return;
   }
 
-  console.log("ATAMA SONUCU:", data);
   alert("Müşteri rep'e atandı.");
   await loadCustomers();
 }
@@ -464,15 +741,17 @@ function App() {
     try {
       for (let index = 0; index < selectedIds.length; index += batchSize) {
         const customerIds = selectedIds.slice(index, index + batchSize);
-        const { error } = await supabase
-          .from("customers")
-          .update({
-            assigned_employee: bulkEmployee,
-            status: "assigned",
-            assigned_at: new Date().toISOString(),
-            last_action_by: profile.id,
-          })
-          .in("id", customerIds);
+        const { error } = await runWithRetry(() =>
+          supabase
+            .from("customers")
+            .update({
+              assigned_employee: bulkEmployee,
+              status: "assigned",
+              assigned_at: new Date().toISOString(),
+              last_action_by: profile.id,
+            })
+            .in("id", customerIds)
+        );
 
         if (error) throw error;
         assigned += customerIds.length;
@@ -494,38 +773,37 @@ function App() {
     if (!profile) return;
     const becamePaid = updates.status === "paid" && selectedCustomer?.status !== "paid";
 
-    const { error } = await supabase
-      .from("customers")
-      .update({ ...updates, last_action_by: profile.id })
-      .eq("id", customerId);
+    const { error } = await runWithRetry(() =>
+      supabase
+        .from("customers")
+        .update({ ...updates, last_action_by: profile.id })
+        .eq("id", customerId)
+    );
 
     if (error) {
       alert("Müşteri güncellenemedi: " + error.message);
       return;
     }
 
-    console.log("LOG INSERT TEST", {
-  customer_id: customerId,
-  user_id: profile.id,
-  old_status: selectedCustomer?.status,
-  new_status: updates.status,
-  note: updates.info_note,
-});
-
-    const { error: logError } = await supabase
-  .from("customer_logs")
-  .insert({
-    customer_id: customerId,
-    user_id: profile.id,
-    old_status: selectedCustomer?.status || null,
-    new_status: updates.status || null,
-    note: updates.info_note || "",
-  });
-
-console.log("LOG ERROR", logError);
+    let logError;
+    try {
+      ({ error: logError } = await supabase
+        .from("customer_logs")
+        .insert({
+          customer_id: customerId,
+          user_id: profile.id,
+          old_status: selectedCustomer?.status || null,
+          new_status: updates.status || null,
+          note: updates.info_note || "",
+        }));
+    } catch (requestError) {
+      logError = requestError;
+    }
 
     if (logError) {
-      alert("Log kaydedilemedi: " + logError.message);
+      await loadCustomers();
+      setSelectedCustomer((prev) => prev ? { ...prev, ...updates } : prev);
+      alert("Müşteri kaydedildi fakat işlem geçmişi kaydedilemedi: " + (logError.message || "Bağlantı kurulamadı."));
       return;
     }
 
@@ -578,15 +856,21 @@ console.log("LOG ERROR", logError);
           </div>
         </div>
 
-        <form onSubmit={login} style={loginCard}>
-          <h2>Hoş geldin</h2>
-          <p style={{ opacity: 0.65 }}>OSS paneline giriş yap</p>
-          <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} style={loginInput} />
-          <input placeholder="Şifre" type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={loginInput} />
-          <button disabled={loading} style={loginButton}>
-            {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
-          </button>
-        </form>
+        <div style={loginCardStack}>
+          <form onSubmit={login} style={loginCard}>
+            <h2>Hoş geldin</h2>
+            <p style={{ opacity: 0.65 }}>OSS paneline giriş yap</p>
+            <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} style={loginInput} />
+            <input placeholder="Şifre" type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={loginInput} />
+            <button disabled={loading} style={loginButton}>
+              {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
+            </button>
+          </form>
+          <div style={poweredByVercel}>
+            <span style={vercelMark}>▲</span>
+            <span>Powered by Vercel</span>
+          </div>
+        </div>
       </div>
     );
   }
@@ -646,6 +930,7 @@ const reportStats = [
 ];
 const dataStats = getDataStats(reportCustomers);
 const manualDuplicate = findDuplicateCustomer(customers, form.phone);
+const unreadMessageCount = messages.filter((message) => message.recipient_id === profile.id && !message.read_at).length;
 
   return (
     <div style={appShell}>
@@ -673,6 +958,8 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
           </div>
         )}
 
+        <MenuButton icon="●" title="Hesabım" page="account" tone="account" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="✉" title={`Mesajlar${unreadMessageCount ? ` (${unreadMessageCount})` : ""}`} page="messages" tone="messages" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="▦" title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="◉" title="Müşteriler" page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
 
@@ -713,34 +1000,47 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
 
       <main style={mainArea}>
         <header style={topbar}>
-          <div style={welcomeBlock}>
-            <span style={welcomeEyebrow}>Hoş geldiniz</span>
-            <h1 style={welcomeTitle}>{welcomeName}</h1>
-            <p style={welcomeMeta}>{roleName(profile.role)}</p>
+          <div style={topbarIdentity}>
+            {activePage !== "dashboard" && (
+              <button type="button" title="Dashboard'a dön" aria-label="Dashboard'a dön" style={backButton} onClick={() => setActivePage("dashboard")}>‹</button>
+            )}
+            <ProfileAvatar user={profile} size={48} />
+            <div style={welcomeBlock}>
+              <span style={welcomeEyebrow}>Hoş geldiniz</span>
+              <h1 style={welcomeTitle}>{welcomeName}</h1>
+              <div style={welcomeStatusRow}>
+                <p style={welcomeMeta}>{roleName(profile.role)}</p>
+                <PresenceBadge user={profile} onlineUserIds={onlineUserIds} />
+              </div>
+            </div>
           </div>
           <button onClick={logout} style={logoutButton}>Çıkış</button>
         </header>
 
+        {dataLoading && <div style={syncNotice}>Veriler güncelleniyor, lütfen bekleyin.</div>}
+
         {activePage === "dashboard" && (
           <>
             <div style={statsGrid}>
-              <ClickStat title={profile.role === "employee" ? "Benim Müşterilerim" : "Toplam Müşteri"} value={visibleCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
-              {profile.role !== "employee" && <ClickStat title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
-              <ClickStat title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
-              <ClickStat title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
-              <ClickStat title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
+              <ClickStat tone="total" title={profile.role === "employee" ? "Benim Müşterilerim" : "Toplam Müşteri"} value={visibleCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
+              {profile.role !== "employee" && <ClickStat tone="new" title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
+              <ClickStat tone="assigned" title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
+              <ClickStat tone="approved" title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
+              <ClickStat tone="paid" title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
             </div>
 
             <div style={dashboardGrid}>
-              <div style={panelCard}>
+              <div style={{ ...panelCard, ...pipelinePanel }}>
                 <h2>Operasyon Pipeline</h2>
-                {profile.role !== "employee" && <p>Yeni Müşteriler: {customers.filter(c => c.status === "pool").length}</p>}
-                <p>Atandı: {customers.filter(c => c.status === "assigned").length}</p>
-                <p>Arandı: {customers.filter(c => c.status === "called").length}</p>
-                <p>Randevu: {customers.filter(c => c.status === "appointment").length}</p>
-                <p>Yapmayacak: {customers.filter(c => c.status === "not_approved").length}</p>
-                <p>Onaylandı: {customers.filter(c => c.status === "approved").length}</p>
-                <p>Para Alındı: {customers.filter(c => c.status === "paid").length}</p>
+                <div style={pipelineList}>
+                  {profile.role !== "employee" && <PipelineRow label="Yeni Müşteriler" value={customers.filter(c => c.status === "pool").length} color="#38bdf8" />}
+                  {profile.role !== "employee" && <PipelineRow label="Atandı" value={customers.filter(c => c.status === "assigned").length} color="#818cf8" />}
+                  <PipelineRow label="Arandı" value={visibleCustomers.filter(c => c.status === "called").length} color="#fb923c" />
+                  <PipelineRow label="Randevu" value={visibleCustomers.filter(c => c.status === "appointment").length} color="#fbbf24" />
+                  <PipelineRow label="Yapmayacak" value={visibleCustomers.filter(c => c.status === "not_approved").length} color="#f87171" />
+                  <PipelineRow label="Onaylandı" value={visibleCustomers.filter(c => c.status === "approved").length} color="#4ade80" />
+                  <PipelineRow label="Para Alındı" value={visibleCustomers.filter(c => c.status === "paid").length} color="#34d399" />
+                </div>
               </div>
 
               <div style={panelCard}>
@@ -752,8 +1052,9 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
                   .slice(0, 5)
                   .map((u, index) => (
                     <div key={u.id} style={topRepRow}>
-                      <strong>#{index + 1} {u.full_name || u.email}</strong>
-                      <span>Satış: {u.stats.paid}</span>
+                      <span style={rankMedal(index)}>{index + 1}</span>
+                      <strong style={{ flex: 1 }}>{u.full_name || u.email}</strong>
+                      <span style={salesFigure}>₺ {u.stats.paid}</span>
                     </div>
                   ))}
               </div>
@@ -1073,12 +1374,16 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
               const stats = getUserStats(customers, u.id);
               return (
                 <div key={u.id} style={employeeRow}>
-                  <div>
-                    <strong>{u.full_name || "İsimsiz kullanıcı"}</strong>
-                    <p style={{ margin: 0, opacity: 0.7 }}>{u.email}</p>
-                    <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 13 }}>
-                      Müşteri: {stats.total} | Aranan: {stats.called} | Randevu: {stats.appointment} | Satış: {stats.paid}
-                    </p>
+                  <div style={employeeIdentity}>
+                    <ProfileAvatar user={u} size={46} />
+                    <div>
+                      <strong>{u.full_name || "İsimsiz kullanıcı"}</strong>
+                      <p style={{ margin: 0, opacity: 0.7 }}>{u.email}</p>
+                      <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 13 }}>
+                        Müşteri: {stats.total} | Aranan: {stats.called} | Randevu: {stats.appointment} | Satış: {stats.paid}
+                      </p>
+                      <PresenceBadge user={u} onlineUserIds={onlineUserIds} />
+                    </div>
                   </div>
                   <div style={staffActions}>
                     <span style={roleBadge}>{roleName(u.role)}</span>
@@ -1104,6 +1409,37 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
             repStats={repStats}
             dataStats={dataStats}
             exportCustomersToExcel={exportCustomersToExcel}
+          />
+        )}
+
+        {activePage === "account" && (
+          <AccountView
+            profile={profile}
+            profileForm={profileForm}
+            setProfileForm={setProfileForm}
+            saveOwnProfile={saveOwnProfile}
+            uploadAvatar={uploadAvatar}
+            uploadingAvatar={uploadingAvatar}
+            savingProfile={savingProfile}
+            newPassword={newPassword}
+            setNewPassword={setNewPassword}
+            changePassword={changePassword}
+            onlineUserIds={onlineUserIds}
+          />
+        )}
+
+        {activePage === "messages" && (
+          <MessagingView
+            profile={profile}
+            users={users}
+            messages={messages}
+            messageTarget={messageTarget}
+            selectConversation={selectConversation}
+            messageBody={messageBody}
+            setMessageBody={setMessageBody}
+            sendMessage={sendMessage}
+            messagingError={messagingError}
+            onlineUserIds={onlineUserIds}
           />
         )}
 
@@ -1143,18 +1479,22 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats, exp
           </button>
         </div>
 
-        <div style={chartList}>
-          {reportStats.map((item) => (
-            <div key={item.key} style={chartRow}>
-              <div style={chartLabel}>
-                <strong>{item.title}</strong>
-                <span>{item.value}</span>
+        <div className="report-chart-grid" style={chartList}>
+          {reportStats.map((item) => {
+            const visual = reportVisuals[item.key] || reportVisuals.pool;
+            return (
+              <div key={item.key} style={{ ...chartRow, background: visual.background, borderColor: visual.border }}>
+                <div style={reportChartHeader}>
+                  <span style={{ ...reportIcon, background: visual.iconBackground, color: visual.color }}>{visual.icon}</span>
+                  <strong style={reportChartTitle}>{item.title}</strong>
+                  <span style={{ ...reportFigure, color: visual.color }}>{item.value.toLocaleString("tr-TR")}</span>
+                </div>
+                <div style={chartTrack}>
+                  <div style={{ ...chartBar, width: `${Math.max((item.value / maxValue) * 100, item.value ? 8 : 0)}%`, background: visual.bar }} />
+                </div>
               </div>
-              <div style={chartTrack}>
-                <div style={{ ...chartBar, width: `${Math.max((item.value / maxValue) * 100, item.value ? 8 : 0)}%` }} />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
 
@@ -1165,9 +1505,9 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats, exp
           {repStats.map((rep, index) => (
             <div key={rep.id} style={leaderRow}>
               <strong>#{index + 1} {rep.full_name || rep.email}</strong>
-              <span>Müşteri: {rep.stats.total}</span>
-              <span>Randevu: {rep.stats.appointment}</span>
-              <span>Satış: {rep.stats.paid}</span>
+              <span style={leaderFigure}><b>◉</b> {rep.stats.total}</span>
+              <span style={leaderFigure}><b>◷</b> {rep.stats.appointment}</span>
+              <span style={{ ...leaderFigure, color: "#6ee7b7" }}><b>₺</b> {rep.stats.paid}</span>
             </div>
           ))}
         </section>
@@ -1181,15 +1521,166 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats, exp
           {dataStats.slice(0, 8).map((data) => (
             <div key={data.name} style={dataSourceRow}>
               <strong>{data.name}</strong>
-              <span>Müşteri: {data.total}</span>
-              <span>Randevu: {data.appointment}</span>
-              <span>Satış: {data.paid}</span>
-              <span>Hatalı: {data.wrongNumber}</span>
+              <span style={{ ...dataMetric, color: "#93c5fd" }}>◉ {data.total}</span>
+              <span style={{ ...dataMetric, color: "#fde68a" }}>◷ {data.appointment}</span>
+              <span style={{ ...dataMetric, color: "#6ee7b7" }}>₺ {data.paid}</span>
+              <span style={{ ...dataMetric, color: "#fca5a5" }}>! {data.wrongNumber}</span>
             </div>
           ))}
         </section>
       )}
     </div>
+  );
+}
+
+function AccountView({ profile, profileForm, setProfileForm, saveOwnProfile, uploadAvatar, uploadingAvatar, savingProfile, newPassword, setNewPassword, changePassword, onlineUserIds }) {
+  return (
+    <div style={accountLayout}>
+      <section style={accountHero}>
+        <ProfileAvatar user={{ ...profile, ...profileForm }} size={96} />
+        <div style={{ minWidth: 0 }}>
+          <span style={welcomeEyebrow}>Hesabım</span>
+          <h2 style={{ ...sectionTitle, fontSize: 26 }}>{profileForm.full_name || profile.email}</h2>
+          <p style={mutedText}>{profileForm.job_title || roleName(profile.role)}</p>
+          <PresenceBadge user={{ ...profile, ...profileForm }} onlineUserIds={onlineUserIds} />
+        </div>
+        <label style={avatarUploadButton}>
+          {uploadingAvatar ? "Yükleniyor..." : "Fotoğraf Seç"}
+          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={uploadAvatar} disabled={uploadingAvatar} hidden />
+        </label>
+      </section>
+
+      <div className="account-grid" style={accountGrid}>
+        <form onSubmit={saveOwnProfile} style={panelCard}>
+          <h2 style={sectionTitle}>Profil Bilgileri</h2>
+          <label style={fieldLabel}>Ad Soyad</label>
+          <input value={profileForm.full_name} onChange={(event) => setProfileForm({ ...profileForm, full_name: event.target.value })} style={inputStyle} />
+          <label style={fieldLabel}>Unvan</label>
+          <input placeholder="Örn. Satış Temsilcisi" value={profileForm.job_title} onChange={(event) => setProfileForm({ ...profileForm, job_title: event.target.value })} style={inputStyle} />
+          <label style={fieldLabel}>Telefon</label>
+          <input placeholder="Telefon numarası" value={profileForm.phone} onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })} style={inputStyle} />
+          <label style={fieldLabel}>Çalışma Durumu</label>
+          <div style={availabilityControl}>
+            <button type="button" onClick={() => setProfileForm({ ...profileForm, availability_status: "online" })} style={profileForm.availability_status === "online" ? availabilityOnlineActive : availabilityButton}>Çevrimiçi</button>
+            <button type="button" onClick={() => setProfileForm({ ...profileForm, availability_status: "busy" })} style={profileForm.availability_status === "busy" ? availabilityBusyActive : availabilityButton}>Meşgul</button>
+          </div>
+          <label style={fieldLabel}>Hakkımda</label>
+          <textarea rows={4} maxLength={300} value={profileForm.bio} onChange={(event) => setProfileForm({ ...profileForm, bio: event.target.value })} style={{ ...inputStyle, resize: "vertical" }} />
+          <button type="submit" disabled={savingProfile} style={primaryButton}>{savingProfile ? "Kaydediliyor..." : "Profili Kaydet"}</button>
+        </form>
+
+        <form onSubmit={changePassword} style={panelCard}>
+          <h2 style={sectionTitle}>Güvenlik</h2>
+          <div style={accountEmailBox}>
+            <span style={workSummaryLabel}>Giriş e-postası</span>
+            <strong>{profile.email}</strong>
+          </div>
+          <label style={fieldLabel}>Yeni Şifre</label>
+          <input type="password" autoComplete="new-password" placeholder="En az 6 karakter" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} style={inputStyle} />
+          <button type="submit" style={securityButton}>Şifreyi Değiştir</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function MessagingView({ profile, users, messages, messageTarget, selectConversation, messageBody, setMessageBody, sendMessage, messagingError, onlineUserIds }) {
+  const contacts = users.filter((user) => user.id !== profile.id);
+  const activeContact = contacts.find((user) => user.id === messageTarget);
+  const visibleMessages = messages.filter((message) => {
+    if (messageTarget === "general") return message.recipient_id === null;
+    return (message.sender_id === profile.id && message.recipient_id === messageTarget)
+      || (message.sender_id === messageTarget && message.recipient_id === profile.id);
+  });
+  const userMap = new Map([...users, profile].map((user) => [user.id, user]));
+
+  return (
+    <div className="messaging-layout" style={messagingLayout}>
+      <aside className="conversation-sidebar" style={conversationSidebar}>
+        <div style={conversationHeading}>
+          <span style={welcomeEyebrow}>İletişim</span>
+          <h2 style={sectionTitle}>Mesajlar</h2>
+        </div>
+        <button type="button" onClick={() => selectConversation("general")} style={messageTarget === "general" ? conversationButtonActive : conversationButton}>
+          <span style={generalAvatar}>#</span>
+          <span><strong>Genel</strong><small style={contactRole}>Tüm ofis</small></span>
+        </button>
+        <div style={contactDivider}>Çalışanlar</div>
+        {contacts.map((contact) => {
+          const unread = messages.filter((message) => message.sender_id === contact.id && message.recipient_id === profile.id && !message.read_at).length;
+          return (
+            <button key={contact.id} type="button" onClick={() => selectConversation(contact.id)} style={messageTarget === contact.id ? conversationButtonActive : conversationButton}>
+              <ProfileAvatar user={contact} size={38} />
+              <span style={contactCopy}>
+                <strong>{contact.full_name || contact.email}</strong>
+                <small style={contactRole}>{contact.job_title || roleName(contact.role)}</small>
+                <PresenceBadge user={contact} onlineUserIds={onlineUserIds} compact />
+              </span>
+              {unread > 0 && <span style={unreadBadge}>{unread}</span>}
+            </button>
+          );
+        })}
+      </aside>
+
+      <section style={chatPanel}>
+        <header style={chatHeader}>
+          {messageTarget === "general" ? <span style={generalAvatar}>#</span> : <ProfileAvatar user={activeContact} size={42} />}
+          <div>
+            <h2 style={{ ...sectionTitle, fontSize: 18 }}>{messageTarget === "general" ? "Genel" : activeContact?.full_name || activeContact?.email || "Kullanıcı"}</h2>
+            {messageTarget === "general"
+              ? <p style={mutedText}>Ofis kanalı</p>
+              : <PresenceBadge user={activeContact} onlineUserIds={onlineUserIds} />}
+          </div>
+        </header>
+
+        {messagingError ? (
+          <div style={messageSetupNotice}>{messagingError}</div>
+        ) : (
+          <div style={messageStream}>
+            {visibleMessages.length === 0 && <div style={emptyConversation}>Henüz mesaj yok.</div>}
+            {visibleMessages.map((message) => {
+              const mine = message.sender_id === profile.id;
+              const sender = userMap.get(message.sender_id);
+              return (
+                <div key={message.id} style={{ ...messageLine, justifyContent: mine ? "flex-end" : "flex-start" }}>
+                  <div style={mine ? ownMessageBubble : messageBubble}>
+                    {messageTarget === "general" && !mine && <strong style={messageSender}>{sender?.full_name || sender?.email || "Kullanıcı"}</strong>}
+                    <p style={messageText}>{message.body}</p>
+                    <small style={messageTime}>{formatTime(message.created_at)}</small>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <form onSubmit={sendMessage} style={messageComposer}>
+          <textarea rows={2} maxLength={2000} placeholder="Mesaj yaz..." value={messageBody} onChange={(event) => setMessageBody(event.target.value)} style={messageInput} disabled={!!messagingError} />
+          <button type="submit" style={sendMessageButton} disabled={!messageBody.trim() || !!messagingError} title="Gönder" aria-label="Mesaj gönder">➤</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ProfileAvatar({ user, size = 44 }) {
+  const name = user?.full_name || user?.email || "?";
+  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+  const style = { ...avatarBase, width: size, height: size, minWidth: size, fontSize: Math.max(Math.round(size * 0.32), 12) };
+  return user?.avatar_url
+    ? <img src={user.avatar_url} alt={name} style={{ ...style, objectFit: "cover" }} />
+    : <span style={style}>{initials || "?"}</span>;
+}
+
+function PresenceBadge({ user, onlineUserIds, compact = false }) {
+  const isOnline = !!user?.id && onlineUserIds.includes(user.id);
+  const status = !isOnline ? "offline" : user?.availability_status === "busy" ? "busy" : "online";
+  const visual = presenceVisuals[status];
+  return (
+    <span style={{ ...presenceBadge, ...(compact ? presenceBadgeCompact : {}) }} title={visual.label}>
+      <span style={{ ...presenceDot, background: visual.color, boxShadow: isOnline ? `0 0 8px ${visual.color}` : "none" }} />
+      {visual.label}
+    </span>
   );
 }
 
@@ -1589,6 +2080,17 @@ function CustomerTable({
 }) {
   const canManage = profile.role === "boss" || profile.role === "manager";
   const canViewTc = profile.role !== "employee";
+  const [assigneeFilter, setAssigneeFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
+  const filteredData = assigneeFilter === "all"
+    ? data
+    : assigneeFilter === "pool"
+      ? data.filter((customer) => !customer.assigned_employee)
+      : data.filter((customer) => customer.assigned_employee === assigneeFilter);
+  const pageCount = Math.max(Math.ceil(filteredData.length / pageSize), 1);
+  const currentPage = Math.min(page, pageCount);
+  const pageData = filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   function toggleSelected(id) {
     setSelectedIds((prev) =>
@@ -1600,12 +2102,31 @@ function CustomerTable({
     <div style={panelCard}>
       <h2>{title}</h2>
 
-      <input
-        placeholder="Müşteri ara: isim, telefon, TC, data adı..."
-        value={searchTerm}
-        onChange={(e) => setSearchTerm(e.target.value)}
-        style={searchInput}
-      />
+      <div style={customerToolbar}>
+        <input
+          placeholder="Müşteri ara: isim, telefon, TC, data adı..."
+          value={searchTerm}
+          onChange={(e) => {
+            setSearchTerm(e.target.value);
+            setPage(1);
+          }}
+          style={{ ...searchInput, marginBottom: 0 }}
+        />
+        {canManage && (
+          <select value={assigneeFilter} onChange={(event) => { setAssigneeFilter(event.target.value); setPage(1); }} style={toolbarSelect}>
+            <option value="all">Tüm sorumlular</option>
+            <option value="pool">Atanmamış müşteriler</option>
+            {employees.map((employee) => (
+              <option key={employee.id} value={employee.id}>{employee.full_name || employee.email}</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      <div style={tableSummary}>
+        <span>{filteredData.length.toLocaleString("tr-TR")} müşteri</span>
+        <span>{currentPage}. sayfa / {pageCount}</span>
+      </div>
 
       {canManage && (
   <div style={bulkBar}>
@@ -1615,12 +2136,12 @@ function CustomerTable({
       type="button"
       style={smallButton}
       onClick={() => {
-        const ids = data.map((c) => c.id);
+        const ids = pageData.map((c) => c.id);
         const allSelected = ids.every((id) => selectedIds.includes(id));
         setSelectedIds(allSelected ? [] : ids);
       }}
     >
-      Tümünü Seç
+      Sayfadakileri Seç
     </button>
 
     <select
@@ -1655,7 +2176,7 @@ function CustomerTable({
           <div>Atanan</div>
         </div>
 
-        {data.map((c) => (
+        {pageData.map((c) => (
           <div key={c.id} style={{ ...tableRow, ...(canViewTc ? {} : tableWithoutTc), borderLeft: `4px solid ${customerHeat(c.status).color}` }}>
             <div>
             {canManage && (
@@ -1665,9 +2186,7 @@ function CustomerTable({
 
             <div style={customerNameCell}>
               <strong>{c.first_name} {c.last_name}</strong>
-              <div style={{ ...customerStatusLine, background: customerHeat(c.status).color }}>
-                <span>{statusLabel(c.status)}</span>
-              </div>
+              <div title={statusLabel(c.status)} aria-label={statusLabel(c.status)} style={{ ...customerStatusLine, background: customerHeat(c.status).color }} />
             </div>
 
             <div>
@@ -1702,6 +2221,15 @@ function CustomerTable({
           </div>
         ))}
       </div>
+      {pageCount > 1 && (
+        <div style={paginationBar}>
+          <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage(1)}>İlk</button>
+          <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(value - 1, 1))}>Önceki</button>
+          <strong>{currentPage} / {pageCount}</strong>
+          <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(value + 1, pageCount))}>Sonraki</button>
+          <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage(pageCount)}>Son</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1724,11 +2252,21 @@ function MenuButton({ icon, title, page, tone, activePage, setActivePage, onClic
   );
 }
 
-function ClickStat({ title, value, onClick }) {
+function ClickStat({ title, value, onClick, tone = "total" }) {
   return (
-    <div style={statCard} onClick={onClick}>
+    <button type="button" style={{ ...statCard, ...statCardTones[tone] }} onClick={onClick}>
       <p style={{ opacity: 0.75 }}>{title}</p>
       <h2>{value}</h2>
+    </button>
+  );
+}
+
+function PipelineRow({ label, value, color }) {
+  return (
+    <div style={pipelineRow}>
+      <span style={{ ...pipelineDot, background: color }} />
+      <span style={pipelineLabel}>{label}</span>
+      <strong style={{ ...pipelineValue, color }}>{value.toLocaleString("tr-TR")}</strong>
     </div>
   );
 }
@@ -1896,7 +2434,7 @@ const parliamentDark = "#061834";
 const parliamentMid = "#0b2b5f";
 const cardBlue = "#10284f";
 
-const appShell = { width: "100%", minWidth: 0, minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Segoe UI, Arial, sans-serif" };
+const appShell = { width: "100%", minWidth: 0, minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "var(--sans)" };
 const sidebar = { background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)", transition: "width 180ms ease, padding 180ms ease", flexShrink: 0 };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
 const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 8, background: "linear-gradient(135deg,#f0f9ff,#bae6fd)", border: "1px solid rgba(125,211,252,0.72)", boxShadow: "0 8px 20px rgba(2,6,23,0.2)" };
@@ -1906,10 +2444,13 @@ const brandMark = { display: "block", width: 42, height: "auto" };
 const sideEmail = { fontSize: 12, color: "#bfdbfe", margin: "6px 0 16px" };
 const mainArea = { flex: 1, minWidth: 0, padding: "24px 32px", overflowX: "hidden" };
 const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24 };
+const topbarIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
+const backButton = { width: 40, height: 40, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 8, border: "1px solid rgba(125,211,252,0.38)", background: "#10284f", color: "#e0f2fe", fontSize: 28, lineHeight: 1, cursor: "pointer" };
 const welcomeBlock = { minWidth: 0 };
 const welcomeEyebrow = { display: "block", fontSize: 13, opacity: 0.65, marginBottom: 4 };
 const welcomeTitle = { margin: 0, fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
 const welcomeMeta = { margin: "6px 0 0", opacity: 0.7 };
+const welcomeStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginTop: 6 };
 const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.22)", borderRadius: 8, cursor: "pointer", fontSize: 20 };
 const menuButton = { width: "100%", minHeight: 46, display: "flex", alignItems: "center", gap: 11, padding: 13, marginBottom: 9, background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.12)", borderRadius: 8, cursor: "pointer", textAlign: "left", fontWeight: "bold" };
 const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 0 0 2px rgba(37,99,235,0.18)" };
@@ -1932,15 +2473,34 @@ const menuIconTones = {
   wrong: { background: "rgba(148,163,184,0.18)", color: "#cbd5e1" },
   employees: { background: "rgba(74,222,128,0.16)", color: "#86efac" },
   reports: { background: "rgba(45,212,191,0.16)", color: "#5eead4" },
+  account: { background: "rgba(129,140,248,0.18)", color: "#c7d2fe" },
+  messages: { background: "rgba(34,211,238,0.18)", color: "#67e8f9" },
 };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: "1px solid rgba(147,197,253,0.35)", cursor: "pointer", fontWeight: 700, background: "#16345f", color: "#e0f2fe" };
+const syncNotice = { margin: "-8px 0 16px", padding: "10px 12px", borderRadius: 8, background: "rgba(56,189,248,0.12)", border: "1px solid rgba(125,211,252,0.32)", color: "#bae6fd", fontSize: 13, fontWeight: 600 };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
-const statCard = { background: `linear-gradient(135deg, ${cardBlue}, ${parliament})`, padding: 20, borderRadius: 18, border: "1px solid rgba(147,197,253,0.25)", cursor: "pointer", boxShadow: "0 12px 30px rgba(0,0,0,0.2)" };
+const statCard = { width: "100%", minHeight: 116, display: "grid", alignContent: "center", gap: 7, padding: 20, borderRadius: 8, border: "1px solid rgba(147,197,253,0.25)", color: "#f8fafc", cursor: "pointer", textAlign: "left", font: "inherit", boxShadow: "0 12px 30px rgba(0,0,0,0.2)" };
+const statCardTones = {
+  total: { background: "linear-gradient(135deg,#164e8a,#123b7a)", borderColor: "rgba(125,211,252,0.48)" },
+  new: { background: "linear-gradient(135deg,#0e7490,#155e75)", borderColor: "rgba(103,232,249,0.42)" },
+  assigned: { background: "linear-gradient(135deg,#4338ca,#3730a3)", borderColor: "rgba(165,180,252,0.42)" },
+  approved: { background: "linear-gradient(135deg,#15803d,#166534)", borderColor: "rgba(134,239,172,0.42)" },
+  paid: { background: "linear-gradient(135deg,#047857,#065f46)", borderColor: "rgba(110,231,183,0.46)" },
+};
 const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
 const panelCard = { background: "rgba(16,40,79,0.88)", padding: 22, borderRadius: 18, border: "1px solid rgba(147,197,253,0.22)", boxShadow: "0 20px 45px rgba(0,0,0,0.22)" };
+const pipelinePanel = { background: "linear-gradient(145deg,rgba(16,40,79,0.96),rgba(7,26,54,0.94))" };
+const pipelineList = { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, marginTop: 18 };
+const pipelineRow = { minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 8, background: "rgba(2,16,39,0.58)", border: "1px solid rgba(147,197,253,0.12)" };
+const pipelineDot = { width: 8, height: 24, flexShrink: 0, borderRadius: 4 };
+const pipelineLabel = { flex: 1, color: "#cbd5e1", fontSize: 13 };
+const pipelineValue = { fontSize: 18 };
 const formGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 };
 const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #bfdbfe", background: "#f8fafc", color: "#0b2b5f" };
 const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
+const customerToolbar = { display: "grid", gridTemplateColumns: "minmax(240px,1fr) minmax(210px,280px)", gap: 10, marginBottom: 10 };
+const toolbarSelect = { width: "100%", padding: 12, borderRadius: 8, border: "1px solid rgba(147,197,253,0.28)", background: "#071a36", color: "#e0f2fe" };
+const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, color: "#94a3b8", fontSize: 12 };
 const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "1px solid #7dd3fc", cursor: "pointer", fontWeight: 700, background: "linear-gradient(135deg,#38bdf8,#2563eb)", color: "#ffffff", boxShadow: "0 8px 18px rgba(37,99,235,0.28)" };
 const tableWrapper = { width: "100%", overflowX: "auto", background: "#071a36", borderRadius: 14 };
 const tableHeader = {
@@ -1982,7 +2542,10 @@ const bulkBar = {
   padding: 12,
   borderRadius: 12,
 };
+const paginationBar = { display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "center", gap: 8, marginTop: 16 };
+const paginationButton = { minWidth: 66, padding: "8px 10px", borderRadius: 7, border: "1px solid rgba(125,211,252,0.35)", background: "#10284f", color: "#e0f2fe", cursor: "pointer", fontWeight: 700 };
 const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 14, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const employeeIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
 const roleBadge = { background: "#2563eb", padding: "6px 12px", borderRadius: 999, fontSize: 13 };
 const staffActions = { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 };
 const deleteStaffButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid rgba(252,165,165,0.55)", background: "rgba(127,29,29,0.5)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
@@ -2024,13 +2587,29 @@ const reportsLayout = { display: "grid", gap: 18 };
 const sectionHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, marginBottom: 18 };
 const sectionTitle = { marginTop: 0, marginBottom: 6 };
 const mutedText = { margin: 0, opacity: 0.7 };
-const chartList = { display: "grid", gap: 14 };
-const chartRow = { display: "grid", gap: 8 };
+const chartList = { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 };
+const chartRow = { display: "grid", gap: 12, padding: 14, borderRadius: 8, border: "1px solid" };
 const chartLabel = { display: "flex", justifyContent: "space-between", gap: 12 };
 const chartTrack = { height: 12, borderRadius: 999, background: "#071a36", overflow: "hidden", border: "1px solid rgba(147,197,253,0.18)" };
 const chartBar = { height: "100%", borderRadius: 999, background: "linear-gradient(90deg,#38bdf8,#22c55e)" };
-const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px", gap: 10, alignItems: "center", background: "#071a36", padding: 12, borderRadius: 12, marginTop: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const reportChartHeader = { display: "flex", alignItems: "center", gap: 10, minWidth: 0 };
+const reportIcon = { width: 34, height: 34, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 7, fontWeight: 900 };
+const reportChartTitle = { flex: 1, minWidth: 0, color: "#e2e8f0" };
+const reportFigure = { minWidth: 52, textAlign: "right", fontSize: 22, fontWeight: 900 };
+const reportVisuals = {
+  pool: { icon: "+", color: "#7dd3fc", background: "linear-gradient(135deg,rgba(14,116,144,0.3),rgba(7,26,54,0.62))", border: "rgba(125,211,252,0.3)", iconBackground: "rgba(56,189,248,0.16)", bar: "linear-gradient(90deg,#0ea5e9,#67e8f9)" },
+  called: { icon: "✓", color: "#fdba74", background: "linear-gradient(135deg,rgba(154,52,18,0.3),rgba(7,26,54,0.62))", border: "rgba(251,146,60,0.3)", iconBackground: "rgba(251,146,60,0.16)", bar: "linear-gradient(90deg,#f97316,#fdba74)" },
+  callback: { icon: "↶", color: "#d8b4fe", background: "linear-gradient(135deg,rgba(107,33,168,0.3),rgba(7,26,54,0.62))", border: "rgba(192,132,252,0.3)", iconBackground: "rgba(192,132,252,0.16)", bar: "linear-gradient(90deg,#9333ea,#d8b4fe)" },
+  appointment: { icon: "◷", color: "#fde68a", background: "linear-gradient(135deg,rgba(161,98,7,0.3),rgba(7,26,54,0.62))", border: "rgba(251,191,36,0.3)", iconBackground: "rgba(251,191,36,0.16)", bar: "linear-gradient(90deg,#eab308,#fde68a)" },
+  contract_appointment: { icon: "□", color: "#67e8f9", background: "linear-gradient(135deg,rgba(14,116,144,0.3),rgba(7,26,54,0.62))", border: "rgba(34,211,238,0.3)", iconBackground: "rgba(34,211,238,0.16)", bar: "linear-gradient(90deg,#0891b2,#67e8f9)" },
+  not_approved: { icon: "×", color: "#fca5a5", background: "linear-gradient(135deg,rgba(153,27,27,0.3),rgba(7,26,54,0.62))", border: "rgba(248,113,113,0.3)", iconBackground: "rgba(248,113,113,0.16)", bar: "linear-gradient(90deg,#dc2626,#fca5a5)" },
+  wrong_number: { icon: "!", color: "#cbd5e1", background: "linear-gradient(135deg,rgba(71,85,105,0.32),rgba(7,26,54,0.62))", border: "rgba(148,163,184,0.3)", iconBackground: "rgba(148,163,184,0.16)", bar: "linear-gradient(90deg,#64748b,#cbd5e1)" },
+  paid: { icon: "₺", color: "#6ee7b7", background: "linear-gradient(135deg,rgba(4,120,87,0.32),rgba(7,26,54,0.62))", border: "rgba(52,211,153,0.3)", iconBackground: "rgba(52,211,153,0.16)", bar: "linear-gradient(90deg,#059669,#6ee7b7)" },
+};
+const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px", gap: 10, alignItems: "center", background: "#071a36", padding: 12, borderRadius: 8, marginTop: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const leaderFigure = { display: "flex", alignItems: "center", gap: 7, color: "#bfdbfe", fontSize: 13 };
 const dataSourceRow = { display: "grid", gridTemplateColumns: "minmax(170px, 1fr) repeat(4, auto)", gap: 16, alignItems: "center", background: "#071a36", padding: 12, borderRadius: 10, marginTop: 10, border: "1px solid rgba(147,197,253,0.15)", fontSize: 13 };
+const dataMetric = { minWidth: 64, padding: "5px 8px", borderRadius: 6, background: "rgba(15,35,68,0.9)", fontWeight: 800, textAlign: "center" };
 const workSummaryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 };
 const workSummaryItem = { display: "grid", gap: 6, padding: 14, borderLeft: "3px solid", background: "rgba(7,26,54,0.62)", borderRadius: 8 };
 const workSummaryLabel = { color: "#cbd5e1", fontSize: 13 };
@@ -2044,7 +2623,7 @@ const workloadRow = { display: "flex", flexWrap: "wrap", justifyContent: "space-
 const workloadAvailable = { color: "#86efac", fontSize: 13, fontWeight: 600 };
 const workloadBusy = { color: "#fcd34d", fontSize: 13, fontWeight: 600 };
 const customerNameCell = { display: "grid", gap: 6, minWidth: 0 };
-const customerStatusLine = { width: "100%", minHeight: 18, display: "flex", alignItems: "center", padding: "2px 8px", boxSizing: "border-box", borderRadius: 4, color: "#082f49", fontSize: 10, fontWeight: 800, letterSpacing: 0 };
+const customerStatusLine = { width: "100%", height: 4, borderRadius: 4, opacity: 0.95 };
 const celebrationBackdrop = { position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgba(2,6,23,0.78)", backdropFilter: "blur(5px)" };
 const celebrationCard = { width: 380, maxWidth: "100%", position: "relative", overflow: "hidden", padding: 32, borderRadius: 12, textAlign: "center", background: "linear-gradient(145deg,#123b7a,#064e3b)", border: "1px solid rgba(167,243,208,0.5)", boxShadow: "0 24px 70px rgba(0,0,0,0.48)" };
 const celebrationConfetti = { height: 26, display: "flex", justifyContent: "space-around", alignItems: "center", marginBottom: 14 };
@@ -2056,7 +2635,7 @@ const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, m
 const calendarDay = { background: "#071a36", padding: 14, borderRadius: 14, border: "1px solid rgba(147,197,253,0.18)" };
 const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: "1px solid rgba(147,197,253,0.18)", background: "#10284f", color: "white", cursor: "pointer" };
 
-const loginPage = { minHeight: "100vh", background: `radial-gradient(circle at top left, ${parliament} 0, ${parliamentDark} 38%, #020617 100%)`, display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: "white", fontFamily: "Arial" };
+const loginPage = { minHeight: "100vh", background: `radial-gradient(circle at top left, ${parliament} 0, ${parliamentDark} 38%, #020617 100%)`, display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: "white", fontFamily: "var(--sans)" };
 const loginLeft = { maxWidth: 620 };
 const brandBadge = { display: "inline-block", background: "rgba(37,99,235,0.25)", border: "1px solid rgba(147,197,253,0.35)", padding: "8px 14px", borderRadius: 999, fontSize: 13, letterSpacing: 1, marginBottom: 22 };
 const loginHeroTitle = { fontSize: 56, lineHeight: 1.05, margin: "0 0 20px 0" };
@@ -2064,8 +2643,64 @@ const loginHeroText = { fontSize: 18, lineHeight: 1.6, opacity: 0.9, maxWidth: 5
 const loginFeatureGrid = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, marginTop: 35, maxWidth: 500 };
 const loginFeature = { background: "rgba(15,23,42,0.7)", border: "1px solid rgba(148,163,184,0.2)", padding: 16, borderRadius: 16 };
 const loginCard = { background: "rgba(15,23,42,0.82)", border: "1px solid rgba(148,163,184,0.25)", boxShadow: "0 30px 80px rgba(0,0,0,0.45)",  backdropFilter: "blur(16px)", padding: 34, borderRadius: 24 ,color: "white", };
+const loginCardStack = { display: "grid", gap: 14 };
+const poweredByVercel = { display: "flex", alignItems: "center", justifyContent: "center", gap: 7, color: "#94a3b8", fontSize: 12, fontWeight: 600 };
+const vercelMark = { color: "#e2e8f0", fontSize: 11, lineHeight: 1 };
 const loginInput = { width: "100%", padding: "14px 15px", marginBottom: 16, boxSizing: "border-box", borderRadius: 12, border: "1px solid #334155", background: "#020617", color: "white" };
 const loginButton = { width: "100%", padding: 14, borderRadius: 12, border: "none", background: "linear-gradient(135deg,#2563eb,#123b7a)", color: "white", fontWeight: "bold", cursor: "pointer" };
-const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 12, borderRadius: 10, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#071a36", padding: 12, borderRadius: 8, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const salesFigure = { minWidth: 54, padding: "5px 8px", borderRadius: 6, background: "rgba(5,150,105,0.16)", color: "#6ee7b7", fontWeight: 800, textAlign: "center" };
+const avatarBase = { display: "grid", placeItems: "center", overflow: "hidden", boxSizing: "border-box", borderRadius: "50%", background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "#f8fafc", border: "2px solid rgba(125,211,252,0.48)", fontWeight: 800 };
+const accountLayout = { display: "grid", gap: 18 };
+const accountHero = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18, padding: 22, borderRadius: 8, background: "linear-gradient(135deg,rgba(30,64,175,0.72),rgba(8,145,178,0.42))", border: "1px solid rgba(125,211,252,0.36)" };
+const avatarUploadButton = { marginLeft: "auto", padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(186,230,253,0.48)", background: "rgba(7,26,54,0.68)", color: "#e0f2fe", cursor: "pointer", fontWeight: 700 };
+const accountGrid = { display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(280px,0.8fr)", gap: 18, alignItems: "start" };
+const accountEmailBox = { display: "grid", gap: 5, margin: "18px 0", padding: 14, borderRadius: 8, background: "rgba(7,26,54,0.68)", border: "1px solid rgba(147,197,253,0.18)", overflowWrap: "anywhere" };
+const securityButton = { ...primaryButton, background: "linear-gradient(135deg,#4338ca,#2563eb)" };
+const availabilityControl = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 };
+const availabilityButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.2)", background: "#071a36", color: "#cbd5e1", cursor: "pointer", fontWeight: 700 };
+const availabilityOnlineActive = { ...availabilityButton, background: "rgba(5,150,105,0.24)", borderColor: "rgba(52,211,153,0.58)", color: "#6ee7b7" };
+const availabilityBusyActive = { ...availabilityButton, background: "rgba(194,65,12,0.24)", borderColor: "rgba(251,146,60,0.58)", color: "#fdba74" };
+const messagingLayout = { height: "calc(100vh - 142px)", minHeight: 560, display: "grid", gridTemplateColumns: "280px minmax(0,1fr)", overflow: "hidden", borderRadius: 8, border: "1px solid rgba(147,197,253,0.22)", background: "rgba(7,26,54,0.72)" };
+const conversationSidebar = { minWidth: 0, overflowY: "auto", padding: 12, borderRight: "1px solid rgba(147,197,253,0.18)", background: "rgba(5,20,43,0.88)" };
+const conversationHeading = { padding: "6px 8px 14px" };
+const conversationButton = { width: "100%", minHeight: 58, display: "flex", alignItems: "center", gap: 10, padding: 9, marginBottom: 6, borderRadius: 8, border: "1px solid transparent", background: "transparent", color: "#e0f2fe", textAlign: "left", cursor: "pointer", font: "inherit" };
+const conversationButtonActive = { ...conversationButton, background: "rgba(37,99,235,0.28)", borderColor: "rgba(125,211,252,0.36)" };
+const generalAvatar = { width: 38, height: 38, minWidth: 38, display: "grid", placeItems: "center", borderRadius: 8, background: "rgba(13,148,136,0.32)", color: "#5eead4", fontSize: 20, fontWeight: 900, border: "1px solid rgba(94,234,212,0.34)" };
+const contactCopy = { minWidth: 0, flex: 1, display: "grid", overflow: "hidden" };
+const contactRole = { display: "block", color: "#94a3b8", fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+const contactDivider = { margin: "14px 8px 8px", color: "#64748b", fontSize: 11, fontWeight: 800, textTransform: "uppercase" };
+const unreadBadge = { minWidth: 21, height: 21, display: "grid", placeItems: "center", padding: "0 5px", boxSizing: "border-box", borderRadius: 999, background: "#22d3ee", color: "#082f49", fontSize: 11, fontWeight: 900 };
+const chatPanel = { minWidth: 0, minHeight: 0, display: "grid", gridTemplateRows: "auto minmax(0,1fr) auto", background: "linear-gradient(145deg,rgba(16,40,79,0.7),rgba(2,16,39,0.76))" };
+const chatHeader = { display: "flex", alignItems: "center", gap: 11, padding: "13px 16px", borderBottom: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.74)" };
+const messageStream = { minHeight: 0, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 9 };
+const messageLine = { display: "flex", width: "100%" };
+const messageBubble = { maxWidth: "min(72%,680px)", padding: "9px 12px", borderRadius: "8px 8px 8px 2px", background: "#17355f", border: "1px solid rgba(147,197,253,0.18)", boxShadow: "0 5px 14px rgba(0,0,0,0.14)" };
+const ownMessageBubble = { ...messageBubble, borderRadius: "8px 8px 2px 8px", background: "linear-gradient(135deg,#1d4ed8,#155e75)", borderColor: "rgba(125,211,252,0.3)" };
+const messageSender = { display: "block", marginBottom: 4, color: "#67e8f9", fontSize: 11 };
+const messageText = { color: "#f8fafc", lineHeight: 1.4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
+const messageTime = { display: "block", marginTop: 4, color: "rgba(226,232,240,0.66)", fontSize: 10, textAlign: "right" };
+const messageComposer = { display: "grid", gridTemplateColumns: "minmax(0,1fr) 48px", gap: 9, padding: 12, borderTop: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.84)" };
+const messageInput = { width: "100%", minHeight: 46, maxHeight: 110, resize: "vertical", boxSizing: "border-box", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.26)", background: "#061834", color: "#f8fafc" };
+const sendMessageButton = { width: 48, height: 48, alignSelf: "end", borderRadius: 8, border: "1px solid rgba(103,232,249,0.46)", background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "white", cursor: "pointer", fontSize: 19 };
+const emptyConversation = { margin: "auto", color: "#64748b", fontSize: 14 };
+const messageSetupNotice = { alignSelf: "center", justifySelf: "center", margin: 24, padding: 16, borderRadius: 8, background: "rgba(180,83,9,0.2)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", textAlign: "center" };
+const presenceVisuals = {
+  online: { label: "Çevrimiçi", color: "#34d399" },
+  busy: { label: "Meşgul", color: "#fb923c" },
+  offline: { label: "Çevrimdışı", color: "#64748b" },
+};
+const presenceBadge = { display: "inline-flex", alignItems: "center", gap: 6, marginTop: 6, color: "#cbd5e1", fontSize: 12, fontWeight: 700 };
+const presenceBadgeCompact = { marginTop: 2, fontSize: 10 };
+const presenceDot = { width: 8, height: 8, flexShrink: 0, borderRadius: "50%" };
+
+function rankMedal(index) {
+  const tones = [
+    { background: "#fbbf24", color: "#422006" },
+    { background: "#cbd5e1", color: "#1e293b" },
+    { background: "#fb923c", color: "#431407" },
+  ];
+  return { width: 28, height: 28, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: "50%", fontSize: 12, fontWeight: 900, ...(tones[index] || { background: "#1e3a5f", color: "#bae6fd" }) };
+}
 
 export default App;

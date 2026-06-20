@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700&family=Rajdhani:wght@500;600;700&display=swap');
+
 :root {
   --text: #cbd5e1;
   --text-h: #e0f2fe;
@@ -11,8 +13,8 @@
   --shadow:
     rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --sans: 'Rajdhani', system-ui, 'Segoe UI', sans-serif;
+  --heading: 'Orbitron', 'Rajdhani', system-ui, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
   font: 18px/145% var(--sans);
@@ -54,6 +56,14 @@ body {
   margin: 0;
 }
 
+button,
+input,
+select,
+textarea {
+  font-family: var(--sans);
+  letter-spacing: 0;
+}
+
 #root {
   width: 100%;
   max-width: none;
@@ -67,9 +77,10 @@ body {
 }
 
 h1,
-h2 {
+h2,
+h3 {
   font-family: var(--heading);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-h);
 }
 
@@ -108,4 +119,26 @@ code {
   line-height: 135%;
   padding: 4px 8px;
   background: var(--code-bg);
+}
+
+@media (max-width: 900px) {
+  .report-chart-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .account-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .messaging-layout {
+    height: auto !important;
+    min-height: 720px !important;
+    grid-template-columns: 1fr !important;
+    grid-template-rows: 230px minmax(490px, 1fr) !important;
+  }
+
+  .conversation-sidebar {
+    border-right: 0 !important;
+    border-bottom: 1px solid rgba(147, 197, 253, 0.18) !important;
+  }
 }
