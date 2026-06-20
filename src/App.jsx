@@ -458,22 +458,33 @@ function App() {
       return;
     }
 
-    const { error } = await supabase
-      .from("customers")
-      .update({
-        assigned_employee: bulkEmployee,
-        status: "assigned",
-        assigned_at: new Date().toISOString(),
-        last_action_by: profile.id,
-      })
-      .in("id", selectedIds);
+    const batchSize = 100;
+    let assigned = 0;
 
-    if (error) {
-      alert("Toplu atama hatası: " + error.message);
+    try {
+      for (let index = 0; index < selectedIds.length; index += batchSize) {
+        const customerIds = selectedIds.slice(index, index + batchSize);
+        const { error } = await supabase
+          .from("customers")
+          .update({
+            assigned_employee: bulkEmployee,
+            status: "assigned",
+            assigned_at: new Date().toISOString(),
+            last_action_by: profile.id,
+          })
+          .in("id", customerIds);
+
+        if (error) throw error;
+        assigned += customerIds.length;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    } catch (error) {
+      alert(`Toplu atama ${assigned} müşteri sonrasında durdu: ${error.message || "Bağlantı hatası"}`);
+      await loadCustomers();
       return;
     }
 
-    alert(`${selectedIds.length} müşteri atandı.`);
+    alert(`${assigned} müşteri atandı.`);
     setSelectedIds([]);
     setBulkEmployee("");
     await loadCustomers();
