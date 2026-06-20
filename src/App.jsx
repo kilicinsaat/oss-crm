@@ -8,9 +8,6 @@ const COMPANY_MESSAGE = `
 📞 İletişim:
 0 (530) 350 12 76
 
-🌐 Web Sitesi:
-https://www.kilicinsaatmimarlik.com
-
 📧 Mail:
 info@kilicinsaatmimarlik.com
 
@@ -21,6 +18,7 @@ Esenyurt / İstanbul
 
 Herhangi bir sorunuz olursa bize ulaşabilirsiniz.
 `;
+const COMPANY_LOCATION_URL = "https://maps.app.goo.gl/c8cCAtc2671RzBZC9";
 
 function App() {
   const [customerLogs, setCustomerLogs] = useState([]);
@@ -36,6 +34,7 @@ function App() {
   const [customers, setCustomers] = useState([]);
   const [users, setUsers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [saleCelebration, setSaleCelebration] = useState(null);
 
   const [loading, setLoading] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
@@ -322,6 +321,37 @@ function App() {
     await loadUsers();
   }
 
+  async function deleteStaff(staff) {
+    if (!profile || profile.role !== "boss" || staff.role !== "employee") return;
+    if (!window.confirm(`${staff.full_name || staff.email} adlı rep profili silinsin mi? Atanmış müşterileri havuza geri dönecek.`)) return;
+
+    const assignedCustomerIds = customers
+      .filter((customer) => customer.assigned_employee === staff.id)
+      .map((customer) => customer.id);
+
+    if (assignedCustomerIds.length > 0) {
+      const { error: customerError } = await supabase
+        .from("customers")
+        .update({ assigned_employee: null, status: "pool", assigned_at: null, last_action_by: profile.id })
+        .in("id", assignedCustomerIds);
+
+      if (customerError) {
+        alert("Rep müşterileri havuza alınamadı: " + customerError.message);
+        return;
+      }
+    }
+
+    const { error } = await supabase.from("profiles").delete().eq("id", staff.id);
+    if (error) {
+      alert("Rep profili silinemedi: " + error.message);
+      return;
+    }
+
+    alert("Rep profili silindi, atanmış müşteriler havuza döndü.");
+    await loadUsers();
+    await loadCustomers();
+  }
+
   async function assignCustomer(customerId, employeeId) {
   if (!profile) return;
 
@@ -380,6 +410,7 @@ function App() {
 
   async function updateCustomer(customerId, updates) {
     if (!profile) return;
+    const becamePaid = updates.status === "paid" && selectedCustomer?.status !== "paid";
 
     const { error } = await supabase
       .from("customers")
@@ -420,7 +451,13 @@ console.log("LOG ERROR", logError);
     await loadCustomerLogs(customerId);
 
     setSelectedCustomer((prev) => prev ? { ...prev, ...updates } : prev);
-    alert("Kaydedildi.");
+    if (becamePaid) {
+      setSaleCelebration({
+        name: `${selectedCustomer?.first_name || ""} ${selectedCustomer?.last_name || ""}`.trim() || "Müşteri",
+      });
+    } else {
+      alert("Kaydedildi.");
+    }
   }
 
   function exportCustomersToExcel(data, fileName = "oss-crm-rapor.xlsx") {
@@ -428,7 +465,7 @@ console.log("LOG ERROR", logError);
       "Ad Soyad": `${c.first_name || ""} ${c.last_name || ""}`.trim(),
       Telefon: c.phone || "",
       "Telefon 2": c.phone_2 || "",
-      "TC No": c.tc_no || "",
+      ...(profile.role !== "employee" ? { "TC No": c.tc_no || "" } : {}),
       Data: c.batch_name || "",
       "Sayfa No": c.batch_page || "",
       Durum: statusLabel(c.status),
@@ -529,7 +566,12 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
     <div style={appShell}>
       <aside style={{ ...sidebar, width: sidebarCollapsed ? 72 : 250, padding: sidebarCollapsed ? 12 : 24 }}>
         <div style={sidebarTopRow}>
-          {!sidebarCollapsed && <div><h2 style={logoText}>OSS</h2><p style={sideEmail}>{roleName(profile.role)}</p></div>}
+          {!sidebarCollapsed && (
+            <div style={brandBlock}>
+              <img src="/oss-center-logo.png" alt="OSS Center" style={brandLogo} />
+              <p style={sideEmail}>{roleName(profile.role)}</p>
+            </div>
+          )}
           <button
             type="button"
             title={sidebarCollapsed ? "Menüyü aç" : "Menüyü kapat"}
@@ -540,6 +582,11 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
             ☰
           </button>
         </div>
+        {sidebarCollapsed && (
+          <div style={brandMarkFrame} title="OSS Center">
+            <img src="/oss-center-logo.png" alt="OSS Center" style={brandMark} />
+          </div>
+        )}
 
         <MenuButton icon="▦" title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="◉" title="Müşteriler" page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
@@ -624,7 +671,7 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
             </div>
 
             {profile.role === "employee" && (
-              <RepDailyOverview customers={visibleCustomers} todayItems={todayWorkItems} />
+              <RepDailyOverview customers={visibleCustomers} todayItems={todayWorkItems} onNavigate={setActivePage} />
             )}
 
             {profile.role === "boss" && (
@@ -911,7 +958,12 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
                       Müşteri: {stats.total} | Aranan: {stats.called} | Randevu: {stats.appointment} | Satış: {stats.paid}
                     </p>
                   </div>
-                  <span style={roleBadge}>{roleName(u.role)}</span>
+                  <div style={staffActions}>
+                    <span style={roleBadge}>{roleName(u.role)}</span>
+                    {profile.role === "boss" && u.role === "employee" && (
+                      <button type="button" onClick={() => deleteStaff(u)} style={deleteStaffButton}>Rep Sil</button>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -941,7 +993,12 @@ const manualDuplicate = findDuplicateCustomer(customers, form.phone);
   updateCustomer={updateCustomer}
   users={users}
   customers={customers}
+  profile={profile}
 />
+        )}
+
+        {saleCelebration && (
+          <SaleCelebration customerName={saleCelebration.name} onClose={() => setSaleCelebration(null)} />
         )}
       </main>
     </div>
@@ -1049,16 +1106,16 @@ function TodayWorkView({ todayItems, overdueItems }) {
   );
 }
 
-function RepDailyOverview({ customers, todayItems }) {
-  const called = customers.filter((customer) => ["called", "no_answer", "busy"].includes(customer.status)).length;
+function RepDailyOverview({ customers, todayItems, onNavigate }) {
+  const called = customers.filter((customer) => customer.status === "called").length;
   const appointments = customers.filter((customer) => ["appointment", "contract_appointment"].includes(customer.status)).length;
   const paid = customers.filter((customer) => customer.status === "paid").length;
   const maxValue = Math.max(called, appointments, paid, todayItems.length, 1);
   const metrics = [
-    { label: "Bugün sırada", value: todayItems.length, color: "#60a5fa" },
-    { label: "Arama sonucu", value: called, color: "#fb923c" },
-    { label: "Randevu", value: appointments, color: "#fbbf24" },
-    { label: "Satış", value: paid, color: "#34d399" },
+    { label: "Bugün sırada", value: todayItems.length, color: "#60a5fa", page: "today_work", background: "linear-gradient(135deg, rgba(14,116,144,0.35), rgba(12,74,110,0.22))" },
+    { label: "Arandı", value: called, color: "#fb923c", page: "rep_called", background: "linear-gradient(135deg, rgba(194,65,12,0.36), rgba(124,45,18,0.2))" },
+    { label: "Randevu", value: appointments, color: "#fbbf24", page: "rep_appointment", background: "linear-gradient(135deg, rgba(161,98,7,0.36), rgba(113,63,18,0.2))" },
+    { label: "Satış", value: paid, color: "#34d399", page: "rep_paid", background: "linear-gradient(135deg, rgba(4,120,87,0.38), rgba(6,78,59,0.2))" },
   ];
 
   return (
@@ -1072,15 +1129,34 @@ function RepDailyOverview({ customers, todayItems }) {
       </div>
       <div style={dailyMetricGrid}>
         {metrics.map((metric) => (
-          <div key={metric.label} style={dailyMetricItem}>
+          <button key={metric.label} type="button" onClick={() => onNavigate(metric.page)} style={{ ...dailyMetricItem, background: metric.background }}>
             <div style={chartLabel}><span>{metric.label}</span><strong>{metric.value}</strong></div>
             <div style={chartTrack}>
               <div style={{ ...chartBar, width: `${Math.max((metric.value / maxValue) * 100, metric.value ? 8 : 0)}%`, background: metric.color }} />
             </div>
-          </div>
+          </button>
         ))}
       </div>
     </section>
+  );
+}
+
+function SaleCelebration({ customerName, onClose }) {
+  const colors = ["#38bdf8", "#fbbf24", "#34d399", "#c084fc", "#fb7185", "#60a5fa"];
+
+  return (
+    <div style={celebrationBackdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div style={celebrationCard} onMouseDown={(event) => event.stopPropagation()}>
+        <div style={celebrationConfetti}>
+          {colors.map((color, index) => <span key={color} style={{ ...confettiPiece, background: color, transform: `rotate(${index * 27}deg)` }} />)}
+        </div>
+        <span style={celebrationEyebrow}>SATIŞ TAMAMLANDI</span>
+        <h2 style={celebrationTitle}>Tebrikler</h2>
+        <p style={celebrationCustomer}>{customerName}</p>
+        <p style={mutedText}>Müşteri başarıyla satışa dönüştürüldü.</p>
+        <button type="button" style={{ ...primaryButton, marginTop: 22 }} onClick={onClose}>Devam et</button>
+      </div>
+    </div>
   );
 }
 
@@ -1118,17 +1194,19 @@ function CalendarView({ customers, setSelectedCustomer, loadCustomerLogs }) {
     acc[key].push(customer);
     return acc;
   }, {});
-  const days = Object.keys(grouped).sort((a, b) => new Date(a) - new Date(b));
+  const days = Object.entries(grouped).sort(([, firstDayCustomers], [, secondDayCustomers]) =>
+    new Date(firstDayCustomers[0].appointment_date) - new Date(secondDayCustomers[0].appointment_date)
+  );
 
   return (
     <div style={panelCard}>
       <h2 style={sectionTitle}>Takvim</h2>
       {days.length === 0 && <p style={mutedText}>Planlanmış geri arama veya randevu yok.</p>}
       <div style={calendarGrid}>
-        {days.map((day) => (
+        {days.map(([day, dayCustomers]) => (
           <div key={day} style={calendarDay}>
             <h3>{day}</h3>
-            {grouped[day].map((customer) => (
+            {dayCustomers.map((customer) => (
               <button
                 key={customer.id}
                 type="button"
@@ -1176,7 +1254,7 @@ function CustomerForm({ form, setForm, addCustomer, duplicateCustomer }) {
   );
 }
 
-function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users, customers }) {
+function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
@@ -1241,7 +1319,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           <div style={customerInfoGrid}>
             <div style={infoPill}>📞 {selectedCustomer.phone || "-"}</div>
             <div style={infoPill}>📱 {selectedCustomer.phone_2 || "-"}</div>
-            <div style={infoPill}>🪪 TC: {selectedCustomer.tc_no || "-"}</div>
+            {profile.role !== "employee" && <div style={infoPill}>🪪 TC: {selectedCustomer.tc_no || "-"}</div>}
             <div style={infoPill}>📁 {selectedCustomer.batch_name || "-"} / Sayfa {selectedCustomer.batch_page || "-"}</div>
           </div>
           {duplicateCustomer && (
@@ -1274,8 +1352,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
             Bilgileri Gönder
           </button>
 
-          <button type="button" style={quickActionButton}>Konum</button>
-          <button type="button" style={quickActionButton}>Web Sitesi</button>
+          <a href={COMPANY_LOCATION_URL} target="_blank" rel="noreferrer" style={quickActionButton}>Konum</a>
           <button type="button" onClick={() => setDetailStatus("wrong_number")} style={{ ...quickActionButton, ...wrongNumberButton }}>
             Numara yanlış
           </button>
@@ -1389,6 +1466,7 @@ function CustomerTable({
   bulkAssignCustomers,
 }) {
   const canManage = profile.role === "boss" || profile.role === "manager";
+  const canViewTc = profile.role !== "employee";
 
   function toggleSelected(id) {
     setSelectedIds((prev) =>
@@ -1443,28 +1521,32 @@ function CustomerTable({
 )}
 
       <div style={tableWrapper}>
-        <div style={tableHeader}>
+        <div style={{ ...tableHeader, ...(canViewTc ? {} : tableWithoutTc) }}>
           <div>{canManage ? "Seç" : ""}</div>
           <div>Müşteri</div>
           <div>Detay</div>
           <div>Telefon</div>
           <div>Telefon 2</div>
-          <div>TC No</div>
+          {canViewTc && <div>TC No</div>}
           <div>Data</div>
           <div>Takip</div>
-          <div>Durum</div>
           <div>Atanan</div>
         </div>
 
         {data.map((c) => (
-          <div key={c.id} style={{ ...tableRow, borderLeft: `4px solid ${customerHeat(c.status).color}` }}>
+          <div key={c.id} style={{ ...tableRow, ...(canViewTc ? {} : tableWithoutTc), borderLeft: `4px solid ${customerHeat(c.status).color}` }}>
             <div>
             {canManage && (
               <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleSelected(c.id)} />
             )}
             </div>
 
-            <div style={{ fontWeight: "bold" }}>{c.first_name} {c.last_name}</div>
+            <div style={customerNameCell}>
+              <strong>{c.first_name} {c.last_name}</strong>
+              <div style={{ ...customerStatusLine, background: customerHeat(c.status).color }}>
+                <span>{statusLabel(c.status)}</span>
+              </div>
+            </div>
 
             <div>
               <button
@@ -1480,10 +1562,9 @@ function CustomerTable({
 
             <div>{c.phone ? <a href={`tel:${c.phone}`} style={phoneLink}>{c.phone}</a> : "-"}</div>
             <div>{c.phone_2 ? <a href={`tel:${c.phone_2}`} style={phoneLink}>{c.phone_2}</a> : "-"}</div>
-            <div>{c.tc_no || "-"}</div>
+            {canViewTc && <div>{c.tc_no || "-"}</div>}
             <div>{c.batch_name || "-"}</div>
             <div>{formatDateTime(c.appointment_date)}</div>
-            <div><span style={statusBadge(c.status)}>{statusLabel(c.status)}</span></div>
 
             <div>
               {canManage ? (
@@ -1696,8 +1777,11 @@ const cardBlue = "#10284f";
 const appShell = { width: "100%", minWidth: 0, minHeight: "100vh", background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`, color: "white", display: "flex", fontFamily: "Segoe UI, Arial, sans-serif" };
 const sidebar = { background: `linear-gradient(180deg, ${parliamentDark}, #020617)`, padding: 24, borderRight: "1px solid rgba(147,197,253,0.25)", transition: "width 180ms ease, padding 180ms ease", flexShrink: 0 };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
-const logoText = { fontSize: 32, letterSpacing: 2, marginBottom: 8 };
-const sideEmail = { fontSize: 12, opacity: 0.65, marginBottom: 25 };
+const brandBlock = { width: 152, minWidth: 0 };
+const brandLogo = { display: "block", width: "100%", height: "auto" };
+const brandMarkFrame = { width: 46, height: 44, overflow: "hidden", margin: "-6px auto 16px", borderRadius: 8 };
+const brandMark = { display: "block", height: 44, width: "auto", maxWidth: "none" };
+const sideEmail = { fontSize: 12, color: "#bfdbfe", margin: "6px 0 16px" };
 const mainArea = { flex: 1, minWidth: 0, padding: "24px 32px", overflowX: "hidden" };
 const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24 };
 const welcomeBlock = { minWidth: 0 };
@@ -1727,40 +1811,44 @@ const menuIconTones = {
   employees: { background: "rgba(74,222,128,0.16)", color: "#86efac" },
   reports: { background: "rgba(45,212,191,0.16)", color: "#5eead4" },
 };
-const logoutButton = { padding: "12px 22px", borderRadius: 12, border: "none", cursor: "pointer", fontWeight: "bold" };
+const logoutButton = { padding: "12px 22px", borderRadius: 10, border: "1px solid rgba(147,197,253,0.35)", cursor: "pointer", fontWeight: 700, background: "#16345f", color: "#e0f2fe" };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
 const statCard = { background: `linear-gradient(135deg, ${cardBlue}, ${parliament})`, padding: 20, borderRadius: 18, border: "1px solid rgba(147,197,253,0.25)", cursor: "pointer", boxShadow: "0 12px 30px rgba(0,0,0,0.2)" };
 const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
 const panelCard = { background: "rgba(16,40,79,0.88)", padding: 22, borderRadius: 18, border: "1px solid rgba(147,197,253,0.22)", boxShadow: "0 20px 45px rgba(0,0,0,0.22)" };
 const formGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 };
-const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #cbd5e1" };
+const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #bfdbfe", background: "#f8fafc", color: "#0b2b5f" };
 const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
 const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "1px solid #7dd3fc", cursor: "pointer", fontWeight: 700, background: "linear-gradient(135deg,#38bdf8,#2563eb)", color: "#ffffff", boxShadow: "0 8px 18px rgba(37,99,235,0.28)" };
 const tableWrapper = { width: "100%", overflowX: "auto", background: "#071a36", borderRadius: 14 };
 const tableHeader = {
   display: "grid",
-  gridTemplateColumns: "52px minmax(160px, 1.2fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(115px, 0.9fr) minmax(130px, 1fr)",
+  gridTemplateColumns: "52px minmax(180px, 1.4fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(130px, 1fr)",
   gap: 6,
   padding: 10,
   background: parliamentMid,
   fontWeight: "bold",
-  minWidth: 1060,
+  minWidth: 970,
   fontSize: 12,
 };
 
 const tableRow = {
   display: "grid",
-  gridTemplateColumns: "52px minmax(160px, 1.2fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(115px, 0.9fr) minmax(130px, 1fr)",
+  gridTemplateColumns: "52px minmax(180px, 1.4fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(130px, 1fr)",
   gap: 6,
   alignItems: "center",
   padding: 10,
   background: "#10284f",
   borderBottom: "1px solid rgba(147,197,253,0.16)",
-  minWidth: 1060,
+  minWidth: 970,
   fontSize: 12,
 };
+const tableWithoutTc = {
+  gridTemplateColumns: "52px minmax(180px, 1.4fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(130px, 1fr)",
+  minWidth: 850,
+};
 const selectStyle = { width: "100%", padding: 8, borderRadius: 8 };
-const smallButton = { padding: "8px 12px", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: "bold" };
+const smallButton = { padding: "8px 12px", borderRadius: 8, border: "1px solid rgba(125,211,252,0.4)", cursor: "pointer", fontWeight: 700, background: "#dbeafe", color: "#0b2b5f" };
 const phoneLink = { color: "#7dd3fc", fontWeight: "bold" };
 const bulkBar = {
   display: "grid",
@@ -1774,17 +1862,19 @@ const bulkBar = {
 };
 const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 14, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
 const roleBadge = { background: "#2563eb", padding: "6px 12px", borderRadius: 999, fontSize: 13 };
+const staffActions = { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 };
+const deleteStaffButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid rgba(252,165,165,0.55)", background: "rgba(127,29,29,0.5)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
 const staffFormBox = { background: "#071a36", padding: 18, borderRadius: 14, marginBottom: 20, border: "1px solid rgba(147,197,253,0.18)" };
 const modalBg = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 999 };
 const modalCard = { width: 760, maxWidth: "92%", maxHeight: "90vh", overflowY: "auto", background: `linear-gradient(135deg, ${cardBlue}, #0f172a)`, padding: 25, borderRadius: 20, border: "1px solid rgba(147,197,253,0.25)" };
-const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: "none" };
+const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: "1px solid rgba(147,197,253,0.38)", background: "#16345f", color: "#e0f2fe" };
 const customerHero = { background: `linear-gradient(135deg, ${parliamentDark}, ${parliament})`, padding: 18, borderRadius: 16, marginBottom: 16, border: "1px solid #60a5fa" };
 const customerHeroTitle = { color: "white", textAlign: "center", marginBottom: 15, fontSize: 28 };
 const customerInfoGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 };
 const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 12, color: "#e0f2fe", textAlign: "center", border: "1px solid rgba(147,197,253,0.22)" };
 const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
 const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: "bold" };
-const wrongNumberButton = { background: "linear-gradient(135deg,#475569,#334155)" };
+const wrongNumberButton = { background: "linear-gradient(135deg,#ef4444,#b91c1c)" };
 const quickOutcomeBar = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, margin: "0 0 16px", padding: 10, borderRadius: 10, background: "rgba(7,26,54,0.68)", border: "1px solid rgba(147,197,253,0.15)" };
 const quickOutcomeLabel = { color: "#bfdbfe", fontSize: 13, fontWeight: 600, marginRight: 2 };
 const quickOutcomeButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid transparent", background: "#17355f", color: "white", cursor: "pointer", fontSize: 12, fontWeight: 600 };
@@ -1823,11 +1913,20 @@ const workSummaryValue = { fontSize: 26, lineHeight: 1 };
 const todayDateBadge = { padding: "7px 10px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 13, fontWeight: 600 };
 const dailyFocusBadge = { padding: "7px 10px", borderRadius: 999, background: "rgba(52,211,153,0.14)", color: "#a7f3d0", fontSize: 13, fontWeight: 600 };
 const dailyMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 };
-const dailyMetricItem = { display: "grid", gap: 9, padding: 12, borderRadius: 8, background: "rgba(7,26,54,0.54)", border: "1px solid rgba(147,197,253,0.13)" };
+const dailyMetricItem = { display: "grid", gap: 9, padding: 14, borderRadius: 8, border: "1px solid rgba(147,197,253,0.22)", color: "#e0f2fe", cursor: "pointer", textAlign: "left", font: "inherit", boxShadow: "0 10px 22px rgba(0,0,0,0.16)" };
 const assignmentSection = { marginTop: 24, paddingTop: 20, borderTop: "1px solid rgba(147,197,253,0.18)" };
 const workloadRow = { display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 10, alignItems: "center", padding: "10px 0", borderBottom: "1px solid rgba(147,197,253,0.12)" };
 const workloadAvailable = { color: "#86efac", fontSize: 13, fontWeight: 600 };
 const workloadBusy = { color: "#fcd34d", fontSize: 13, fontWeight: 600 };
+const customerNameCell = { display: "grid", gap: 6, minWidth: 0 };
+const customerStatusLine = { width: "100%", minHeight: 18, display: "flex", alignItems: "center", padding: "2px 8px", boxSizing: "border-box", borderRadius: 4, color: "#082f49", fontSize: 10, fontWeight: 800, letterSpacing: 0 };
+const celebrationBackdrop = { position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgba(2,6,23,0.78)", backdropFilter: "blur(5px)" };
+const celebrationCard = { width: 380, maxWidth: "100%", position: "relative", overflow: "hidden", padding: 32, borderRadius: 12, textAlign: "center", background: "linear-gradient(145deg,#123b7a,#064e3b)", border: "1px solid rgba(167,243,208,0.5)", boxShadow: "0 24px 70px rgba(0,0,0,0.48)" };
+const celebrationConfetti = { height: 26, display: "flex", justifyContent: "space-around", alignItems: "center", marginBottom: 14 };
+const confettiPiece = { width: 9, height: 20, display: "block", borderRadius: 2 };
+const celebrationEyebrow = { color: "#a7f3d0", fontSize: 12, fontWeight: 800, letterSpacing: 1.2 };
+const celebrationTitle = { margin: "12px 0 4px", color: "#f8fafc", fontSize: 32 };
+const celebrationCustomer = { margin: "0 0 10px", color: "#fde68a", fontSize: 18, fontWeight: 700 };
 const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginTop: 16 };
 const calendarDay = { background: "#071a36", padding: 14, borderRadius: 14, border: "1px solid rgba(147,197,253,0.18)" };
 const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: "1px solid rgba(147,197,253,0.18)", background: "#10284f", color: "white", cursor: "pointer" };
