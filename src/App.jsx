@@ -799,15 +799,18 @@ function App() {
   async function deleteCustomersWithoutPhone() {
     if (!profile || profile.role !== "boss") return;
     const missingPhoneCount = customers.filter((customer) =>
-      ![customer.phone, customer.phone_2].some((phone) => String(phone || "").replace(/\D/g, "").length >= 10)
+      ![customer.phone, customer.phone_2].some((phone) => {
+        const digits = String(phone || "").replace(/\D/g, "");
+        return /^5\d{9}$/.test(digits.slice(-10));
+      })
     ).length;
 
     if (missingPhoneCount === 0) {
-      alert("Telefon numarası olmayan müşteri kartı bulunamadı.");
+      alert("Geçerli cep telefonu olmayan müşteri kartı bulunamadı.");
       return;
     }
 
-    if (!window.confirm(`${missingPhoneCount} müşteri kartında Telefon ve Telefon 2 alanlarında geçerli numara yok. Bu kartlar ve işlem geçmişleri kalıcı olarak silinsin mi?`)) return;
+    if (!window.confirm(`${missingPhoneCount} müşteri kartında 5 ile başlayan 10 haneli cep telefonu yok. Bu kartlar ve işlem geçmişleri kalıcı olarak silinsin mi?`)) return;
 
     const { data: deletedCount, error } = await runWithRetry(() =>
       supabase.rpc("delete_customers_without_phone")
@@ -824,7 +827,7 @@ function App() {
     setCustomerLogs([]);
     setSelectedIds([]);
     await loadCustomers();
-    alert(`${Number(deletedCount) || 0} numarasız müşteri kartı güvenle silindi.`);
+    alert(`${Number(deletedCount) || 0} geçersiz veya numarasız müşteri kartı güvenle silindi.`);
   }
 
   async function repairPhoneTcMixups() {
@@ -1256,7 +1259,7 @@ const unreadMessageCount = messages.filter((message) => message.recipient_id ===
                   <span style={mutedText}>Yeniden yükleme öncesi mevcut müşteri listesini temizleyebilirsin.</span>
                   <div style={cleanupButtons}>
                     <button type="button" onClick={repairPhoneTcMixups} style={cleanInvalidButton}>TC/Telefon Karışanları Düzelt</button>
-                    <button type="button" onClick={deleteCustomersWithoutPhone} style={cleanInvalidButton}>Numarasız Kartları Temizle</button>
+                    <button type="button" onClick={deleteCustomersWithoutPhone} style={cleanInvalidButton}>Geçersiz/Numarasız Kartları Temizle</button>
                     <button type="button" onClick={deleteAllCustomerData} style={deleteAllButton}>Tüm Müşteri Datasını Sil</button>
                   </div>
                 </div>

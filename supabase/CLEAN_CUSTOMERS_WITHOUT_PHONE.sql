@@ -1,5 +1,5 @@
 -- Run this file once in the Supabase SQL Editor.
--- Deletes only customers that have no usable number in either phone field.
+-- Deletes only customers that have no Turkish mobile number in either phone field.
 
 create or replace function public.current_user_is_active_boss()
 returns boolean
@@ -37,13 +37,13 @@ begin
   where customer_id in (
     select id
     from public.customers
-    where length(regexp_replace(coalesce(phone, ''), '\D', '', 'g')) < 10
-      and length(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g')) < 10
+    where right(regexp_replace(coalesce(phone, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$'
+      and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$'
   );
 
   delete from public.customers
-  where length(regexp_replace(coalesce(phone, ''), '\D', '', 'g')) < 10
-    and length(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g')) < 10;
+  where right(regexp_replace(coalesce(phone, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$'
+    and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$';
 
   get diagnostics deleted_count = row_count;
   return deleted_count;

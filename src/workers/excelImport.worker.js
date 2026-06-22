@@ -20,7 +20,7 @@ const spreadsheetPhone = (value) => {
   let digits = text.replace(/\D/g, "");
   if (digits.length === 12 && digits.startsWith("90")) digits = digits.slice(2);
   if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
-  return /^[2345]\d{9}$/.test(digits) ? digits : "";
+  return /^5\d{9}$/.test(digits) ? digits : "";
 };
 
 const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(value));

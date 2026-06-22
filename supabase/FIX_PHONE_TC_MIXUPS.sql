@@ -47,7 +47,7 @@ begin
   where length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) = 11
     and regexp_replace(coalesce(phone, ''), '\D', '', 'g') =
       right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
-    and length(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g')) >= 10;
+    and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) ~ '^5[0-9]{9}$';
 
   -- If there is no real second phone, remove the corrupt card and its history.
   delete from public.customer_logs
@@ -57,14 +57,14 @@ begin
     where length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) = 11
       and regexp_replace(coalesce(phone, ''), '\D', '', 'g') =
         right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
-      and length(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g')) < 10
+      and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$'
   );
 
   delete from public.customers
   where length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) = 11
     and regexp_replace(coalesce(phone, ''), '\D', '', 'g') =
       right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
-    and length(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g')) < 10;
+    and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$';
 
   return affected_count;
 end;
