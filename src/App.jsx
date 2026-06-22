@@ -40,6 +40,28 @@ async function runWithRetry(operation, attempts = 3) {
   return { data: null, error: lastError || new Error("Bağlantı kurulamadı.") };
 }
 
+function parseExcelInWorker(buffer, fileName, existingPhones, onProgress) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./workers/excelImport.worker.js", import.meta.url), { type: "module" });
+    const cleanup = () => worker.terminate();
+
+    worker.onmessage = ({ data }) => {
+      if (data.type === "progress") {
+        onProgress(data.current, data.total);
+        return;
+      }
+      cleanup();
+      if (data.type === "result") resolve(data.result);
+      else reject(new Error(data.message || "Excel işlenemedi."));
+    };
+    worker.onerror = (event) => {
+      cleanup();
+      reject(new Error(event.message || "Excel işleme servisi başlatılamadı."));
+    };
+    worker.postMessage({ buffer, fileName, existingPhones }, [buffer]);
+  });
+}
+
 function App() {
   const [customerLogs, setCustomerLogs] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
@@ -568,151 +590,26 @@ function App() {
       setImportProgress({ phase: "Excel okunuyor", current: 0, total: 0 });
 
       const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer, { type: "array" });
-      const normalizeHeader = (value) => String(value || "")
-        .toLocaleLowerCase("tr-TR")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^a-z0-9]/g, "");
-      const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(value));
-      const isNameHeader = (value) => ["hesapad", "adisoyad", "adsoyad", "musteri", "unvan"]
-        .some((name) => normalizeHeader(value).includes(name));
-
-      const sheetCandidates = workbook.SheetNames.map((sheetName) => {
-        const candidateSheet = workbook.Sheets[sheetName];
-        const matrix = XLSX.utils.sheet_to_json(candidateSheet, { header: 1, defval: "", raw: false });
-        const headerRowIndex = matrix.slice(0, 30).findIndex((row) =>
-          row.some(isPhoneHeader) && row.some(isNameHeader)
-        );
-        return { sheetName, sheet: candidateSheet, matrix, headerRowIndex };
-      }).filter((candidate) => candidate.headerRowIndex >= 0)
-        .sort((a, b) => (b.matrix.length - b.headerRowIndex) - (a.matrix.length - a.headerRowIndex));
-
-      const selectedSheet = sheetCandidates[0];
-      if (!selectedSheet) {
-        throw new Error("Telefon ve müşteri adı başlıkları bulunamadı. Sütunlarda 'Telefon-1' ve 'Hesap Adı' gibi başlıklar olmalı.");
-      }
-
-      const rows = XLSX.utils.sheet_to_json(selectedSheet.sheet, {
-        defval: "",
-        raw: false,
-        range: selectedSheet.headerRowIndex,
+      const existingPhones = customers
+        .flatMap((customer) => [customer.phone, customer.phone_2])
+        .map(normalizePhone)
+        .filter(Boolean);
+      const parsed = await parseExcelInWorker(buffer, file.name, existingPhones, (current, total) => {
+        setImportProgress({ phase: "Satırlar arka planda kontrol ediliyor", current, total });
       });
-      if (rows.length === 0) throw new Error(`'${selectedSheet.sheetName}' sayfasında yüklenecek satır bulunamadı.`);
-
-      const spreadsheetPhone = (value) => {
-        let text = String(value ?? "").trim();
-        if (/^\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(text)) {
-          text = Number(text.replace(",", ".")).toFixed(0);
-        }
-
-        let digits = text.replace(/\D/g, "");
-        if (digits.length === 12 && digits.startsWith("90")) digits = digits.slice(2);
-        if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
-        return /^[2345]\d{9}$/.test(digits) ? digits : "";
-      };
-      const isTc = (value) => {
-        const d = String(value || "").replace(/\D/g, "");
-        return d.length === 11 && !d.startsWith("05");
-      };
-      const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
-
-      const preparedRows = [];
-      const filePhones = new Set();
-      const currentPhones = new Set(
-        customers.flatMap((customer) => [customer.phone, customer.phone_2]).map(normalizePhone).filter(Boolean)
-      );
-      let rejectedRows = 0;
-      let duplicateRows = 0;
-
-      setImportProgress({ phase: "Satırlar kontrol ediliyor", current: 0, total: rows.length });
-
-      rows.forEach((row, index) => {
-          const values = Object.values(row);
-          const keys = Object.keys(row);
-
-          const getByHeader = (names) => {
-            const key = keys.find((k) =>
-              names.some((n) => normalizeHeader(k).includes(normalizeHeader(n)))
-            );
-            return key ? row[key] : "";
-          };
-
-          const fullName =
-            getByHeader(["hesap adı", "hesap adi", "adı soyadı", "adi soyadi", "ad soyad", "müşteri", "musteri"]) ||
-            values.find((v) => {
-              const text = String(v || "").trim();
-              return text && /[a-zA-ZğüşöçıİĞÜŞÖÇ]/.test(text);
-            }) ||
-            "";
-
-          const phoneKeys = keys.filter((key) =>
-            /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(key))
-          );
-          const orderedPhoneValues = [
-            ...phoneKeys
-              .filter((key) => !/2$/.test(normalizeHeader(key)))
-              .map((key) => row[key]),
-            ...phoneKeys
-              .filter((key) => /2$/.test(normalizeHeader(key)))
-              .map((key) => row[key]),
-            ...values,
-          ];
-          const phoneValues = [...new Set(orderedPhoneValues.map(spreadsheetPhone).filter(Boolean))];
-          const phoneValue = phoneValues[0] || "";
-          const phone2Value = phoneValues[1] || "";
-
-          const tcValue =
-            cleanDigits(getByHeader(["tc", "t.c", "kimlik"])) ||
-            values.map((v) => cleanDigits(v)).find((v) => isTc(v)) ||
-            "";
-
-          const normalizedPhone = normalizePhone(phoneValue);
-          const normalizedPhone2 = normalizePhone(phone2Value);
-          const rowPhones = [normalizedPhone, normalizedPhone2].filter(Boolean);
-
-          if (!String(fullName).trim() || !normalizedPhone) {
-            rejectedRows += 1;
-            return;
-          }
-
-          if (rowPhones.some((phone) => filePhones.has(phone) || currentPhones.has(phone))) {
-            duplicateRows += 1;
-            return;
-          }
-
-          rowPhones.forEach((phone) => filePhones.add(phone));
-
-          const parts = String(fullName).trim().split(/\s+/);
-
-          preparedRows.push({
-            first_name: parts.slice(0, -1).join(" ") || String(fullName),
-            last_name: parts.length > 1 ? parts.at(-1) : "",
-            phone: normalizedPhone,
-            phone_2: normalizedPhone2 || null,
-            tc_no: tcValue,
-            email: "",
-            batch_name: file.name,
-            batch_page: selectedSheet.headerRowIndex + index + 2,
-            info_note: "",
-            status: "pool",
-            approved: false,
-            payment_received: false,
-            created_by: profile.id,
-            last_action_by: profile.id,
-          });
-
-          if ((index + 1) % 1000 === 0 || index === rows.length - 1) {
-            setImportProgress({ phase: "Satırlar kontrol ediliyor", current: index + 1, total: rows.length });
-          }
-        });
+      const { sheetName, rejectedRows, duplicateRows } = parsed;
+      const preparedRows = parsed.rows.map((row) => ({
+        ...row,
+        created_by: profile.id,
+        last_action_by: profile.id,
+      }));
 
       if (preparedRows.length === 0) {
         throw new Error(`Geçerli kayıt bulunamadı. ${rejectedRows} eksik/hatalı, ${duplicateRows} mükerrer satır tespit edildi.`);
       }
 
       const confirmed = window.confirm(
-        `'${selectedSheet.sheetName}' sayfası kontrol edildi.\n\n` +
+        `'${sheetName}' sayfası kontrol edildi.\n\n` +
         `${preparedRows.length} geçerli kayıt yüklenecek.\n` +
         `${rejectedRows} eksik ad/telefon satırı yüklenmeyecek.\n` +
         `${duplicateRows} mükerrer satır yüklenmeyecek.\n\nDevam edilsin mi?`
@@ -720,7 +617,7 @@ function App() {
       if (!confirmed) return;
 
       let imported = 0;
-      const batchSize = 500;
+      const batchSize = 200;
 
       for (let i = 0; i < preparedRows.length; i += batchSize) {
         const chunk = preparedRows.slice(i, i + batchSize);
@@ -738,7 +635,7 @@ function App() {
 
         imported += chunk.length;
         setImportProgress({ phase: "Supabase'e kaydediliyor", current: imported, total: preparedRows.length });
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
 
       alert(`${imported} müşteri güvenle yüklendi. ${rejectedRows} eksik/hatalı ve ${duplicateRows} mükerrer satır atlandı.`);
