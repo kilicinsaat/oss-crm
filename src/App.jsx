@@ -72,6 +72,7 @@ function App() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   const [loading, setLoading] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
   const [customerFilter, setCustomerFilter] = useState("all");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -97,6 +98,76 @@ function App() {
     full_name: "",
     role: "employee",
   });
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function restoreSession() {
+      try {
+        const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) throw sessionError;
+
+        const sessionUser = sessionData.session?.user;
+        if (!sessionUser) return;
+
+        const { data: userProfile, error: profileError } = await runWithRetry(() =>
+          supabase.from("profiles").select("*").eq("id", sessionUser.id).maybeSingle()
+        );
+
+        if (profileError || !userProfile || userProfile.is_active === false) {
+          await supabase.auth.signOut();
+          return;
+        }
+
+        const restoredCustomers = [];
+        const pageSize = 1000;
+        for (let from = 0; ; from += pageSize) {
+          const { data, error } = await runWithRetry(() =>
+            supabase
+              .from("customers")
+              .select("*")
+              .order("created_at", { ascending: false })
+              .order("id", { ascending: false })
+              .range(from, from + pageSize - 1)
+          );
+          if (error) throw error;
+          restoredCustomers.push(...(data || []));
+          if (!data || data.length < pageSize) break;
+        }
+
+        const { data: restoredUsers, error: usersError } = await runWithRetry(() =>
+          supabase
+            .from("profiles")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false })
+        );
+        if (usersError) throw usersError;
+        if (!mounted) return;
+
+        setProfile(userProfile);
+        setProfileForm({
+          full_name: userProfile.full_name || "",
+          job_title: userProfile.job_title || "",
+          phone: userProfile.phone || "",
+          bio: userProfile.bio || "",
+          avatar_url: userProfile.avatar_url || "",
+          availability_status: userProfile.availability_status || "online",
+        });
+        setCustomers(restoredCustomers);
+        setUsers(restoredUsers || []);
+      } catch (error) {
+        if (mounted) console.error("Oturum geri yüklenemedi:", error);
+      } finally {
+        if (mounted) setAuthReady(true);
+      }
+    }
+
+    restoreSession();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     function handleEscape(event) {
@@ -965,6 +1036,17 @@ function App() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, sheet, "Musteriler");
     XLSX.writeFile(workbook, fileName);
+  }
+
+  if (!authReady) {
+    return (
+      <div style={loginPage}>
+        <div style={{ ...loginCard, textAlign: "center" }}>
+          <h2>Oturum açılıyor...</h2>
+          <p style={{ opacity: 0.65 }}>Panel hazırlanıyor</p>
+        </div>
+      </div>
+    );
   }
 
   if (!profile) {
