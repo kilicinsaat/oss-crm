@@ -840,7 +840,8 @@ function App() {
     const mixupCount = customers.filter((customer) => {
       const phone = String(customer.phone || "").replace(/\D/g, "");
       const tc = String(customer.tc_no || "").replace(/\D/g, "");
-      return tc.length === 11 && phone === tc.slice(-10);
+      const malformedTc = tc.length > 0 && !/^[1-9]\d{10}$/.test(tc);
+      return malformedTc || (tc.length === 11 && phone === tc.slice(-10));
     }).length;
 
     if (mixupCount === 0) {
@@ -848,7 +849,7 @@ function App() {
       return;
     }
 
-    if (!window.confirm(`${mixupCount} kayıtta TC benzeri değerin son 10 hanesi telefon alanına yazılmış. Telefon 2 varsa kart düzeltilecek, yoksa hatalı kart silinecek. Devam edilsin mi?`)) return;
+    if (!window.confirm(`${mixupCount} kayıtta TC alanı bozuk veya telefonla karışmış. Bozuk TC alanları temizlenecek; Telefon 2'de geçerli cep varsa korunacak. Devam edilsin mi?`)) return;
 
     const { data: affectedCount, error } = await runWithRetry(() =>
       supabase.rpc("repair_phone_tc_mixups")

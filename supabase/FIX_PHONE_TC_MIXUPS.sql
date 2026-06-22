@@ -35,9 +35,15 @@ begin
 
   select count(*) into affected_count
   from public.customers
-  where length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) = 11
-    and regexp_replace(coalesce(phone, ''), '\D', '', 'g') =
-      right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10);
+  where (
+      length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) = 11
+      and regexp_replace(coalesce(phone, ''), '\D', '', 'g') =
+        right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
+    )
+    or (
+      length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) > 0
+      and regexp_replace(coalesce(tc_no, ''), '\D', '', 'g') !~ '^[1-9][0-9]{10}$'
+    );
 
   -- Preserve the card when Telefon 2 contains a real number: promote it to Telefon.
   update public.customers
@@ -65,6 +71,12 @@ begin
     and regexp_replace(coalesce(phone, ''), '\D', '', 'g') =
       right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
     and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$';
+
+  -- Remove leftover landline/short values from TC without touching valid-looking TC values.
+  update public.customers
+  set tc_no = null
+  where length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) > 0
+    and regexp_replace(coalesce(tc_no, ''), '\D', '', 'g') !~ '^[1-9][0-9]{10}$';
 
   return affected_count;
 end;
