@@ -796,6 +796,37 @@ function App() {
     alert("Tüm müşteri verisi temizlendi.");
   }
 
+  async function deleteCustomersWithoutPhone() {
+    if (!profile || profile.role !== "boss") return;
+    const missingPhoneCount = customers.filter((customer) =>
+      ![customer.phone, customer.phone_2].some((phone) => String(phone || "").replace(/\D/g, "").length >= 10)
+    ).length;
+
+    if (missingPhoneCount === 0) {
+      alert("Telefon numarası olmayan müşteri kartı bulunamadı.");
+      return;
+    }
+
+    if (!window.confirm(`${missingPhoneCount} müşteri kartında Telefon ve Telefon 2 alanlarında geçerli numara yok. Bu kartlar ve işlem geçmişleri kalıcı olarak silinsin mi?`)) return;
+
+    const { data: deletedCount, error } = await runWithRetry(() =>
+      supabase.rpc("delete_customers_without_phone")
+    );
+    if (error) {
+      const setupMissing = error.code === "PGRST202" || error.message?.includes("delete_customers_without_phone");
+      alert(setupMissing
+        ? "Temizlik kurulumu eksik. Supabase SQL Editor'da CLEAN_CUSTOMERS_WITHOUT_PHONE.sql dosyasını bir kez çalıştır."
+        : "Numarasız müşteri kartları silinemedi; hiçbir kayıt değiştirilmedi: " + error.message);
+      return;
+    }
+
+    setSelectedCustomer(null);
+    setCustomerLogs([]);
+    setSelectedIds([]);
+    await loadCustomers();
+    alert(`${Number(deletedCount) || 0} numarasız müşteri kartı güvenle silindi.`);
+  }
+
   async function assignCustomer(customerId, employeeId) {
   if (!profile) return;
 
@@ -1193,7 +1224,10 @@ const unreadMessageCount = messages.filter((message) => message.recipient_id ===
                 )}
                 <div style={dataActions}>
                   <span style={mutedText}>Yeniden yükleme öncesi mevcut müşteri listesini temizleyebilirsin.</span>
-                  <button type="button" onClick={deleteAllCustomerData} style={deleteAllButton}>Tüm Müşteri Datasını Sil</button>
+                  <div style={cleanupButtons}>
+                    <button type="button" onClick={deleteCustomersWithoutPhone} style={cleanInvalidButton}>Numarasız Kartları Temizle</button>
+                    <button type="button" onClick={deleteAllCustomerData} style={deleteAllButton}>Tüm Müşteri Datasını Sil</button>
+                  </div>
                 </div>
               </div>
             )}
@@ -2779,6 +2813,8 @@ const callbackButton = { borderColor: "rgba(192,132,252,0.55)", color: "#d8b4fe"
 const appointmentButton = { borderColor: "rgba(251,191,36,0.6)", background: "rgba(180,83,9,0.32)", color: "#fde68a" };
 const duplicateWarning = { marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", fontSize: 13, lineHeight: 1.45 };
 const dataActions = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8, paddingTop: 14, borderTop: "1px solid rgba(147,197,253,0.16)" };
+const cleanupButtons = { display: "flex", flexWrap: "wrap", gap: 8 };
+const cleanInvalidButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(251,191,36,0.55)", background: "rgba(180,83,9,0.38)", color: "#fde68a", cursor: "pointer", fontWeight: 700 };
 const deleteAllButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(252,165,165,0.6)", background: "rgba(127,29,29,0.56)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
 const importProgressBox = { display: "grid", gap: 8, margin: "4px 0 14px", padding: 12, borderRadius: 8, background: "rgba(7,26,54,0.62)", border: "1px solid rgba(125,211,252,0.2)", fontSize: 13 };
 const customerHeatBar = { height: 4, borderRadius: 999, marginBottom: 16, opacity: 0.95 };
