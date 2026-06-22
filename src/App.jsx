@@ -188,8 +188,9 @@ function App() {
           .maybeSingle()
       );
 
-      if (profileError || !userProfile) {
-        alert("Profil bulunamadı.");
+      if (profileError || !userProfile || userProfile.is_active === false) {
+        await supabase.auth.signOut();
+        alert(userProfile?.is_active === false ? "Bu kullanıcı hesabı pasif durumda." : "Profil bulunamadı.");
         return;
       }
 
@@ -260,6 +261,7 @@ function App() {
       supabase
         .from("profiles")
         .select("*")
+        .eq("is_active", true)
         .order("created_at", { ascending: false })
     );
 
@@ -496,14 +498,47 @@ function App() {
 
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: "array" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      if (!sheet) throw new Error("Excel içinde okunabilir bir sayfa bulunamadı.");
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
-      if (rows.length === 0) throw new Error("Excel'in ilk sayfasında yüklenecek satır bulunamadı.");
+      const normalizeHeader = (value) => String(value || "")
+        .toLocaleLowerCase("tr-TR")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]/g, "");
+      const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(value));
+      const isNameHeader = (value) => ["hesapad", "adisoyad", "adsoyad", "musteri", "unvan"]
+        .some((name) => normalizeHeader(value).includes(name));
 
-      const isPhone = (value) => {
-        const d = normalizePhone(value);
-        return d.length === 10 && d.startsWith("5");
+      const sheetCandidates = workbook.SheetNames.map((sheetName) => {
+        const candidateSheet = workbook.Sheets[sheetName];
+        const matrix = XLSX.utils.sheet_to_json(candidateSheet, { header: 1, defval: "", raw: false });
+        const headerRowIndex = matrix.slice(0, 30).findIndex((row) =>
+          row.some(isPhoneHeader) && row.some(isNameHeader)
+        );
+        return { sheetName, sheet: candidateSheet, matrix, headerRowIndex };
+      }).filter((candidate) => candidate.headerRowIndex >= 0)
+        .sort((a, b) => (b.matrix.length - b.headerRowIndex) - (a.matrix.length - a.headerRowIndex));
+
+      const selectedSheet = sheetCandidates[0];
+      if (!selectedSheet) {
+        throw new Error("Telefon ve müşteri adı başlıkları bulunamadı. Sütunlarda 'Telefon-1' ve 'Hesap Adı' gibi başlıklar olmalı.");
+      }
+
+      const rows = XLSX.utils.sheet_to_json(selectedSheet.sheet, {
+        defval: "",
+        raw: false,
+        range: selectedSheet.headerRowIndex,
+      });
+      if (rows.length === 0) throw new Error(`'${selectedSheet.sheetName}' sayfasında yüklenecek satır bulunamadı.`);
+
+      const spreadsheetPhone = (value) => {
+        let text = String(value ?? "").trim();
+        if (/^\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(text)) {
+          text = Number(text.replace(",", ".")).toFixed(0);
+        }
+
+        let digits = text.replace(/\D/g, "");
+        if (digits.length === 12 && digits.startsWith("90")) digits = digits.slice(2);
+        if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
+        return /^[2345]\d{9}$/.test(digits) ? digits : "";
       };
       const isTc = (value) => {
         const d = String(value || "").replace(/\D/g, "");
@@ -516,7 +551,7 @@ function App() {
       const currentPhones = new Set(
         customers.flatMap((customer) => [customer.phone, customer.phone_2]).map(normalizePhone).filter(Boolean)
       );
-      let incompleteRows = 0;
+      let rejectedRows = 0;
       let duplicateRows = 0;
 
       setImportProgress({ phase: "Satırlar kontrol ediliyor", current: 0, total: rows.length });
@@ -527,31 +562,34 @@ function App() {
 
           const getByHeader = (names) => {
             const key = keys.find((k) =>
-              names.some((n) =>
-                k.toString().toLowerCase().includes(n.toLowerCase())
-              )
+              names.some((n) => normalizeHeader(k).includes(normalizeHeader(n)))
             );
             return key ? row[key] : "";
           };
 
           const fullName =
-            getByHeader(["adı soyadı", "adi soyadi", "ad soyad", "müşteri", "musteri"]) ||
+            getByHeader(["hesap adı", "hesap adi", "adı soyadı", "adi soyadi", "ad soyad", "müşteri", "musteri"]) ||
             values.find((v) => {
               const text = String(v || "").trim();
               return text && /[a-zA-ZğüşöçıİĞÜŞÖÇ]/.test(text);
             }) ||
             "";
 
-          const phoneValues = values
-            .map((v) => cleanDigits(v))
-            .filter((v) => isPhone(v));
-
-          const headerPhone = cleanDigits(
-            getByHeader(["cep tel", "cep", "telefon", "tel"])
+          const phoneKeys = keys.filter((key) =>
+            /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(key))
           );
-
-          const phoneValue = isPhone(headerPhone) ? headerPhone : phoneValues[0] || "";
-          const phone2Value = phoneValues.find((p) => p !== phoneValue) || "";
+          const orderedPhoneValues = [
+            ...phoneKeys
+              .filter((key) => !/2$/.test(normalizeHeader(key)))
+              .map((key) => row[key]),
+            ...phoneKeys
+              .filter((key) => /2$/.test(normalizeHeader(key)))
+              .map((key) => row[key]),
+            ...values,
+          ];
+          const phoneValues = [...new Set(orderedPhoneValues.map(spreadsheetPhone).filter(Boolean))];
+          const phoneValue = phoneValues[0] || "";
+          const phone2Value = phoneValues[1] || "";
 
           const tcValue =
             cleanDigits(getByHeader(["tc", "t.c", "kimlik"])) ||
@@ -559,25 +597,32 @@ function App() {
             "";
 
           const normalizedPhone = normalizePhone(phoneValue);
-          if (normalizedPhone && (filePhones.has(normalizedPhone) || currentPhones.has(normalizedPhone))) {
+          const normalizedPhone2 = normalizePhone(phone2Value);
+          const rowPhones = [normalizedPhone, normalizedPhone2].filter(Boolean);
+
+          if (!String(fullName).trim() || !normalizedPhone) {
+            rejectedRows += 1;
+            return;
+          }
+
+          if (rowPhones.some((phone) => filePhones.has(phone) || currentPhones.has(phone))) {
             duplicateRows += 1;
             return;
           }
 
-          if (!fullName || !normalizedPhone) incompleteRows += 1;
-          if (normalizedPhone) filePhones.add(normalizedPhone);
+          rowPhones.forEach((phone) => filePhones.add(phone));
 
           const parts = String(fullName).trim().split(/\s+/);
 
           preparedRows.push({
             first_name: parts.slice(0, -1).join(" ") || String(fullName),
             last_name: parts.length > 1 ? parts.at(-1) : "",
-            phone: normalizedPhone || null,
-            phone_2: normalizePhone(phone2Value) || null,
+            phone: normalizedPhone,
+            phone_2: normalizedPhone2 || null,
             tc_no: tcValue,
             email: "",
             batch_name: file.name,
-            batch_page: index + 1,
+            batch_page: selectedSheet.headerRowIndex + index + 2,
             info_note: "",
             status: "pool",
             approved: false,
@@ -590,6 +635,18 @@ function App() {
             setImportProgress({ phase: "Satırlar kontrol ediliyor", current: index + 1, total: rows.length });
           }
         });
+
+      if (preparedRows.length === 0) {
+        throw new Error(`Geçerli kayıt bulunamadı. ${rejectedRows} eksik/hatalı, ${duplicateRows} mükerrer satır tespit edildi.`);
+      }
+
+      const confirmed = window.confirm(
+        `'${selectedSheet.sheetName}' sayfası kontrol edildi.\n\n` +
+        `${preparedRows.length} geçerli kayıt yüklenecek.\n` +
+        `${rejectedRows} eksik ad/telefon satırı yüklenmeyecek.\n` +
+        `${duplicateRows} mükerrer satır yüklenmeyecek.\n\nDevam edilsin mi?`
+      );
+      if (!confirmed) return;
 
       let imported = 0;
       const batchSize = 500;
@@ -613,7 +670,7 @@ function App() {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
 
-      alert(`${imported} müşteri yükleme için işlendi. ${incompleteRows} satırda eksik ad veya telefon var; yine de yüklendi. ${duplicateRows} mükerrer satır atlandı.`);
+      alert(`${imported} müşteri güvenle yüklendi. ${rejectedRows} eksik/hatalı ve ${duplicateRows} mükerrer satır atlandı.`);
       await loadCustomers();
     } catch (err) {
       alert("Excel okunamadı: " + err.message);
@@ -699,7 +756,10 @@ function App() {
     }
 
     if (error) {
-      alert("Kullanıcı eklenemedi: " + (error.message || "Bağlantı kurulamadı."));
+      const isRlsError = error.code === "42501" || error.message?.includes("row-level security");
+      alert(isRlsError
+        ? "Kullanıcı ekleme yetkisi henüz kurulmamış. Supabase SQL Editor'da BOSS_PROFILE_MANAGEMENT.sql dosyasını bir kez çalıştır."
+        : "Kullanıcı eklenemedi: " + (error.message || "Bağlantı kurulamadı."));
       return;
     }
 
@@ -710,31 +770,20 @@ function App() {
 
   async function deleteStaff(staff) {
     if (!profile || profile.role !== "boss" || staff.role !== "employee") return;
-    if (!window.confirm(`${staff.full_name || staff.email} adlı rep profili silinsin mi? Atanmış müşterileri havuza geri dönecek.`)) return;
+    if (!window.confirm(`${staff.full_name || staff.email} adlı Rep pasife alınsın mı? Atanmış müşterilerinin tamamı güvenli şekilde havuza dönecek.`)) return;
 
-    const assignedCustomerCount = customers.filter((customer) => customer.assigned_employee === staff.id).length;
-
-    if (assignedCustomerCount > 0) {
-      const { error: customerError } = await runWithRetry(() =>
-        supabase
-          .from("customers")
-          .update({ assigned_employee: null, status: "pool", assigned_at: null, last_action_by: profile.id })
-          .eq("assigned_employee", staff.id)
-      );
-
-      if (customerError) {
-        alert("Rep müşterileri havuza alınamadı: " + customerError.message);
-        return;
-      }
-    }
-
-    const { error } = await runWithRetry(() => supabase.from("profiles").delete().eq("id", staff.id));
+    const { data: releasedCount, error } = await runWithRetry(() =>
+      supabase.rpc("deactivate_rep_and_release_customers", { target_rep_id: staff.id })
+    );
     if (error) {
-      alert("Rep profili silinemedi: " + error.message);
+      const setupMissing = error.code === "PGRST202" || error.message?.includes("deactivate_rep_and_release_customers");
+      alert(setupMissing
+        ? "Güvenli Rep silme kurulumu eksik. Supabase SQL Editor'da SAFE_REP_REMOVAL.sql dosyasını bir kez çalıştır."
+        : "Rep pasife alınamadı; hiçbir müşteri kaydı değiştirilmedi: " + error.message);
       return;
     }
 
-    alert("Rep profili silindi, atanmış müşteriler havuza döndü.");
+    alert(`Rep pasife alındı, ${Number(releasedCount) || 0} müşteri havuza döndü.`);
     await loadUsers();
     await loadCustomers();
   }
