@@ -827,6 +827,36 @@ function App() {
     alert(`${Number(deletedCount) || 0} numarasız müşteri kartı güvenle silindi.`);
   }
 
+  async function repairPhoneTcMixups() {
+    if (!profile || profile.role !== "boss") return;
+    const mixupCount = customers.filter((customer) => {
+      const phone = String(customer.phone || "").replace(/\D/g, "");
+      const tc = String(customer.tc_no || "").replace(/\D/g, "");
+      return tc.length === 11 && phone === tc.slice(-10);
+    }).length;
+
+    if (mixupCount === 0) {
+      alert("TC ile karışmış telefon kaydı bulunamadı.");
+      return;
+    }
+
+    if (!window.confirm(`${mixupCount} kayıtta TC benzeri değerin son 10 hanesi telefon alanına yazılmış. Telefon 2 varsa kart düzeltilecek, yoksa hatalı kart silinecek. Devam edilsin mi?`)) return;
+
+    const { data: affectedCount, error } = await runWithRetry(() =>
+      supabase.rpc("repair_phone_tc_mixups")
+    );
+    if (error) {
+      const setupMissing = error.code === "PGRST202" || error.message?.includes("repair_phone_tc_mixups");
+      alert(setupMissing
+        ? "Düzeltme kurulumu eksik. Supabase SQL Editor'da FIX_PHONE_TC_MIXUPS.sql dosyasını bir kez çalıştır."
+        : "TC/telefon karışıklığı düzeltilemedi; hiçbir kayıt değiştirilmedi: " + error.message);
+      return;
+    }
+
+    await loadCustomers();
+    alert(`${Number(affectedCount) || 0} karışmış kayıt düzeltildi veya güvenle silindi.`);
+  }
+
   async function assignCustomer(customerId, employeeId) {
   if (!profile) return;
 
@@ -1225,6 +1255,7 @@ const unreadMessageCount = messages.filter((message) => message.recipient_id ===
                 <div style={dataActions}>
                   <span style={mutedText}>Yeniden yükleme öncesi mevcut müşteri listesini temizleyebilirsin.</span>
                   <div style={cleanupButtons}>
+                    <button type="button" onClick={repairPhoneTcMixups} style={cleanInvalidButton}>TC/Telefon Karışanları Düzelt</button>
                     <button type="button" onClick={deleteCustomersWithoutPhone} style={cleanInvalidButton}>Numarasız Kartları Temizle</button>
                     <button type="button" onClick={deleteAllCustomerData} style={deleteAllButton}>Tüm Müşteri Datasını Sil</button>
                   </div>

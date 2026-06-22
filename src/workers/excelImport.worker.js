@@ -27,9 +27,15 @@ const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)
 const isNameHeader = (value) => ["hesapad", "adisoyad", "adsoyad", "musteri", "unvan"]
   .some((name) => normalizeHeader(value).includes(name));
 const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
-const isTc = (value) => {
+const validTurkishTc = (value) => {
   const digits = cleanDigits(value);
-  return digits.length === 11 && !digits.startsWith("05");
+  if (!/^[1-9]\d{10}$/.test(digits)) return "";
+  const numbers = [...digits].map(Number);
+  const tenthRaw = (numbers[0] + numbers[2] + numbers[4] + numbers[6] + numbers[8]) * 7 -
+    (numbers[1] + numbers[3] + numbers[5] + numbers[7]);
+  const tenth = ((tenthRaw % 10) + 10) % 10;
+  const eleventh = numbers.slice(0, 10).reduce((sum, number) => sum + number, 0) % 10;
+  return tenth === numbers[9] && eleventh === numbers[10] ? digits : "";
 };
 
 self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
@@ -84,7 +90,6 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
       const orderedPhoneValues = [
         ...phoneKeys.filter((key) => !/2$/.test(normalizeHeader(key))).map((key) => row[key]),
         ...phoneKeys.filter((key) => /2$/.test(normalizeHeader(key))).map((key) => row[key]),
-        ...values,
       ];
       const phoneValues = [...new Set(orderedPhoneValues.map(spreadsheetPhone).filter(Boolean))];
       const normalizedPhone = normalizePhone(phoneValues[0]);
@@ -98,8 +103,7 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
       } else {
         rowPhones.forEach((phone) => filePhones.add(phone));
         const parts = String(fullName).trim().split(/\s+/);
-        const tcValue = cleanDigits(getByHeader(["tc", "t.c", "kimlik"])) ||
-          values.map(cleanDigits).find(isTc) || "";
+        const tcValue = validTurkishTc(getByHeader(["tc", "t.c", "kimlik"]));
 
         preparedRows.push({
           first_name: parts.slice(0, -1).join(" ") || String(fullName),
