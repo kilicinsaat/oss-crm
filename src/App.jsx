@@ -902,18 +902,15 @@ function App() {
   async function assignCustomer(customerId, employeeId) {
   if (!profile) return;
 
-  if (!employeeId) {
-    alert("Rep seçilmedi.");
-    return;
-  }
+  const moveToPool = !employeeId;
 
   const { error } = await runWithRetry(() =>
     supabase
       .from("customers")
       .update({
-        assigned_employee: employeeId,
-        status: "assigned",
-        assigned_at: new Date().toISOString(),
+        assigned_employee: moveToPool ? null : employeeId,
+        status: moveToPool ? "pool" : "assigned",
+        assigned_at: moveToPool ? null : new Date().toISOString(),
         last_action_by: profile.id,
       })
       .eq("id", customerId)
@@ -924,45 +921,53 @@ function App() {
     return;
   }
 
-  alert("Müşteri rep'e atandı.");
+  alert(moveToPool ? "Müşteri havuza alındı." : "Müşteri rep'e atandı.");
   await loadCustomers();
 }
 
-  async function bulkAssignCustomers() {
-    if (!bulkEmployee || selectedIds.length === 0 || !profile) {
+  async function bulkAssignCustomers(customerIdsOverride, employeeOverride, sourceEmployeeOverride) {
+    const customerIdsToUpdate = sourceEmployeeOverride
+      ? customers.filter((customer) => customer.assigned_employee === sourceEmployeeOverride).map((customer) => customer.id)
+      : Array.isArray(customerIdsOverride) ? customerIdsOverride : selectedIds;
+    const targetEmployee = typeof employeeOverride === "string" ? employeeOverride : bulkEmployee;
+    const moveToPool = targetEmployee === "__pool__";
+
+    if (!targetEmployee || customerIdsToUpdate.length === 0 || !profile) {
       alert("Müşteri ve rep seç.");
       return;
     }
 
+    if (moveToPool && !window.confirm(`${customerIdsToUpdate.length} müşteri havuza geri alınsın mı?`)) return;
+
     const batchSize = 100;
-    let assigned = 0;
+    let processed = 0;
 
     try {
-      for (let index = 0; index < selectedIds.length; index += batchSize) {
-        const customerIds = selectedIds.slice(index, index + batchSize);
+      for (let index = 0; index < customerIdsToUpdate.length; index += batchSize) {
+        const customerIds = customerIdsToUpdate.slice(index, index + batchSize);
         const { error } = await runWithRetry(() =>
           supabase
             .from("customers")
             .update({
-              assigned_employee: bulkEmployee,
-              status: "assigned",
-              assigned_at: new Date().toISOString(),
+              assigned_employee: moveToPool ? null : targetEmployee,
+              status: moveToPool ? "pool" : "assigned",
+              assigned_at: moveToPool ? null : new Date().toISOString(),
               last_action_by: profile.id,
             })
             .in("id", customerIds)
         );
 
         if (error) throw error;
-        assigned += customerIds.length;
+        processed += customerIds.length;
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     } catch (error) {
-      alert(`Toplu atama ${assigned} müşteri sonrasında durdu: ${error.message || "Bağlantı hatası"}`);
+      alert(`Toplu işlem ${processed} müşteri sonrasında durdu: ${error.message || "Bağlantı hatası"}`);
       await loadCustomers();
       return;
     }
 
-    alert(`${assigned} müşteri atandı.`);
+    alert(moveToPool ? `${processed} müşteri havuza alındı.` : `${processed} müşteri atandı.`);
     setSelectedIds([]);
     setBulkEmployee("");
     await loadCustomers();
@@ -2382,6 +2387,19 @@ function CustomerTable({
     );
   }
 
+  function renderPagination(position = "bottom") {
+    if (pageCount <= 1) return null;
+    return (
+      <div style={{ ...paginationBar, ...(position === "top" ? topPaginationBar : {}) }}>
+        <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage(1)}>İlk</button>
+        <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(value - 1, 1))}>Önceki</button>
+        <strong>{currentPage} / {pageCount}</strong>
+        <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(value + 1, pageCount))}>Sonraki 100</button>
+        <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage(pageCount)}>Son</button>
+      </div>
+    );
+  }
+
   return (
     <div style={panelCard}>
       <h2>{title}</h2>
@@ -2412,6 +2430,21 @@ function CustomerTable({
         <span>{currentPage}. sayfa / {pageCount}</span>
       </div>
 
+      {renderPagination("top")}
+
+      {canManage && !["all", "pool"].includes(assigneeFilter) && filteredData.length > 0 && (
+        <div style={releaseRepBar}>
+          <span>Seçili Rep’in üzerindeki bütün müşterileri havuza geri alabilirsin.</span>
+          <button
+            type="button"
+            style={releaseToPoolButton}
+            onClick={() => bulkAssignCustomers(null, "__pool__", assigneeFilter)}
+          >
+            Repteki Tümünü Havuza Al
+          </button>
+        </div>
+      )}
+
       {canManage && (
   <div style={bulkBar}>
     <strong>Seçili: {selectedIds.length}</strong>
@@ -2434,6 +2467,7 @@ function CustomerTable({
       style={selectStyle}
     >
       <option value="">Rep / manager seç</option>
+      <option value="__pool__">↩ Seçilenleri Havuza Al</option>
       {employees.map((emp) => (
         <option key={emp.id} value={emp.id}>
           {emp.full_name || emp.email}
@@ -2441,8 +2475,8 @@ function CustomerTable({
       ))}
     </select>
 
-    <button onClick={bulkAssignCustomers} style={smallButton}>
-      Seçilenleri Ata
+    <button onClick={() => bulkAssignCustomers()} style={smallButton}>
+      {bulkEmployee === "__pool__" ? "Seçilenleri Havuza Al" : "Seçilenleri Ata"}
     </button>
   </div>
 )}
@@ -2505,15 +2539,7 @@ function CustomerTable({
           </div>
         ))}
       </div>
-      {pageCount > 1 && (
-        <div style={paginationBar}>
-          <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage(1)}>İlk</button>
-          <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(value - 1, 1))}>Önceki</button>
-          <strong>{currentPage} / {pageCount}</strong>
-          <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(value + 1, pageCount))}>Sonraki</button>
-          <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage(pageCount)}>Son</button>
-        </div>
-      )}
+      {renderPagination()}
     </div>
   );
 }
@@ -2827,6 +2853,9 @@ const bulkBar = {
   borderRadius: 12,
 };
 const paginationBar = { display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "center", gap: 8, marginTop: 16 };
+const topPaginationBar = { marginTop: 0, marginBottom: 14, padding: "10px 12px", borderRadius: 9, background: "rgba(7,26,54,0.55)", border: "1px solid rgba(147,197,253,0.16)" };
+const releaseRepBar = { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, padding: "10px 12px", borderRadius: 9, background: "rgba(180,83,9,0.18)", border: "1px solid rgba(251,191,36,0.35)", color: "#fde68a", fontSize: 13 };
+const releaseToPoolButton = { padding: "8px 11px", borderRadius: 7, border: "1px solid rgba(125,211,252,0.5)", background: "rgba(14,116,144,0.35)", color: "#cffafe", cursor: "pointer", fontWeight: 800 };
 const paginationButton = { minWidth: 66, padding: "8px 10px", borderRadius: 7, border: "1px solid rgba(125,211,252,0.35)", background: "#10284f", color: "#e0f2fe", cursor: "pointer", fontWeight: 700 };
 const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 14, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
 const employeeIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
