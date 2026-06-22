@@ -19,6 +19,11 @@ Esenyurt / İstanbul
 Herhangi bir sorunuz olursa bize ulaşabilirsiniz.
 `;
 const COMPANY_LOCATION_URL = "https://maps.app.goo.gl/c8cCAtc2671RzBZC9";
+const CUSTOMER_STATUSES = new Set([
+  "pool", "assigned", "called", "no_answer", "busy", "callback",
+  "appointment", "contract_appointment", "meeting_done", "not_approved",
+  "wrong_number", "approved", "paid",
+]);
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -935,7 +940,7 @@ function App() {
   }
 
   async function updateCustomer(customerId, updates) {
-    if (!profile) return;
+    if (!profile) return false;
     const becamePaid = updates.status === "paid" && selectedCustomer?.status !== "paid";
 
     const { error } = await runWithRetry(() =>
@@ -946,8 +951,13 @@ function App() {
     );
 
     if (error) {
-      alert("Müşteri güncellenemedi: " + error.message);
-      return;
+      const statusRuleError = error.code === "23514" ||
+        error.message?.includes("invalid input value for enum") ||
+        error.message?.includes("customers_status_check");
+      alert(statusRuleError
+        ? "Supabase müşteri durumları güncel değil. SQL Editor'da CUSTOMER_STATUS_UPGRADE.sql dosyasını bir kez çalıştır."
+        : "Müşteri güncellenemedi: " + error.message);
+      return false;
     }
 
     let logError;
@@ -969,7 +979,7 @@ function App() {
       await loadCustomers();
       setSelectedCustomer((prev) => prev ? { ...prev, ...updates } : prev);
       alert("Müşteri kaydedildi fakat işlem geçmişi kaydedilemedi: " + (logError.message || "Bağlantı kurulamadı."));
-      return;
+      return true;
     }
 
     await loadCustomers();
@@ -983,6 +993,7 @@ function App() {
     } else {
       alert("Kaydedildi.");
     }
+    return true;
   }
 
   function exportCustomersToExcel(data, fileName = "oss-crm-rapor.xlsx") {
@@ -2126,12 +2137,18 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
   const [detailNote, setDetailNote] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
+  const [savingCustomer, setSavingCustomer] = useState(false);
   const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
   const needsFollowUpDate = ["callback", "appointment", "contract_appointment"].includes(detailStatus);
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
 
-  function saveCustomer() {
+  async function saveCustomer() {
+    if (savingCustomer) return;
+    if (!CUSTOMER_STATUSES.has(detailStatus)) {
+      alert("Geçersiz müşteri durumu seçildi. Sayfayı yenileyip tekrar dene.");
+      return;
+    }
     if (detailStatus === "not_approved" && !notApprovedReason) {
       alert("Yapmayacak durumu için bir neden seçin.");
       return;
@@ -2161,7 +2178,13 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
         : detailNote.trim();
 
     if (note) updates.info_note = note;
-    updateCustomer(selectedCustomer.id, updates);
+    setSavingCustomer(true);
+    try {
+      const saved = await updateCustomer(selectedCustomer.id, updates);
+      if (saved) setDetailNote("");
+    } finally {
+      setSavingCustomer(false);
+    }
   }
 
   return (
@@ -2227,10 +2250,10 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
 
         <div style={quickOutcomeBar}>
           <span style={quickOutcomeLabel}>Arama sonucu</span>
-          <button type="button" onClick={() => setDetailStatus("no_answer")} style={{ ...quickOutcomeButton, ...noAnswerButton }}>Ulaşılamadı</button>
-          <button type="button" onClick={() => setDetailStatus("busy")} style={{ ...quickOutcomeButton, ...busyButton }}>Meşgul</button>
-          <button type="button" onClick={() => setDetailStatus("callback")} style={{ ...quickOutcomeButton, ...callbackButton }}>Sonra ara</button>
-          <button type="button" onClick={() => setDetailStatus("appointment")} style={{ ...quickOutcomeButton, ...appointmentButton }}>Randevu</button>
+          <button type="button" aria-pressed={detailStatus === "no_answer"} onClick={() => setDetailStatus("no_answer")} style={{ ...quickOutcomeButton, ...noAnswerButton, ...(detailStatus === "no_answer" ? quickOutcomeActive : {}) }}>Ulaşılamadı</button>
+          <button type="button" aria-pressed={detailStatus === "busy"} onClick={() => setDetailStatus("busy")} style={{ ...quickOutcomeButton, ...busyButton, ...(detailStatus === "busy" ? quickOutcomeActive : {}) }}>Meşgul</button>
+          <button type="button" aria-pressed={detailStatus === "callback"} onClick={() => setDetailStatus("callback")} style={{ ...quickOutcomeButton, ...callbackButton, ...(detailStatus === "callback" ? quickOutcomeActive : {}) }}>Sonra ara</button>
+          <button type="button" aria-pressed={detailStatus === "appointment"} onClick={() => setDetailStatus("appointment")} style={{ ...quickOutcomeButton, ...appointmentButton, ...(detailStatus === "appointment" ? quickOutcomeActive : {}) }}>Randevu</button>
         </div>
 
         {detailStatus === "not_approved" && (
@@ -2287,10 +2310,12 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
         </select>
 
         <button
-          style={primaryButton}
+          type="button"
+          disabled={savingCustomer}
+          style={{ ...primaryButton, opacity: savingCustomer ? 0.65 : 1 }}
           onClick={saveCustomer}
         >
-          Kaydet
+          {savingCustomer ? "Kaydediliyor..." : "Kaydet"}
         </button>
 
         <h3 style={historyTitle}>İşlem Geçmişi</h3>
@@ -2841,6 +2866,7 @@ const wrongNumberButton = { background: "linear-gradient(135deg,#ef4444,#b91c1c)
 const quickOutcomeBar = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, margin: "0 0 16px", padding: 10, borderRadius: 10, background: "rgba(7,26,54,0.68)", border: "1px solid rgba(147,197,253,0.15)" };
 const quickOutcomeLabel = { color: "#bfdbfe", fontSize: 13, fontWeight: 600, marginRight: 2 };
 const quickOutcomeButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid transparent", background: "#17355f", color: "white", cursor: "pointer", fontSize: 12, fontWeight: 600 };
+const quickOutcomeActive = { outline: "2px solid #e0f2fe", outlineOffset: 2, transform: "translateY(-1px)", boxShadow: "0 0 0 4px rgba(56,189,248,0.16)" };
 const noAnswerButton = { borderColor: "rgba(148,163,184,0.55)", color: "#cbd5e1" };
 const busyButton = { borderColor: "rgba(251,191,36,0.55)", color: "#fde68a" };
 const callbackButton = { borderColor: "rgba(192,132,252,0.55)", color: "#d8b4fe" };
