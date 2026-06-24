@@ -1357,12 +1357,16 @@ function App() {
     await loadCustomerLogs(customerId);
   }
 
+  const profileRole = profile?.role || "employee";
+  const profileId = profile?.id || "";
+  const profileFullName = profile?.full_name || "";
+  const profileEmail = profile?.email || "";
   const employees = users.filter((user) => ["employee", "manager"].includes(user.role));
-  const managerCustomers = profile.role === "manager"
-    ? customers.filter((customer) => customer.assigned_employee === profile.id)
+  const managerCustomers = profileRole === "manager"
+    ? customers.filter((customer) => customer.assigned_employee === profileId)
     : [];
-  const visibleCustomers = profile.role === "employee"
-    ? customers.filter((customer) => customer.assigned_employee === profile.id)
+  const visibleCustomers = profileRole === "employee"
+    ? customers.filter((customer) => customer.assigned_employee === profileId)
     : customers;
   const filteredCustomers = visibleCustomers
     .filter((customer) => {
@@ -1383,7 +1387,7 @@ function App() {
     ["called", "no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(customer.status)
   );
 
-  const welcomeName = profile.full_name || profile.email || "Kullanıcı";
+  const welcomeName = profileFullName || profileEmail || "Kullanıcı";
   const today = new Date();
   const reminderCustomers = visibleCustomers
     .filter((customer) => customer.appointment_date && ["callback", "appointment", "contract_appointment"].includes(customer.status))
@@ -1391,7 +1395,7 @@ function App() {
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const overdueReminders = reminderCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
   const todayWorkItems = reminderCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
-  const reportCustomers = profile.role === "employee" ? visibleCustomers : customers;
+  const reportCustomers = profileRole === "employee" ? visibleCustomers : customers;
   const repStats = users
     .filter((user) => user.role === "employee")
     .map((user) => ({ ...user, stats: getUserStats(customers, user.id) }))
@@ -1408,7 +1412,9 @@ function App() {
   ];
   const dataStats = getDataStats(reportCustomers);
   const manualDuplicate = findDuplicateCustomer(customers, form.phone);
-  const unreadMessageCount = messages.filter((message) => message.recipient_id === profile.id && !message.read_at).length;
+  const unreadMessageCount = profileId
+    ? messages.filter((message) => message.recipient_id === profileId && !message.read_at).length
+    : 0;
 
   if (!authReady) {
     return (
