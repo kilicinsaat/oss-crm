@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 
 const normalizeHeader = (value) => String(value || "")
-  .toLocaleLowerCase("tr-TR")
+  .toLowerCase()
   .normalize("NFD")
   .replace(/[\u0300-\u036f]/g, "")
   .replace(/[^a-z0-9]/g, "");
@@ -26,13 +26,14 @@ const spreadsheetPhone = (value) => {
 const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(value));
 const isNameHeader = (value) => ["hesapad", "adisoyad", "adsoyad", "musteri", "unvan"]
   .some((name) => normalizeHeader(value).includes(name));
+
 const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
 const validTurkishTc = (value) => {
   const digits = cleanDigits(value);
   if (!/^[1-9]\d{10}$/.test(digits)) return "";
   const numbers = [...digits].map(Number);
-  const tenthRaw = (numbers[0] + numbers[2] + numbers[4] + numbers[6] + numbers[8]) * 7 -
-    (numbers[1] + numbers[3] + numbers[5] + numbers[7]);
+  const tenthRaw = (numbers[0] + numbers[2] + numbers[4] + numbers[6] + numbers[8]) * 7
+    - (numbers[1] + numbers[3] + numbers[5] + numbers[7]);
   const tenth = ((tenthRaw % 10) + 10) % 10;
   const eleventh = numbers.slice(0, 10).reduce((sum, number) => sum + number, 0) % 10;
   return tenth === numbers[9] && eleventh === numbers[10] ? digits : "";
@@ -48,7 +49,8 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
         row.some(isPhoneHeader) && row.some(isNameHeader)
       );
       return { sheetName, sheet, rowCount: matrix.length, headerRowIndex };
-    }).filter((candidate) => candidate.headerRowIndex >= 0)
+    })
+      .filter((candidate) => candidate.headerRowIndex >= 0)
       .sort((a, b) => (b.rowCount - b.headerRowIndex) - (a.rowCount - a.headerRowIndex));
 
     const selectedSheet = sheetCandidates[0];
@@ -63,7 +65,7 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
     });
     if (rows.length === 0) throw new Error(`'${selectedSheet.sheetName}' sayfasında yüklenecek satır bulunamadı.`);
 
-    const currentPhones = new Set(existingPhones.map(normalizePhone).filter(Boolean));
+    const currentPhones = new Set((existingPhones || []).map(normalizePhone).filter(Boolean));
     const filePhones = new Set();
     const preparedRows = [];
     let rejectedRows = 0;
@@ -80,11 +82,12 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
       };
 
       const fullName =
-        getByHeader(["hesap adı", "hesap adi", "adı soyadı", "adi soyadi", "ad soyad", "müşteri", "musteri"]) ||
-        values.find((value) => {
+        getByHeader(["hesap adı", "hesap adi", "adı soyadı", "adi soyadi", "ad soyad", "müşteri", "musteri"])
+        || values.find((value) => {
           const text = String(value || "").trim();
-          return text && /[a-zA-ZğüşöçıİĞÜŞÖÇ]/.test(text);
-        }) || "";
+          return text && /[a-zA-ZğüşıöçİĞÜŞÖÇ]/.test(text);
+        })
+        || "";
 
       const phoneKeys = keys.filter(isPhoneHeader);
       const orderedPhoneValues = [

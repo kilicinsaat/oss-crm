@@ -28,9 +28,7 @@ create policy "Bosses create staff profiles"
   to authenticated
   with check (
     public.current_user_is_active_boss()
-    and created_by = auth.uid()
     and role in ('employee', 'manager')
-    and is_active = true
   );
 
 drop policy if exists "Bosses delete rep profiles" on public.profiles;

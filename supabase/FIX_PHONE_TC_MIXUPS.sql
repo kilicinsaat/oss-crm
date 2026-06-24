@@ -45,7 +45,6 @@ begin
       and regexp_replace(coalesce(tc_no, ''), '\D', '', 'g') !~ '^[1-9][0-9]{10}$'
     );
 
-  -- Preserve the card when Telefon 2 contains a real number: promote it to Telefon.
   update public.customers
   set phone = right(regexp_replace(phone_2, '\D', '', 'g'), 10),
       phone_2 = null,
@@ -55,7 +54,6 @@ begin
       right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
     and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) ~ '^5[0-9]{9}$';
 
-  -- If there is no real second phone, remove the corrupt card and its history.
   delete from public.customer_logs
   where customer_id in (
     select id
@@ -72,7 +70,6 @@ begin
       right(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g'), 10)
     and right(regexp_replace(coalesce(phone_2, ''), '\D', '', 'g'), 10) !~ '^5[0-9]{9}$';
 
-  -- Remove leftover landline/short values from TC without touching valid-looking TC values.
   update public.customers
   set tc_no = null
   where length(regexp_replace(coalesce(tc_no, ''), '\D', '', 'g')) > 0
