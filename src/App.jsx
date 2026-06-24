@@ -149,6 +149,18 @@ function formatTime(value) {
   return date.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatLongDate(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleDateString("tr-TR", {
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+}
+
 function isSameDay(value, date) {
   if (!value) return false;
   const target = new Date(value);
@@ -156,6 +168,44 @@ function isSameDay(value, date) {
   return target.getFullYear() === date.getFullYear()
     && target.getMonth() === date.getMonth()
     && target.getDate() === date.getDate();
+}
+
+function getNoteDayLabel(value, referenceDate = new Date()) {
+  if (!value) return "Tarih bilinmiyor";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Tarih bilinmiyor";
+  if (isSameDay(date, referenceDate)) return "Bugün";
+
+  const yesterday = new Date(referenceDate);
+  yesterday.setDate(referenceDate.getDate() - 1);
+  if (isSameDay(date, yesterday)) return "Dün";
+
+  return date.toLocaleDateString("tr-TR", {
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function groupNotesByDay(notes = []) {
+  const buckets = new Map();
+
+  notes.forEach((note) => {
+    const date = new Date(note.created_at);
+    const key = Number.isNaN(date.getTime()) ? "unknown" : date.toDateString();
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        key,
+        label: getNoteDayLabel(note.created_at),
+        dateText: formatDate(note.created_at),
+        notes: [],
+      });
+    }
+    buckets.get(key).notes.push(note);
+  });
+
+  return [...buckets.values()];
 }
 
 function roleName(role) {
@@ -2486,18 +2536,57 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
 }
 
 function NotesView({ myNotes, myNoteBody, setMyNoteBody, addMyNote, deleteMyNote, notesLoading, notesError, savingNote }) {
+  const orderedNotes = [...myNotes].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const groupedNotes = groupNotesByDay(orderedNotes);
+  const latestNote = orderedNotes[0];
+  const todayLabel = formatLongDate(new Date());
+  const latestLabel = latestNote ? getNoteDayLabel(latestNote.created_at) : "Bugün";
+  const latestDateText = latestNote ? formatLongDate(latestNote.created_at) : todayLabel;
+  const setupMissing = notesError?.includes("kurulumu eksik");
+
   return (
     <section style={panelCard}>
-      <div style={sectionHeader}>
+      <div style={notesHeader}>
         <div>
-          <h2 style={sectionTitle}>Notlarım</h2>
-          <p style={mutedText}>Kendi kişisel notlarını burada sakla.</p>
+          <span style={notesEyebrow}>Kişisel alan</span>
+          <h2 style={{ ...sectionTitle, fontSize: 28, marginBottom: 4 }}>Notlarım</h2>
+          <p style={mutedText}>Kendi kişisel notlarını burada sakla. Notlar gün bazlı gruplanır.</p>
+        </div>
+        <div style={notesHeaderStats}>
+          <div style={notesStatCard}>
+            <span style={notesStatLabel}>Toplam not</span>
+            <strong style={notesStatValue}>{notesLoading ? "..." : myNotes.length}</strong>
+          </div>
+          <div style={notesStatCardSoft}>
+            <span style={notesStatLabel}>Son kayıt günü</span>
+            <strong style={notesStatValue}>{latestLabel}</strong>
+            <small style={notesStatSubValue}>{latestDateText}</small>
+          </div>
         </div>
       </div>
 
-      {notesError && <div style={messageSetupNotice}>{notesError}</div>}
+      {notesError && (
+        <div style={notesSetupNotice}>
+          <div style={notesSetupIcon}>⚠</div>
+          <div style={{ flex: 1 }}>
+            <strong style={notesSetupTitle}>Notlar kurulumu eksik</strong>
+            <p style={notesSetupText}>{notesError}</p>
+            {setupMissing && (
+              <ul style={notesSetupList}>
+                <li>Supabase'te <strong>MY_NOTES.sql</strong> dosyasını bir kez çalıştır.</li>
+                <li>Kurulumdan sonra sayfayı yenile.</li>
+                <li>İlk not eklendiğinde aşağıda gün başlığı otomatik görünür.</li>
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
 
       <form onSubmit={addMyNote} style={notesComposer}>
+        <div style={notesComposerHeader}>
+          <strong>Yeni not</strong>
+          <span style={notesComposerHint}>Tarih ve saat otomatik kaydedilir</span>
+        </div>
         <textarea
           value={myNoteBody}
           onChange={(event) => setMyNoteBody(event.target.value)}
@@ -2513,16 +2602,39 @@ function NotesView({ myNotes, myNoteBody, setMyNoteBody, addMyNote, deleteMyNote
       </form>
 
       <div style={notesGrid}>
-        {myNotes.length === 0 && !notesLoading && <p style={mutedText}>Henüz not yok.</p>}
-        {myNotes.map((note) => (
-          <article key={note.id} style={noteCard}>
-            <div style={noteCardTop}>
-              <strong>Not</strong>
-              <button type="button" onClick={() => deleteMyNote(note.id)} style={noteDeleteButton}>Sil</button>
+        {orderedNotes.length === 0 && !notesLoading && (
+          <div style={notesEmptyState}>
+            <strong>Henüz not yok.</strong>
+            <p style={mutedText}>İlk notunu yukarıdan ekleyebilirsin. Sonra notlar gün gün gruplanmış halde burada görünür.</p>
+          </div>
+        )}
+
+        {groupedNotes.map((group) => (
+          <section key={group.key} style={notesDaySection}>
+            <div style={notesDayHeader}>
+              <div>
+                <strong style={notesDayLabel}>{group.label}</strong>
+                <p style={notesDayDate}>{group.dateText}</p>
+              </div>
+              <span style={notesDayCount}>{group.notes.length} not</span>
             </div>
-            <p style={noteBody}>{note.body}</p>
-            <small style={noteMeta}>{formatDateTime(note.created_at)}</small>
-          </article>
+
+            <div style={notesDayList}>
+              {group.notes.map((note, index) => (
+                <article key={note.id} style={noteCard}>
+                  <div style={noteCardTop}>
+                    <div style={noteMetaRow}>
+                      <span style={noteBadge}>#{index + 1}</span>
+                      <span style={noteMetaChip}>{formatTime(note.created_at)}</span>
+                    </div>
+                    <button type="button" onClick={() => deleteMyNote(note.id)} style={noteDeleteButton}>Sil</button>
+                  </div>
+                  <p style={noteBody}>{note.body}</p>
+                  <small style={noteMeta}>{formatDateTime(note.created_at)}</small>
+                </article>
+              ))}
+            </div>
+          </section>
         ))}
       </div>
     </section>
@@ -3288,14 +3400,39 @@ const attachButton = { width: 42, height: 48, display: "grid", placeItems: "cent
 const messageInput = { width: "100%", minHeight: 46, maxHeight: 110, resize: "vertical", boxSizing: "border-box", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.26)", background: "#061834", color: "#f8fafc" };
 const sendMessageButton = { width: 48, height: 48, alignSelf: "end", borderRadius: 8, border: "1px solid rgba(103,232,249,0.46)", background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "white", cursor: "pointer", fontSize: 19 };
 const emptyConversation = { margin: "auto", color: "#64748b", fontSize: 14 };
-const notesComposer = { display: "grid", gap: 10 };
-const notesComposerActions = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 };
-const notesGrid = { display: "grid", gap: 12, marginTop: 18 };
-const noteCard = { background: "#071a36", borderRadius: 12, padding: 16, border: "1px solid rgba(147,197,253,0.18)" };
-const noteCardTop = { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10 };
+const notesHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 18, flexWrap: "wrap", marginBottom: 18 };
+const notesEyebrow = { display: "inline-block", marginBottom: 6, fontSize: 12, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: "#7dd3fc" };
+const notesHeaderStats = { display: "flex", gap: 12, flexWrap: "wrap", alignItems: "stretch" };
+const notesStatCard = { minWidth: 150, padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(125,211,252,0.2)", background: "rgba(7,26,54,0.78)", display: "grid", gap: 3 };
+const notesStatCardSoft = { minWidth: 190, padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(251,191,36,0.22)", background: "rgba(10,29,63,0.9)", display: "grid", gap: 3 };
+const notesStatLabel = { fontSize: 12, color: "#cbd5e1" };
+const notesStatValue = { fontSize: 20, color: "#f8fafc", lineHeight: 1.1 };
+const notesStatSubValue = { color: "#94a3b8", fontSize: 12 };
+const notesComposer = { display: "grid", gap: 10, padding: 16, borderRadius: 16, border: "1px solid rgba(147,197,253,0.18)", background: "rgba(7,26,54,0.72)" };
+const notesComposerHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" };
+const notesComposerHint = { color: "#94a3b8", fontSize: 12 };
+const notesComposerActions = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" };
+const notesGrid = { display: "grid", gap: 16, marginTop: 18 };
+const notesEmptyState = { padding: 18, borderRadius: 14, border: "1px dashed rgba(147,197,253,0.24)", background: "rgba(7,26,54,0.48)" };
+const notesSetupNotice = { display: "flex", alignItems: "flex-start", gap: 12, padding: 16, margin: "16px 0 18px", borderRadius: 14, background: "rgba(180,83,9,0.18)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a" };
+const notesSetupIcon = { width: 36, height: 36, flexShrink: 0, borderRadius: 10, display: "grid", placeItems: "center", background: "rgba(251,191,36,0.12)", color: "#fde68a", fontWeight: 900 };
+const notesSetupTitle = { display: "block", marginBottom: 4, fontSize: 16, color: "#fff7ed" };
+const notesSetupText = { margin: 0, color: "#fde68a", lineHeight: 1.55 };
+const notesSetupList = { margin: "10px 0 0", paddingLeft: 18, color: "#fffbeb", lineHeight: 1.6 };
+const notesDaySection = { display: "grid", gap: 10 };
+const notesDayHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", paddingBottom: 4, borderBottom: "1px solid rgba(147,197,253,0.12)" };
+const notesDayLabel = { display: "block", fontSize: 18, color: "#f8fafc" };
+const notesDayDate = { margin: "4px 0 0", color: "#94a3b8", fontSize: 13 };
+const notesDayCount = { padding: "7px 10px", borderRadius: 999, background: "rgba(56,189,248,0.12)", color: "#bae6fd", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" };
+const notesDayList = { display: "grid", gap: 12 };
+const noteCard = { background: "#071a36", borderRadius: 14, padding: 16, border: "1px solid rgba(147,197,253,0.18)", boxShadow: "0 12px 24px rgba(0,0,0,0.12)" };
+const noteCardTop = { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" };
+const noteMetaRow = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
+const noteBadge = { padding: "5px 9px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 12, fontWeight: 800 };
+const noteMetaChip = { padding: "5px 9px", borderRadius: 999, background: "rgba(148,163,184,0.12)", color: "#cbd5e1", fontSize: 12, fontWeight: 700 };
 const noteDeleteButton = { padding: "6px 10px", borderRadius: 8, border: "1px solid rgba(252,165,165,0.4)", background: "rgba(127,29,29,0.48)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
 const noteBody = { margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6, color: "#f8fafc" };
-const noteMeta = { display: "block", marginTop: 10, color: "#94a3b8" };
+const noteMeta = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 12 };
 const toastStyle = { position: "fixed", top: 18, left: "50%", transform: "translateX(-50%)", zIndex: 1201, padding: "12px 18px", borderRadius: 999, color: "white", fontWeight: 800, boxShadow: "0 18px 40px rgba(0,0,0,0.35)" };
 const toastSuccess = { background: "linear-gradient(135deg,rgba(37,99,235,0.96),rgba(8,145,178,0.92))", border: "1px solid rgba(125,211,252,0.35)" };
 const toastWarning = { background: "linear-gradient(135deg,rgba(180,83,9,0.96),rgba(127,29,29,0.92))", border: "1px solid rgba(251,191,36,0.35)" };
