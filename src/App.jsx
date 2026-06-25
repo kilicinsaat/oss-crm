@@ -225,6 +225,23 @@ function buildCustomerNoteShareMessage(customer, note) {
   return lines.join("\n").slice(0, 2000);
 }
 
+function customerFullName(customer) {
+  return `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "-";
+}
+
+function userDisplayName(users, userId) {
+  const user = users.find((item) => item.id === userId);
+  return user?.full_name || user?.email || "-";
+}
+
+function customerLogSourceLabel(log, selectedCustomer, customers) {
+  if (String(log.customer_id) === String(selectedCustomer.id)) return "";
+  const sourceCustomer = customers.find((customer) => String(customer.id) === String(log.customer_id));
+  if (!sourceCustomer) return "Aynı telefon geçmişinden";
+  const pageText = sourceCustomer.batch_page ? ` / Sayfa ${sourceCustomer.batch_page}` : "";
+  return `Aynı telefon kartı: ${customerFullName(sourceCustomer)}${sourceCustomer.batch_name ? ` - ${sourceCustomer.batch_name}${pageText}` : ""}`;
+}
+
 function roleName(role) {
   if (role === "boss") return "Boss";
   if (role === "manager") return "Manager";
@@ -386,6 +403,7 @@ function App() {
 
   const [customers, setCustomers] = useState([]);
   const [customerLogs, setCustomerLogs] = useState([]);
+  const [customerLogsLoading, setCustomerLogsLoading] = useState(false);
   const [users, setUsers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -437,6 +455,7 @@ function App() {
 
   const [systemToast, setSystemToast] = useState(null);
   const toastTimerRef = useRef(null);
+  const customerLogsRequestRef = useRef(0);
   const [saleCelebration, setSaleCelebration] = useState(null);
 
   useEffect(() => {
@@ -713,6 +732,7 @@ function App() {
     setCustomers([]);
     setUsers([]);
     setCustomerLogs([]);
+    setCustomerLogsLoading(false);
     setSelectedIds([]);
     setMessages([]);
     setMyNotes([]);
@@ -799,14 +819,21 @@ function App() {
 
   async function updateCustomer(customerId, updates) {
     if (!profile) return false;
-    const beforeStatus = selectedCustomer?.status || null;
+    const targetCustomer = selectedCustomer?.id === customerId
+      ? selectedCustomer
+      : customers.find((customer) => customer.id === customerId);
+    const customerIdsToUpdate = updates.status
+      ? getRelatedCustomerIds(targetCustomer || customerId)
+      : [customerId];
+    const updateIdSet = new Set(customerIdsToUpdate);
+    const beforeStatus = targetCustomer?.status || null;
     const becamePaid = updates.status === "paid" && beforeStatus !== "paid";
 
     const { error } = await runWithRetry(() =>
       supabase
         .from("customers")
         .update({ ...updates, last_action_by: profile.id })
-        .eq("id", customerId)
+        .in("id", customerIdsToUpdate)
     );
 
     if (error) {
@@ -820,41 +847,43 @@ function App() {
     }
 
     let logError;
+    const logRows = customerIdsToUpdate.map((id) => {
+      const beforeCustomer = customers.find((customer) => customer.id === id) || (targetCustomer?.id === id ? targetCustomer : null);
+      return {
+        customer_id: id,
+        user_id: profile.id,
+        old_status: beforeCustomer?.status || null,
+        new_status: updates.status || null,
+        note: updates.info_note || "",
+      };
+    });
+
     try {
       ({ error: logError } = await supabase
         .from("customer_logs")
-        .insert({
-          customer_id: customerId,
-          user_id: profile.id,
-          old_status: beforeStatus,
-          new_status: updates.status || null,
-          note: updates.info_note || "",
-        }));
+        .insert(logRows));
     } catch (requestError) {
       logError = requestError;
     }
 
     setCustomers((current) => current.map((customer) =>
-      customer.id === customerId
+      updateIdSet.has(customer.id)
         ? { ...customer, ...updates, last_action_by: profile.id }
         : customer
     ));
     setSelectedCustomer((current) => {
-      if (!current || current.id !== customerId) return current;
+      if (!current || !updateIdSet.has(current.id)) return current;
       return { ...current, ...updates, last_action_by: profile.id };
     });
 
     if (!logError) {
-      const logRow = {
-        id: `tmp-${Date.now()}`,
-        customer_id: customerId,
-        user_id: profile.id,
-        old_status: beforeStatus,
-        new_status: updates.status || null,
-        note: updates.info_note || "",
-        created_at: new Date().toISOString(),
-      };
-      setCustomerLogs((current) => [logRow, ...current]);
+      const createdAt = new Date().toISOString();
+      const visibleLogRows = logRows.map((row, index) => ({
+        ...row,
+        id: `tmp-${Date.now()}-${index}`,
+        created_at: createdAt,
+      }));
+      setCustomerLogs((current) => [...visibleLogRows, ...current]);
     }
 
     if (becamePaid) {
@@ -870,14 +899,51 @@ function App() {
     return true;
   }
 
-  async function loadCustomerLogs(customerId) {
+  function getRelatedCustomerIds(customerOrId) {
+    const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
+    const customer = typeof customerOrId === "object"
+      ? customerOrId
+      : customers.find((item) => item.id === customerId);
+
+    if (!customer) return customerId ? [customerId] : [];
+
+    const phones = [customer.phone, customer.phone_2].map(normalizePhone).filter(Boolean);
+    const relatedIds = customers
+      .filter((item) => {
+        if (item.id === customer.id) return true;
+        const itemPhones = [item.phone, item.phone_2].map(normalizePhone).filter(Boolean);
+        return phones.some((phone) => itemPhones.includes(phone));
+      })
+      .map((item) => item.id);
+
+    return [...new Set(relatedIds)];
+  }
+
+  async function loadCustomerLogs(customerOrId) {
+    const requestId = customerLogsRequestRef.current + 1;
+    customerLogsRequestRef.current = requestId;
+    setCustomerLogsLoading(true);
+
+    const relatedCustomerIds = getRelatedCustomerIds(customerOrId)
+      .map((id) => typeof id === "string" && /^\d+$/.test(id) ? Number(id) : id)
+      .filter(Boolean);
+
+    if (relatedCustomerIds.length === 0) {
+      setCustomerLogs([]);
+      setCustomerLogsLoading(false);
+      return;
+    }
+
     const { data, error } = await runWithRetry(() =>
       supabase
         .from("customer_logs")
         .select("*")
-        .eq("customer_id", customerId)
+        .in("customer_id", relatedCustomerIds)
         .order("created_at", { ascending: false })
     );
+
+    if (customerLogsRequestRef.current !== requestId) return;
+    setCustomerLogsLoading(false);
 
     if (error) {
       setCustomerLogs([]);
@@ -1098,6 +1164,7 @@ function App() {
 
     setSelectedCustomer(null);
     setCustomerLogs([]);
+    setCustomerLogsLoading(false);
     setSelectedIds([]);
     await loadCustomers();
     showSystemToast("Tüm müşteri verisi temizlendi");
@@ -1129,6 +1196,7 @@ function App() {
 
     setSelectedCustomer(null);
     setCustomerLogs([]);
+    setCustomerLogsLoading(false);
     setSelectedIds([]);
     await loadCustomers();
     showSystemToast(`${Number(deletedCount) || 0} geçersiz veya numarasız müşteri kartı silindi.`);
@@ -1301,6 +1369,54 @@ function App() {
     return true;
   }
 
+  async function exportContractAppointments(customersToExport) {
+    if (!customersToExport.length) {
+      showSystemToast("Dışa aktarılacak sözleşmeli randevu yok.", "warning");
+      return;
+    }
+
+    try {
+      const XLSX = await import("xlsx");
+      const rows = customersToExport.map((customer, index) => ({
+        "Sıra": index + 1,
+        "Müşteri": customerFullName(customer),
+        "Telefon": formatPhoneDisplay(customer.phone),
+        "Telefon 2": formatPhoneDisplay(customer.phone_2),
+        "TC No": customer.tc_no || "",
+        "Randevu Tarihi": formatDateTime(customer.appointment_date),
+        "Durum": statusLabel(customer.status),
+        "Atanan Rep": userDisplayName(users, customer.assigned_employee),
+        "Data": customer.batch_name || "",
+        "Sayfa": customer.batch_page || "",
+        "Not": customer.info_note || "",
+        "Kayıt Tarihi": formatDateTime(customer.created_at),
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      worksheet["!cols"] = [
+        { wch: 8 },
+        { wch: 30 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 14 },
+        { wch: 18 },
+        { wch: 22 },
+        { wch: 24 },
+        { wch: 24 },
+        { wch: 10 },
+        { wch: 42 },
+        { wch: 18 },
+      ];
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Sözleşmeli Randevular");
+      XLSX.writeFile(workbook, `sozlesmeli-randevular-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      showSystemToast(`${customersToExport.length} sözleşmeli randevu Excel'e aktarıldı.`);
+    } catch (error) {
+      alert("Excel dışa aktarılamadı: " + (error.message || "Bilinmeyen hata"));
+    }
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     const body = messageBody.trim();
@@ -1460,8 +1576,16 @@ function App() {
 
     if (!customerId || !customer) return;
     setCustomerLogs([]);
+    setCustomerLogsLoading(true);
     setSelectedCustomer(customer);
-    await loadCustomerLogs(customerId);
+    await loadCustomerLogs(customer);
+  }
+
+  function closeCustomerModal() {
+    customerLogsRequestRef.current += 1;
+    setCustomerLogsLoading(false);
+    setCustomerLogs([]);
+    setSelectedCustomer(null);
   }
 
   const profileRole = profile?.role || "employee";
@@ -1752,7 +1876,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1771,7 +1894,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1790,7 +1912,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1809,7 +1930,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1828,7 +1948,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1847,7 +1966,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1866,7 +1984,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1885,7 +2002,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1893,6 +2009,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            exportLabel="Excel'e Aktar"
+            onExport={exportContractAppointments}
           />
         )}
 
@@ -1904,7 +2022,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1923,7 +2040,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1942,7 +2058,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1961,7 +2076,6 @@ function App() {
             profile={profile}
             assignCustomer={assignCustomer}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             selectedIds={selectedIds}
@@ -1985,7 +2099,6 @@ function App() {
               profile={profile}
               assignCustomer={assignCustomer}
               setSelectedCustomer={loadMessageHistoryForCustomer}
-              loadCustomerLogs={loadCustomerLogs}
               searchTerm={searchTerm}
               setSearchTerm={setSearchTerm}
               selectedIds={selectedIds}
@@ -2001,7 +2114,6 @@ function App() {
           <CalendarView
             customers={reminderCustomers}
             setSelectedCustomer={loadMessageHistoryForCustomer}
-            loadCustomerLogs={loadCustomerLogs}
           />
         )}
 
@@ -2085,8 +2197,9 @@ function App() {
           <CustomerModal
             key={selectedCustomer.id}
             selectedCustomer={selectedCustomer}
-            setSelectedCustomer={setSelectedCustomer}
+            closeCustomerModal={closeCustomerModal}
             customerLogs={customerLogs}
+            customerLogsLoading={customerLogsLoading}
             updateCustomer={updateCustomer}
             shareCustomerNote={shareCustomerNote}
             users={users}
@@ -2198,7 +2311,6 @@ function CustomerTable({
   profile,
   assignCustomer,
   setSelectedCustomer,
-  loadCustomerLogs,
   searchTerm,
   setSearchTerm,
   selectedIds,
@@ -2206,6 +2318,8 @@ function CustomerTable({
   bulkEmployee,
   setBulkEmployee,
   bulkAssignCustomers,
+  exportLabel,
+  onExport,
 }) {
   const canManage = profile.role === "boss" || profile.role === "manager";
   const canViewTc = profile.role !== "employee";
@@ -2240,7 +2354,19 @@ function CustomerTable({
 
   return (
     <div style={panelCard}>
-      <h2 style={{ marginTop: 0 }}>{title}</h2>
+      <div style={tableTitleRow}>
+        <h2 style={{ margin: 0 }}>{title}</h2>
+        {onExport && (
+          <button
+            type="button"
+            disabled={filteredData.length === 0}
+            onClick={() => onExport(filteredData)}
+            style={{ ...exportExcelButton, opacity: filteredData.length === 0 ? 0.6 : 1 }}
+          >
+            {exportLabel || "Excel'e Aktar"}
+          </button>
+        )}
+      </div>
 
       <div style={customerToolbar}>
         <input
@@ -2339,10 +2465,7 @@ function CustomerTable({
             <div>
               <button
                 type="button"
-                onClick={() => {
-                  setSelectedCustomer(customer);
-                  loadCustomerLogs(customer.id);
-                }}
+                onClick={() => setSelectedCustomer(customer)}
                 style={smallButton}
               >
                 Detay
@@ -2372,7 +2495,7 @@ function CustomerTable({
   );
 }
 
-function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, shareCustomerNote, users, customers, profile }) {
+function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, updateCustomer, shareCustomerNote, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
   const [customerNote, setCustomerNote] = useState(selectedCustomer.info_note || "");
@@ -2388,6 +2511,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
   const noteChanged = customerNote.trim() !== String(selectedCustomer.info_note || "").trim();
   const shareUsers = users.filter((user) => user.id !== profile?.id);
+  const hasRelatedPhoneLogs = customerLogs.some((log) => String(log.customer_id) !== String(selectedCustomer.id));
 
   async function saveCustomer() {
     if (savingCustomer) return;
@@ -2425,7 +2549,10 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
     setSavingCustomer(true);
     try {
       const saved = await updateCustomer(selectedCustomer.id, updates);
-      if (saved) setDetailNote("");
+      if (saved) {
+        setDetailNote("");
+        closeCustomerModal();
+      }
     } finally {
       setSavingCustomer(false);
     }
@@ -2456,6 +2583,17 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
     }
   }
 
+  function handleSaveShortcut(event) {
+    if (event.key !== "Enter" || savingCustomer) return;
+    const tagName = event.target?.tagName?.toLowerCase();
+    const isTextarea = tagName === "textarea";
+    if (isTextarea && !(event.ctrlKey || event.metaKey)) return;
+    if (tagName === "select") return;
+
+    event.preventDefault();
+    saveCustomer();
+  }
+
   const statusButtons = [
     ["assigned", "Yeni", "new"],
     ["called", "Arandı", "called"],
@@ -2474,11 +2612,11 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
     <div
       style={modalBg}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) setSelectedCustomer(null);
+        if (event.target === event.currentTarget) closeCustomerModal();
       }}
     >
       <div style={modalCard} onMouseDown={(event) => event.stopPropagation()}>
-        <button type="button" onClick={() => setSelectedCustomer(null)} style={closeButton} aria-label="Detayı kapat">X</button>
+        <button type="button" onClick={closeCustomerModal} style={closeButton} aria-label="Detayı kapat">X</button>
 
         <div style={customerHero}>
           <div style={{ ...customerHeatBar, background: heat.color }} />
@@ -2487,7 +2625,11 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           </h2>
           <div style={customerSummary}>
             <span style={{ ...heatBadge, background: heat.background, color: heat.color }}>{heat.label}</span>
-            <span style={customerSummaryText}>{customerLogs.length ? `${customerLogs.length} işlem kaydı var` : "Henüz işlem kaydı yok"}</span>
+            <span style={customerSummaryText}>
+              {customerLogsLoading
+                ? "İşlem geçmişi yükleniyor..."
+                : customerLogs.length ? `${customerLogs.length} işlem kaydı var${hasRelatedPhoneLogs ? " (aynı telefon dahil)" : ""}` : "Henüz işlem kaydı yok"}
+            </span>
           </div>
           <div style={customerInfoGrid}>
             <div style={infoPill}>📞 {formatPhoneDisplay(selectedCustomer.phone)}</div>
@@ -2576,7 +2718,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           </div>
         </section>
 
-        <div style={detailLayout}>
+        <div style={detailLayout} onKeyDown={handleSaveShortcut}>
           <div style={statusRail}>
             <h3 style={railTitle}>Durum Menüsü</h3>
             {statusButtons.map(([value, label, tone]) => (
@@ -2642,22 +2784,27 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
         </div>
 
         <h3 style={historyTitle}>İşlem Geçmişi</h3>
-        {customerLogs.length === 0 && <p style={{ opacity: 0.7 }}>Henüz işlem yok.</p>}
+        {customerLogsLoading && <p style={logLoadingText}>İşlem geçmişi yükleniyor...</p>}
+        {!customerLogsLoading && customerLogs.length === 0 && <p style={{ opacity: 0.7 }}>Henüz işlem kaydı bulunamadı.</p>}
 
-        {customerLogs.map((log) => (
-          <div key={log.id} style={{ ...logBox, borderLeft: `4px solid ${customerHeat(log.new_status).color}` }}>
-            <strong style={logUser}>
-              İşlem yapan: {
-                users.find((user) => user.id === log.user_id)?.full_name
-                || users.find((user) => user.id === log.user_id)?.email
-                || "Bilinmeyen kullanıcı"
-              }
-            </strong>
-            <p style={logStatusRow}>Durum: {statusLabel(log.old_status)} → <span style={statusBadge(log.new_status)}>{statusLabel(log.new_status)}</span></p>
-            {log.note ? <p style={logNote}>{log.note}</p> : <p style={logEmptyNote}>Not bırakılmadı.</p>}
-            <small style={logTime}>{formatDateTime(log.created_at)}</small>
-          </div>
-        ))}
+        {!customerLogsLoading && customerLogs.map((log) => {
+          const sourceLabel = customerLogSourceLabel(log, selectedCustomer, customers);
+          return (
+            <div key={log.id} style={{ ...logBox, borderLeft: `4px solid ${customerHeat(log.new_status).color}` }}>
+              <strong style={logUser}>
+                İşlem yapan: {
+                  users.find((user) => user.id === log.user_id)?.full_name
+                  || users.find((user) => user.id === log.user_id)?.email
+                  || "Bilinmeyen kullanıcı"
+                }
+              </strong>
+              {sourceLabel && <small style={logSourceText}>{sourceLabel}</small>}
+              <p style={logStatusRow}>Durum: {statusLabel(log.old_status)} → <span style={statusBadge(log.new_status)}>{statusLabel(log.new_status)}</span></p>
+              {log.note ? <p style={logNote}>{log.note}</p> : <p style={logEmptyNote}>Not bırakılmadı.</p>}
+              <small style={logTime}>{formatDateTime(log.created_at)}</small>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -3198,7 +3345,7 @@ function AssignmentOverview({ employees, customers }) {
   );
 }
 
-function CalendarView({ customers, setSelectedCustomer, loadCustomerLogs }) {
+function CalendarView({ customers, setSelectedCustomer }) {
   const grouped = customers.reduce((acc, customer) => {
     const key = formatDate(customer.appointment_date);
     if (!acc[key]) acc[key] = [];
@@ -3222,10 +3369,7 @@ function CalendarView({ customers, setSelectedCustomer, loadCustomerLogs }) {
                 key={customer.id}
                 type="button"
                 style={calendarItem}
-                onClick={() => {
-                  setSelectedCustomer(customer);
-                  loadCustomerLogs(customer.id);
-                }}
+                onClick={() => setSelectedCustomer(customer)}
               >
                 <strong>{customer.first_name} {customer.last_name}</strong>
                 <span>{formatTime(customer.appointment_date)} - {statusLabel(customer.status)}</span>
@@ -3323,6 +3467,8 @@ const pipelineValue = { fontSize: 18 };
 const formGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 };
 const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #bfdbfe", background: "#f8fafc", color: "#0b2b5f" };
 const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
+const tableTitleRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 };
+const exportExcelButton = { minHeight: 40, padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(134,239,172,0.42)", background: "linear-gradient(135deg,#059669,#0891b2)", color: "white", cursor: "pointer", fontWeight: 800 };
 const customerToolbar = { display: "grid", gridTemplateColumns: "minmax(240px,1fr) minmax(210px,280px)", gap: 10, marginBottom: 10 };
 const toolbarSelect = { width: "100%", padding: 12, borderRadius: 8, border: "1px solid rgba(147,197,253,0.28)", background: "#071a36", color: "#e0f2fe" };
 const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, color: "#94a3b8", fontSize: 12 };
@@ -3418,10 +3564,12 @@ const customerSummaryText = { color: "#cbd5e1", fontSize: 13 };
 const historyTitle = { margin: "24px 0 12px", fontSize: 18, fontWeight: 600, letterSpacing: 0 };
 const logBox = { background: "rgba(7,26,54,0.72)", padding: "14px 16px", borderRadius: 10, marginBottom: 10, border: "1px solid rgba(147,197,253,0.16)" };
 const logUser = { display: "block", fontSize: 14, fontWeight: 600, color: "#e0f2fe" };
+const logSourceText = { display: "inline-block", marginTop: 8, padding: "4px 8px", borderRadius: 999, background: "rgba(56,189,248,0.12)", color: "#bae6fd", fontSize: 12, fontWeight: 700 };
 const logStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 7, margin: "10px 0 0", color: "#cbd5e1", fontSize: 13 };
 const logNote = { margin: "12px 0 0", color: "#f1f5f9", fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" };
 const logEmptyNote = { margin: "12px 0 0", color: "#94a3b8", fontSize: 13, fontStyle: "italic" };
 const logTime = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 12 };
+const logLoadingText = { padding: "14px 16px", borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(147,197,253,0.18)", color: "#bfdbfe" };
 const fieldLabel = { display: "block", margin: "12px 0 6px", fontWeight: 700, fontSize: 13, color: "#bfdbfe" };
 const reportsLayout = { display: "grid", gap: 18 };
 const sectionHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, marginBottom: 18 };
