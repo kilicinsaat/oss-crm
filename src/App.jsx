@@ -2499,16 +2499,13 @@ function CustomerTable({
 function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, updateCustomer, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
-  const [customerNote, setCustomerNote] = useState(selectedCustomer.info_note || "");
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
   const [savingCustomer, setSavingCustomer] = useState(false);
-  const [savingCustomerNote, setSavingCustomerNote] = useState(false);
   const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
   const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
-  const noteChanged = customerNote.trim() !== String(selectedCustomer.info_note || "").trim();
   const hasRelatedPhoneLogs = customerLogs.some((log) => String(log.customer_id) !== String(selectedCustomer.id));
 
   async function saveCustomer() {
@@ -2553,16 +2550,6 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
       }
     } finally {
       setSavingCustomer(false);
-    }
-  }
-
-  async function saveCustomerNote() {
-    if (savingCustomerNote || !noteChanged) return;
-    setSavingCustomerNote(true);
-    try {
-      await updateCustomer(selectedCustomer.id, { info_note: customerNote.trim() || null });
-    } finally {
-      setSavingCustomerNote(false);
     }
   }
 
@@ -2652,32 +2639,6 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             Numara yanlış
           </button>
         </div>
-
-        <section style={customerNotePanel}>
-          <div style={customerNoteHeader}>
-            <div>
-              <h3 style={customerNoteTitle}>Müşteri Notu</h3>
-              <p style={customerNoteSubtitle}>Kartta kalır. Paylaşım işlemi Mesajlar ekranından yapılır.</p>
-            </div>
-            <span style={customerNoteBadge}>{customerNote.trim() ? `${customerNote.trim().length} karakter` : "Not yok"}</span>
-          </div>
-          <textarea
-            value={customerNote}
-            onChange={(event) => setCustomerNote(event.target.value)}
-            placeholder="Bu müşteriye özel not yaz..."
-            style={{ ...inputStyle, minHeight: 110, resize: "vertical", marginBottom: 0 }}
-          />
-          <div style={customerNoteActions}>
-            <button
-              type="button"
-              disabled={savingCustomerNote || !noteChanged}
-              onClick={saveCustomerNote}
-              style={{ ...secondaryActionButton, opacity: savingCustomerNote || !noteChanged ? 0.6 : 1 }}
-            >
-              {savingCustomerNote ? "Kaydediliyor..." : "Notu Kaydet"}
-            </button>
-          </div>
-        </section>
 
         <div style={detailLayout} onKeyDown={handleSaveShortcut}>
           <div style={statusRail}>
@@ -3550,13 +3511,6 @@ const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 
 const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
 const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: 700 };
 const wrongNumberButton = { background: "linear-gradient(135deg,#ef4444,#b91c1c)" };
-const customerNotePanel = { display: "grid", gap: 12, margin: "0 0 16px", padding: 16, borderRadius: 12, background: "rgba(7,26,54,0.62)", border: "1px solid rgba(125,211,252,0.22)" };
-const customerNoteHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" };
-const customerNoteTitle = { margin: 0, fontSize: 18, color: "#f8fafc" };
-const customerNoteSubtitle = { margin: "4px 0 0", color: "#94a3b8", fontSize: 13 };
-const customerNoteBadge = { padding: "6px 10px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 12, fontWeight: 800 };
-const customerNoteActions = { display: "flex", justifyContent: "flex-end", gap: 10, alignItems: "center" };
-const secondaryActionButton = { minHeight: 42, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(125,211,252,0.28)", background: "#17355f", color: "#e0f2fe", cursor: "pointer", fontWeight: 800 };
 const detailLayout = { display: "grid", gridTemplateColumns: "250px minmax(0,1fr)", gap: 14, marginBottom: 16 };
 const statusRail = { background: "rgba(7,26,54,0.72)", borderRadius: 14, border: "1px solid rgba(147,197,253,0.15)", padding: 12 };
 const railTitle = { margin: "0 0 10px", fontSize: 14, color: "#bfdbfe" };
