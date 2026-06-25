@@ -2178,14 +2178,11 @@ function CustomerForm({ form, setForm, addCustomer, duplicateCustomer }) {
       )}
       <div style={formGrid}>
         <input placeholder="Data adı / parti adı" value={form.batch_name} onChange={(e) => setForm({ ...form, batch_name: e.target.value })} style={inputStyle} />
-        <input placeholder="Sayfa no" value={form.batch_page} onChange={(e) => setForm({ ...form, batch_page: e.target.value })} style={inputStyle} />
         <input placeholder="Ad" value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} style={inputStyle} />
         <input placeholder="Soyad" value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} style={inputStyle} />
         <input placeholder="TC No" value={form.tc_no} onChange={(e) => setForm({ ...form, tc_no: e.target.value })} style={inputStyle} />
         <input placeholder="Telefon" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} style={inputStyle} />
         <input placeholder="Telefon 2" value={form.phone_2} onChange={(e) => setForm({ ...form, phone_2: e.target.value })} style={inputStyle} />
-        <input placeholder="Web Sitesi" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} style={inputStyle} />
-        <input placeholder="Adres" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} style={inputStyle} />
         <input type="datetime-local" value={form.appointment_date} onChange={(e) => setForm({ ...form, appointment_date: e.target.value })} style={inputStyle} />
       </div>
       <textarea placeholder="Not" value={form.info_note} onChange={(e) => setForm({ ...form, info_note: e.target.value })} style={{ ...inputStyle, height: 100 }} />
