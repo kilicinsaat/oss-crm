@@ -2190,6 +2190,8 @@ function App() {
             beginEditMessage={beginEditMessage}
             deleteMessage={deleteMessage}
             sendingMessage={sendingMessage}
+            customers={customers}
+            shareCustomerNote={shareCustomerNote}
           />
         )}
 
@@ -2201,7 +2203,6 @@ function App() {
             customerLogs={customerLogs}
             customerLogsLoading={customerLogsLoading}
             updateCustomer={updateCustomer}
-            shareCustomerNote={shareCustomerNote}
             users={users}
             customers={customers}
             profile={profile}
@@ -2495,22 +2496,19 @@ function CustomerTable({
   );
 }
 
-function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, updateCustomer, shareCustomerNote, users, customers, profile }) {
+function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, updateCustomer, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
   const [customerNote, setCustomerNote] = useState(selectedCustomer.info_note || "");
-  const [shareTarget, setShareTarget] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
   const [savingCustomer, setSavingCustomer] = useState(false);
   const [savingCustomerNote, setSavingCustomerNote] = useState(false);
-  const [sharingCustomerNote, setSharingCustomerNote] = useState("");
   const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
   const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
   const noteChanged = customerNote.trim() !== String(selectedCustomer.info_note || "").trim();
-  const shareUsers = users.filter((user) => user.id !== profile?.id);
   const hasRelatedPhoneLogs = customerLogs.some((log) => String(log.customer_id) !== String(selectedCustomer.id));
 
   async function saveCustomer() {
@@ -2565,21 +2563,6 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
       await updateCustomer(selectedCustomer.id, { info_note: customerNote.trim() || null });
     } finally {
       setSavingCustomerNote(false);
-    }
-  }
-
-  async function shareNote(targetId) {
-    const note = customerNote.trim();
-    if (!note) {
-      alert("Paylaşmak için önce müşteri notu yaz.");
-      return;
-    }
-
-    setSharingCustomerNote(targetId);
-    try {
-      await shareCustomerNote({ customer: { ...selectedCustomer, info_note: note }, note, targetId });
-    } finally {
-      setSharingCustomerNote("");
     }
   }
 
@@ -2674,7 +2657,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
           <div style={customerNoteHeader}>
             <div>
               <h3 style={customerNoteTitle}>Müşteri Notu</h3>
-              <p style={customerNoteSubtitle}>Kartta kalır; genel veya çalışan mesajına paylaşılabilir.</p>
+              <p style={customerNoteSubtitle}>Kartta kalır. Paylaşım işlemi Mesajlar ekranından yapılır.</p>
             </div>
             <span style={customerNoteBadge}>{customerNote.trim() ? `${customerNote.trim().length} karakter` : "Not yok"}</span>
           </div>
@@ -2692,28 +2675,6 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
               style={{ ...secondaryActionButton, opacity: savingCustomerNote || !noteChanged ? 0.6 : 1 }}
             >
               {savingCustomerNote ? "Kaydediliyor..." : "Notu Kaydet"}
-            </button>
-            <button
-              type="button"
-              disabled={sharingCustomerNote === "general" || !customerNote.trim()}
-              onClick={() => shareNote("general")}
-              style={{ ...secondaryActionButton, ...shareGeneralButton }}
-            >
-              {sharingCustomerNote === "general" ? "Gönderiliyor..." : "Genel Mesaja Paylaş"}
-            </button>
-            <select value={shareTarget} onChange={(event) => setShareTarget(event.target.value)} style={shareTargetSelect}>
-              <option value="">Çalışan seç</option>
-              {shareUsers.map((user) => (
-                <option key={user.id} value={user.id}>{user.full_name || user.email}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              disabled={!shareTarget || !!sharingCustomerNote || !customerNote.trim()}
-              onClick={() => shareNote(shareTarget)}
-              style={{ ...secondaryActionButton, opacity: !shareTarget || sharingCustomerNote || !customerNote.trim() ? 0.6 : 1 }}
-            >
-              {sharingCustomerNote && sharingCustomerNote !== "general" ? "Gönderiliyor..." : "Çalışana Gönder"}
             </button>
           </div>
         </section>
@@ -2962,9 +2923,12 @@ function AccountView({ profile, profileForm, setProfileForm, saveOwnProfile, upl
   );
 }
 
-function MessagingView({ profile, users, messages, messageTarget, selectConversation, messageBody, setMessageBody, sendMessage, messagingError, onlineUserIds, messageAttachment, setMessageAttachment, replyToMessage, setReplyToMessage, editingMessage, setEditingMessage, beginEditMessage, deleteMessage, sendingMessage }) {
+function MessagingView({ profile, users, messages, messageTarget, selectConversation, messageBody, setMessageBody, sendMessage, messagingError, onlineUserIds, messageAttachment, setMessageAttachment, replyToMessage, setReplyToMessage, editingMessage, setEditingMessage, beginEditMessage, deleteMessage, sendingMessage, customers, shareCustomerNote }) {
   const [contactSearch, setContactSearch] = useState("");
   const [messageSearch, setMessageSearch] = useState("");
+  const [customerShareQuery, setCustomerShareQuery] = useState("");
+  const [selectedShareCustomerId, setSelectedShareCustomerId] = useState("");
+  const [sharingCustomerId, setSharingCustomerId] = useState("");
   const messageEndRef = useRef(null);
   const allContacts = users.filter((user) => user.id !== profile.id);
   const contacts = allContacts
@@ -2986,6 +2950,13 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
     .filter((message) => `${message.body} ${message.attachment_name || ""}`.toLowerCase().includes(messageSearch.toLowerCase()));
   const userMap = new Map([...users, profile].map((user) => [user.id, user]));
   const messageMap = new Map(messages.map((message) => [message.id, message]));
+  const shareCustomerOptions = customers
+    .filter((customer) => {
+      const haystack = `${customerFullName(customer)} ${customer.phone || ""} ${customer.phone_2 || ""} ${customer.tc_no || ""} ${customer.batch_name || ""}`.toLowerCase();
+      return haystack.includes(customerShareQuery.toLowerCase());
+    })
+    .slice(0, 80);
+  const selectedShareCustomer = customers.find((customer) => String(customer.id) === selectedShareCustomerId);
 
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -2995,6 +2966,26 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
     setReplyToMessage(null);
     setEditingMessage(null);
     setMessageBody("");
+  }
+
+  async function shareSelectedCustomer() {
+    if (!selectedShareCustomer) return;
+    const note = selectedShareCustomer.info_note?.trim() || "Müşteri kartı paylaşıldı.";
+
+    setSharingCustomerId(String(selectedShareCustomer.id));
+    try {
+      const sent = await shareCustomerNote({
+        customer: selectedShareCustomer,
+        note,
+        targetId: messageTarget,
+      });
+      if (sent) {
+        setSelectedShareCustomerId("");
+        setCustomerShareQuery("");
+      }
+    } finally {
+      setSharingCustomerId("");
+    }
   }
 
   return (
@@ -3095,6 +3086,36 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
             </div>
           )}
           {messageAttachment && <div style={attachmentSelection}><span>▤ {messageAttachment.name}</span><button type="button" style={composerCloseButton} onClick={() => setMessageAttachment(null)}>×</button></div>}
+          <div style={customerShareComposer}>
+            <input
+              value={customerShareQuery}
+              onChange={(event) => setCustomerShareQuery(event.target.value)}
+              placeholder="Paylaşılacak müşteri ara..."
+              style={customerShareSearch}
+              disabled={!!messagingError || !!editingMessage || sendingMessage}
+            />
+            <select
+              value={selectedShareCustomerId}
+              onChange={(event) => setSelectedShareCustomerId(event.target.value)}
+              style={customerShareSelect}
+              disabled={!!messagingError || !!editingMessage || sendingMessage}
+            >
+              <option value="">Müşteri kartı seç</option>
+              {shareCustomerOptions.map((customer) => (
+                <option key={customer.id} value={customer.id}>
+                  {customerFullName(customer)} - {formatPhoneDisplay(customer.phone)}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={shareSelectedCustomer}
+              disabled={!selectedShareCustomer || !!messagingError || !!editingMessage || !!sharingCustomerId}
+              style={{ ...customerShareButton, opacity: !selectedShareCustomer || messagingError || editingMessage || sharingCustomerId ? 0.6 : 1 }}
+            >
+              {sharingCustomerId ? "Paylaşılıyor..." : "Kartı Paylaş"}
+            </button>
+          </div>
           <div style={composerRow}>
             <label style={attachButton} title="Dosya ekle">
               +
@@ -3534,10 +3555,8 @@ const customerNoteHeader = { display: "flex", justifyContent: "space-between", a
 const customerNoteTitle = { margin: 0, fontSize: 18, color: "#f8fafc" };
 const customerNoteSubtitle = { margin: "4px 0 0", color: "#94a3b8", fontSize: 13 };
 const customerNoteBadge = { padding: "6px 10px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 12, fontWeight: 800 };
-const customerNoteActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, alignItems: "center" };
+const customerNoteActions = { display: "flex", justifyContent: "flex-end", gap: 10, alignItems: "center" };
 const secondaryActionButton = { minHeight: 42, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(125,211,252,0.28)", background: "#17355f", color: "#e0f2fe", cursor: "pointer", fontWeight: 800 };
-const shareGeneralButton = { background: "linear-gradient(135deg,#0891b2,#2563eb)", color: "white" };
-const shareTargetSelect = { ...selectStyle, minHeight: 42, margin: 0 };
 const detailLayout = { display: "grid", gridTemplateColumns: "250px minmax(0,1fr)", gap: 14, marginBottom: 16 };
 const statusRail = { background: "rgba(7,26,54,0.72)", borderRadius: 14, border: "1px solid rgba(147,197,253,0.15)", padding: 12 };
 const railTitle = { margin: "0 0 10px", fontSize: 14, color: "#bfdbfe" };
@@ -3677,6 +3696,10 @@ const messageActions = { display: "flex", alignItems: "center", gap: 3 };
 const messageActionButton = { width: 24, height: 24, display: "grid", placeItems: "center", padding: 0, borderRadius: 5, border: "1px solid rgba(147,197,253,0.15)", background: "rgba(2,16,39,0.28)", color: "#bfdbfe", cursor: "pointer", fontSize: 12 };
 const messageReceipt = { padding: "4px 8px", borderRadius: 999, background: "rgba(15,23,42,0.45)", color: "#cbd5e1", fontSize: 10, fontWeight: 700 };
 const messageComposer = { padding: 12, borderTop: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.84)" };
+const customerShareComposer = { display: "grid", gridTemplateColumns: "minmax(180px, 1fr) minmax(220px, 1.2fr) 132px", gap: 8, alignItems: "center", marginBottom: 9 };
+const customerShareSearch = { width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
+const customerShareSelect = { width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
+const customerShareButton = { minHeight: 38, padding: "9px 10px", borderRadius: 8, border: "1px solid rgba(125,211,252,0.34)", background: "linear-gradient(135deg,#0891b2,#2563eb)", color: "white", cursor: "pointer", fontWeight: 800 };
 const composerRow = { display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 48px", gap: 9, alignItems: "end" };
 const composerContext = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, borderLeft: "3px solid #67e8f9", background: "rgba(8,145,178,0.12)", color: "#cbd5e1", fontSize: 11, overflow: "hidden" };
 const composerCloseButton = { width: 26, height: 26, flexShrink: 0, borderRadius: 5, border: 0, background: "rgba(148,163,184,0.16)", color: "#e2e8f0", cursor: "pointer" };
