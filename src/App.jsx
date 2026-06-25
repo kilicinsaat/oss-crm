@@ -208,6 +208,23 @@ function groupNotesByDay(notes = []) {
   return [...buckets.values()];
 }
 
+function buildCustomerNoteShareMessage(customer, note) {
+  const fullName = `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "Müşteri";
+  const lines = [
+    "Müşteri notu paylaşıldı",
+    `Müşteri: ${fullName}`,
+    `Telefon: ${formatPhoneDisplay(customer.phone)}`,
+  ];
+
+  if (customer.phone_2) lines.push(`Telefon 2: ${formatPhoneDisplay(customer.phone_2)}`);
+  lines.push(`Durum: ${statusLabel(customer.status)}`);
+  if (customer.appointment_date) lines.push(`Takip: ${formatDateTime(customer.appointment_date)}`);
+  if (customer.batch_name) lines.push(`Data: ${customer.batch_name}${customer.batch_page ? ` / Sayfa ${customer.batch_page}` : ""}`);
+  lines.push("", "Not:", note.trim());
+
+  return lines.join("\n").slice(0, 2000);
+}
+
 function roleName(role) {
   if (role === "boss") return "Boss";
   if (role === "manager") return "Manager";
@@ -863,7 +880,8 @@ function App() {
     );
 
     if (error) {
-      alert("Geçmiş okunamadı: " + error.message);
+      setCustomerLogs([]);
+      showSystemToast("Geçmiş okunamadı, kart yine de açıldı.", "warning");
       return;
     }
 
@@ -1251,6 +1269,38 @@ function App() {
     showSystemToast(moveToPool ? `${processed} müşteri havuza alındı.` : `${processed} müşteri atandı.`);
   }
 
+  async function shareCustomerNote({ customer, note, targetId }) {
+    const cleanNote = note.trim();
+    if (!profile || !customer || !cleanNote) return false;
+
+    const recipientId = targetId === "general" ? null : targetId;
+    if (recipientId === profile.id) {
+      showSystemToast("Kendi hesabına mesaj gönderilemez.", "warning");
+      return false;
+    }
+
+    const { data, error } = await supabase
+      .from("app_messages")
+      .insert({
+        sender_id: profile.id,
+        recipient_id: recipientId,
+        body: buildCustomerNoteShareMessage(customer, cleanNote),
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      setMessagingError("Müşteri notu gönderilemedi: " + error.message);
+      showSystemToast("Müşteri notu gönderilemedi.", "warning");
+      return false;
+    }
+
+    setMessagingError("");
+    if (data) setMessages((current) => current.some((message) => message.id === data.id) ? current : [...current, data]);
+    showSystemToast(recipientId ? "Müşteri notu çalışana gönderildi." : "Müşteri notu genel mesaja gönderildi.");
+    return true;
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     const body = messageBody.trim();
@@ -1402,8 +1452,15 @@ function App() {
     setMyNotes((current) => current.filter((note) => note.id !== noteId));
   }
 
-  async function loadMessageHistoryForCustomer(customerId) {
-    setSelectedCustomer(customers.find((customer) => customer.id === customerId) || null);
+  async function loadMessageHistoryForCustomer(customerOrId) {
+    const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
+    const customer = typeof customerOrId === "object"
+      ? customerOrId
+      : customers.find((item) => item.id === customerId);
+
+    if (!customerId || !customer) return;
+    setCustomerLogs([]);
+    setSelectedCustomer(customer);
     await loadCustomerLogs(customerId);
   }
 
@@ -2031,6 +2088,7 @@ function App() {
             setSelectedCustomer={setSelectedCustomer}
             customerLogs={customerLogs}
             updateCustomer={updateCustomer}
+            shareCustomerNote={shareCustomerNote}
             users={users}
             customers={customers}
             profile={profile}
@@ -2317,16 +2375,22 @@ function CustomerTable({
   );
 }
 
-function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, users, customers, profile }) {
+function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, updateCustomer, shareCustomerNote, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
+  const [customerNote, setCustomerNote] = useState(selectedCustomer.info_note || "");
+  const [shareTarget, setShareTarget] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
   const [savingCustomer, setSavingCustomer] = useState(false);
+  const [savingCustomerNote, setSavingCustomerNote] = useState(false);
+  const [sharingCustomerNote, setSharingCustomerNote] = useState("");
   const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
   const needsFollowUpDate = ["callback", "appointment", "contract_appointment"].includes(detailStatus);
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
+  const noteChanged = customerNote.trim() !== String(selectedCustomer.info_note || "").trim();
+  const shareUsers = users.filter((user) => user.id !== profile?.id);
 
   async function saveCustomer() {
     if (savingCustomer) return;
@@ -2370,6 +2434,31 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
     }
   }
 
+  async function saveCustomerNote() {
+    if (savingCustomerNote || !noteChanged) return;
+    setSavingCustomerNote(true);
+    try {
+      await updateCustomer(selectedCustomer.id, { info_note: customerNote.trim() || null });
+    } finally {
+      setSavingCustomerNote(false);
+    }
+  }
+
+  async function shareNote(targetId) {
+    const note = customerNote.trim();
+    if (!note) {
+      alert("Paylaşmak için önce müşteri notu yaz.");
+      return;
+    }
+
+    setSharingCustomerNote(targetId);
+    try {
+      await shareCustomerNote({ customer: { ...selectedCustomer, info_note: note }, note, targetId });
+    } finally {
+      setSharingCustomerNote("");
+    }
+  }
+
   const statusButtons = [
     ["assigned", "Yeni", "new"],
     ["called", "Arandı", "called"],
@@ -2406,7 +2495,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
           <div style={customerInfoGrid}>
             <div style={infoPill}>📞 {formatPhoneDisplay(selectedCustomer.phone)}</div>
             <div style={infoPill}>📱 {formatPhoneDisplay(selectedCustomer.phone_2)}</div>
-            {profile.role !== "employee" && <div style={infoPill}>🪪 TC: {selectedCustomer.tc_no || "-"}</div>}
+            {profile?.role !== "employee" && <div style={infoPill}>🪪 TC: {selectedCustomer.tc_no || "-"}</div>}
             <div style={infoPill}>📁 {selectedCustomer.batch_name || "-"} / Sayfa {selectedCustomer.batch_page || "-"}</div>
           </div>
           {duplicateCustomer && (
@@ -2441,6 +2530,54 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
             Numara yanlış
           </button>
         </div>
+
+        <section style={customerNotePanel}>
+          <div style={customerNoteHeader}>
+            <div>
+              <h3 style={customerNoteTitle}>Müşteri Notu</h3>
+              <p style={customerNoteSubtitle}>Kartta kalır; genel veya çalışan mesajına paylaşılabilir.</p>
+            </div>
+            <span style={customerNoteBadge}>{customerNote.trim() ? `${customerNote.trim().length} karakter` : "Not yok"}</span>
+          </div>
+          <textarea
+            value={customerNote}
+            onChange={(event) => setCustomerNote(event.target.value)}
+            placeholder="Bu müşteriye özel not yaz..."
+            style={{ ...inputStyle, minHeight: 110, resize: "vertical", marginBottom: 0 }}
+          />
+          <div style={customerNoteActions}>
+            <button
+              type="button"
+              disabled={savingCustomerNote || !noteChanged}
+              onClick={saveCustomerNote}
+              style={{ ...secondaryActionButton, opacity: savingCustomerNote || !noteChanged ? 0.6 : 1 }}
+            >
+              {savingCustomerNote ? "Kaydediliyor..." : "Notu Kaydet"}
+            </button>
+            <button
+              type="button"
+              disabled={sharingCustomerNote === "general" || !customerNote.trim()}
+              onClick={() => shareNote("general")}
+              style={{ ...secondaryActionButton, ...shareGeneralButton }}
+            >
+              {sharingCustomerNote === "general" ? "Gönderiliyor..." : "Genel Mesaja Paylaş"}
+            </button>
+            <select value={shareTarget} onChange={(event) => setShareTarget(event.target.value)} style={shareTargetSelect}>
+              <option value="">Çalışan seç</option>
+              {shareUsers.map((user) => (
+                <option key={user.id} value={user.id}>{user.full_name || user.email}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!shareTarget || !!sharingCustomerNote || !customerNote.trim()}
+              onClick={() => shareNote(shareTarget)}
+              style={{ ...secondaryActionButton, opacity: !shareTarget || sharingCustomerNote || !customerNote.trim() ? 0.6 : 1 }}
+            >
+              {sharingCustomerNote && sharingCustomerNote !== "general" ? "Gönderiliyor..." : "Çalışana Gönder"}
+            </button>
+          </div>
+        </section>
 
         <div style={detailLayout}>
           <div style={statusRail}>
@@ -3255,6 +3392,15 @@ const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 
 const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
 const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: 700 };
 const wrongNumberButton = { background: "linear-gradient(135deg,#ef4444,#b91c1c)" };
+const customerNotePanel = { display: "grid", gap: 12, margin: "0 0 16px", padding: 16, borderRadius: 12, background: "rgba(7,26,54,0.62)", border: "1px solid rgba(125,211,252,0.22)" };
+const customerNoteHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" };
+const customerNoteTitle = { margin: 0, fontSize: 18, color: "#f8fafc" };
+const customerNoteSubtitle = { margin: "4px 0 0", color: "#94a3b8", fontSize: 13 };
+const customerNoteBadge = { padding: "6px 10px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 12, fontWeight: 800 };
+const customerNoteActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, alignItems: "center" };
+const secondaryActionButton = { minHeight: 42, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(125,211,252,0.28)", background: "#17355f", color: "#e0f2fe", cursor: "pointer", fontWeight: 800 };
+const shareGeneralButton = { background: "linear-gradient(135deg,#0891b2,#2563eb)", color: "white" };
+const shareTargetSelect = { ...selectStyle, minHeight: 42, margin: 0 };
 const detailLayout = { display: "grid", gridTemplateColumns: "250px minmax(0,1fr)", gap: 14, marginBottom: 16 };
 const statusRail = { background: "rgba(7,26,54,0.72)", borderRadius: 14, border: "1px solid rgba(147,197,253,0.15)", padding: 12 };
 const railTitle = { margin: "0 0 10px", fontSize: 14, color: "#bfdbfe" };
