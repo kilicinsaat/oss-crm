@@ -2383,7 +2383,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
   const [savingCustomerNote, setSavingCustomerNote] = useState(false);
   const [sharingCustomerNote, setSharingCustomerNote] = useState("");
   const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
-  const needsFollowUpDate = ["callback", "appointment", "contract_appointment"].includes(detailStatus);
+  const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
   const noteChanged = customerNote.trim() !== String(selectedCustomer.info_note || "").trim();
@@ -2403,8 +2403,8 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
       alert("Diğer nedeni seçildiğinde kısa bir açıklama yazın.");
       return;
     }
-    if (needsFollowUpDate && !appointmentDate) {
-      alert(needsAppointment ? "Randevu kaydı için randevu tarihi ve saati zorunlu." : "Geri arama için tarih ve saat zorunlu.");
+    if (needsAppointment && !appointmentDate) {
+      alert("Randevu kaydı için randevu tarihi ve saati zorunlu.");
       return;
     }
 
@@ -2618,13 +2618,7 @@ function CustomerModal({ selectedCustomer, setSelectedCustomer, customerLogs, up
 
             {needsFollowUpDate && (
               <>
-                <label style={fieldLabel}>
-                  {needsAppointment
-                    ? "Randevu tarihi ve saati (zorunlu)"
-                    : detailStatus === "callback"
-                      ? "Geri arama tarihi ve saati (zorunlu)"
-                      : "Geri arama / randevu tarihi"}
-                </label>
+                <label style={fieldLabel}>Randevu tarihi ve saati (zorunlu)</label>
                 <input
                   id="detailAppointment"
                   type="datetime-local"
