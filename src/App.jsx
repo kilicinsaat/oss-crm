@@ -333,6 +333,19 @@ function getUserStats(customers, userId) {
   };
 }
 
+function isFreshAssignedCustomer(customer) {
+  return Boolean(customer?.assigned_employee) && customer.status === "assigned";
+}
+
+function customerMatchesSearch(customer, term) {
+  const query = term.trim().toLowerCase();
+  if (!query) return true;
+
+  return `${customer.first_name || ""} ${customer.last_name || ""} ${customer.phone || ""} ${customer.phone_2 || ""} ${customer.tc_no || ""} ${customer.batch_name || ""}`
+    .toLowerCase()
+    .includes(query);
+}
+
 function getDataStats(customers) {
   const grouped = customers.reduce((result, customer) => {
     const name = customer.batch_name || "Manuel kayıt";
@@ -871,6 +884,7 @@ function App() {
         ? { ...customer, ...updates, last_action_by: profile.id }
         : customer
     ));
+    setSelectedIds((current) => current.filter((id) => !updateIdSet.has(id)));
     setSelectedCustomer((current) => {
       if (!current || !updateIdSet.has(current.id)) return current;
       return { ...current, ...updates, last_action_by: profile.id };
@@ -1599,6 +1613,10 @@ function App() {
   const visibleCustomers = profileRole === "employee"
     ? customers.filter((customer) => customer.assigned_employee === profileId)
     : customers;
+  const newIncomingCustomers = visibleCustomers.filter(isFreshAssignedCustomer);
+  const completeCustomers = profileRole === "employee"
+    ? visibleCustomers.filter((customer) => customer.assigned_employee === profileId)
+    : visibleCustomers;
   const filteredCustomers = visibleCustomers
     .filter((customer) => {
       if (customerFilter === "all") return true;
@@ -1608,11 +1626,7 @@ function App() {
       if (customerFilter === "paid") return customer.payment_received;
       return true;
     })
-    .filter((customer) =>
-      `${customer.first_name || ""} ${customer.last_name || ""} ${customer.phone || ""} ${customer.phone_2 || ""} ${customer.tc_no || ""} ${customer.batch_name || ""}`
-        .toLowerCase()
-        .includes(searchTerm.toLowerCase())
-    );
+    .filter((customer) => customerMatchesSearch(customer, searchTerm));
 
   const followUps = customers.filter((customer) =>
     ["called", "no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(customer.status)
@@ -1729,12 +1743,12 @@ function App() {
         <MenuButton icon="●" title="Hesabım" page="account" tone="account" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="✉" title={`Mesajlar${unreadMessageCount ? ` (${unreadMessageCount})` : ""}`} page="messages" tone="messages" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="▦" title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="◉" title="Müşteriler" page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
+        <MenuButton icon="◉" title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"} page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
         <MenuButton icon="✎" title="Notlarım" page="notes" tone="notes" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
         {profile.role === "employee" && (
           <>
-            <MenuButton icon="+" title="Yeni Müşteriler" page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="+" title={`Yeni Gelenler (${newIncomingCustomers.length})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="✓" title="Arandı" page="rep_called" tone="called" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="◷" title="Randevu" page="rep_appointment" tone="appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="▢" title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -1790,7 +1804,8 @@ function App() {
         {activePage === "dashboard" && (
           <>
             <div style={statsGrid}>
-              <ClickStat tone="total" title={profile.role === "employee" ? "Benim Müşterilerim" : "Toplam Müşteri"} value={visibleCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
+              <ClickStat tone="total" title={profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={completeCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
+              {profile.role === "employee" && <ClickStat tone="new" title="Yeni Gelenler" value={newIncomingCustomers.length} onClick={() => { setActivePage("rep_new"); }} />}
               {profile.role !== "employee" && <ClickStat tone="new" title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
               <ClickStat tone="assigned" title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
               <ClickStat tone="approved" title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
@@ -1870,8 +1885,8 @@ function App() {
 
         {activePage === "customers" && (
           <CustomerTable
-            title="Müşteriler"
-            data={filteredCustomers}
+            title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"}
+            data={profile.role === "employee" && customerFilter === "all" ? completeCustomers : filteredCustomers}
             employees={employees}
             profile={profile}
             assignCustomer={assignCustomer}
@@ -1907,7 +1922,7 @@ function App() {
         {activePage === "rep_new" && (
           <CustomerTable
             title="Yeni Gelen Müşteriler"
-            data={visibleCustomers.filter((customer) => customer.status === "assigned")}
+            data={newIncomingCustomers}
             employees={employees}
             profile={profile}
             assignCustomer={assignCustomer}
@@ -2327,11 +2342,12 @@ function CustomerTable({
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [page, setPage] = useState(1);
   const pageSize = 100;
+  const searchedData = data.filter((customer) => customerMatchesSearch(customer, searchTerm));
   const filteredData = assigneeFilter === "all"
-    ? data
+    ? searchedData
     : assigneeFilter === "pool"
-      ? data.filter((customer) => !customer.assigned_employee)
-      : data.filter((customer) => customer.assigned_employee === assigneeFilter);
+      ? searchedData.filter((customer) => !customer.assigned_employee)
+      : searchedData.filter((customer) => customer.assigned_employee === assigneeFilter);
   const pageCount = Math.max(Math.ceil(filteredData.length / pageSize), 1);
   const currentPage = Math.min(page, pageCount);
   const pageData = filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -2460,7 +2476,10 @@ function CustomerTable({
               )}
             </div>
             <div style={customerNameCell}>
-              <strong>{customer.first_name} {customer.last_name}</strong>
+              <div style={customerNameLine}>
+                <strong>{customer.first_name} {customer.last_name}</strong>
+                {isFreshAssignedCustomer(customer) && <span style={freshCustomerBadge}>Yeni</span>}
+              </div>
               <div title={statusLabel(customer.status)} aria-label={statusLabel(customer.status)} style={{ ...customerStatusLine, background: customerHeat(customer.status).color }} />
             </div>
             <div>
@@ -3582,6 +3601,8 @@ const workloadRow = { display: "flex", flexWrap: "wrap", justifyContent: "space-
 const workloadAvailable = { color: "#86efac", fontSize: 13, fontWeight: 600 };
 const workloadBusy = { color: "#fcd34d", fontSize: 13, fontWeight: 600 };
 const customerNameCell = { display: "grid", gap: 6, minWidth: 0 };
+const customerNameLine = { display: "flex", alignItems: "center", gap: 8, minWidth: 0, flexWrap: "wrap" };
+const freshCustomerBadge = { display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "3px 8px", borderRadius: 999, background: "linear-gradient(135deg,#22d3ee,#2563eb)", color: "white", fontSize: 11, fontWeight: 900, boxShadow: "0 0 14px rgba(34,211,238,0.35)", letterSpacing: 0.2 };
 const customerStatusLine = { width: "100%", height: 4, borderRadius: 4, opacity: 0.95 };
 const celebrationBackdrop = { position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgba(2,6,23,0.78)", backdropFilter: "blur(5px)" };
 const celebrationCard = { width: 380, maxWidth: "100%", position: "relative", overflow: "hidden", padding: 32, borderRadius: 12, textAlign: "center", background: "linear-gradient(145deg,#123b7a,#064e3b)", border: "1px solid rgba(167,243,208,0.5)" };
