@@ -334,7 +334,30 @@ function getUserStats(customers, userId) {
 }
 
 function isFreshAssignedCustomer(customer) {
-  return Boolean(customer?.assigned_employee) && customer.status === "assigned";
+  return Boolean(customer?.assigned_employee)
+    && customer.status === "assigned"
+    && customer.last_action_by !== customer.assigned_employee;
+}
+
+const FEMALE_FIRST_NAMES = new Set([
+  "ada", "adile", "afra", "ahu", "alev", "aleyna", "asena", "asli", "asuman", "ayca", "aydan", "ayfer", "ayla", "aylin", "aynur", "ayse", "aysel", "aysen", "aysenur", "aysegul", "azra", "bahar", "banu", "begum", "belgin", "bengisu", "berfin", "beril", "betul", "beyza", "birgul", "burcu", "buse", "canan", "cansu", "ceyda", "ceylan", "cigdem", "damla", "defne", "derin", "didem", "dilara", "dilek", "doga", "duygu", "ece", "eda", "ela", "elif", "elvan", "emine", "esin", "esma", "esra", "evrim", "eylul", "ezgi", "fatma", "feride", "feyza", "filiz", "fulya", "funda", "gamze", "gaye", "gokce", "gonca", "gonul", "gul", "gulay", "gulbahar", "gulcan", "gulden", "guler", "gulin", "gulizar", "gulsah", "gulsen", "gulsum", "hacer", "handan", "hande", "hatice", "havva", "hayriye", "hazal", "hilal", "hulya", "ilayda", "ilknur", "ipek", "irem", "isil", "jale", "kadriye", "kamile", "kardelen", "kevser", "kubra", "lale", "lamia", "leyla", "melda", "melek", "melike", "melis", "melisa", "meral", "merve", "meryem", "mine", "muge", "nalan", "nazan", "nazife", "nazli", "neslihan", "nevin", "nida", "nil", "nilay", "nilufer", "nisa", "nur", "nuran", "nurgul", "nursel", "nursena", "oya", "ozge", "ozlem", "pelin", "pinar", "rabia", "rana", "reyhan", "ruya", "sabahat", "safiye", "seda", "sedef", "selda", "selen", "selin", "selma", "sema", "semra", "senay", "serap", "sevda", "sevgi", "sevil", "sevim", "seyma", "sibel", "sinem", "songul", "sukran", "sule", "sumeyra", "tuba", "tugba", "tulin", "turkan", "ulku", "yasemin", "yagmur", "yaren", "yeliz", "yesim", "yildiz", "zeliha", "zerrin", "zehra", "zeynep", "zumra",
+]);
+const MALE_FIRST_NAMES = new Set([
+  "abdullah", "abdurrahman", "abidin", "adem", "adnan", "ahmet", "akin", "akif", "alican", "ali", "alparslan", "alper", "alperen", "alp", "arda", "arif", "atilla", "aydin", "ayhan", "bahadir", "baran", "baris", "batuhan", "bayram", "bedirhan", "bekir", "berat", "berkan", "bektas", "bilal", "bora", "bulent", "burak", "burhan", "cagdas", "caglar", "can", "caner", "celal", "cem", "cemal", "cengiz", "cihan", "coskun", "cuneyt", "davut", "dogan", "doruk", "efe", "ekrem", "emin", "emir", "emrah", "emre", "enes", "engin", "ercan", "erdem", "erdogan", "erhan", "erkan", "erol", "ersin", "ertan", "ertugrul", "eyup", "faruk", "fatih", "ferdi", "ferhat", "fevzi", "fikret", "firat", "furkan", "galip", "gokay", "gokhan", "gorkem", "gursel", "hakan", "halil", "halit", "hamdi", "hamza", "harun", "hasan", "haydar", "hikmet", "huseyin", "ibrahim", "ilhami", "ilhan", "ilker", "ilyas", "irfan", "isa", "iskender", "ismail", "kadir", "kaan", "kamil", "kemal", "kerem", "kivanc", "koray", "kubilay", "levent", "lokman", "mahmut", "melih", "mehmet", "mesut", "metin", "mert", "muhammed", "murat", "musa", "mustafa", "naci", "namik", "nedim", "necip", "nevzat", "nihat", "nurullah", "oguz", "oguzhan", "oktay", "okan", "omer", "onur", "orhan", "osman", "ozan", "ozcan", "ramazan", "rasim", "recep", "ridvan", "riza", "saban", "sadi", "sahin", "sait", "salih", "samet", "sedat", "selcuk", "serdar", "serhat", "serkan", "seyfettin", "sinan", "sukru", "suleyman", "tahir", "talha", "tarik", "tayfun", "tekin", "teoman", "tolga", "tuncay", "turan", "ufuk", "ugur", "umit", "veli", "volkan", "yasin", "yavuz", "yilmaz", "yunus", "yusuf", "zafer", "zeki",
+]);
+
+function normalizeTurkishName(value) {
+  return String(value || "").trim().toLocaleLowerCase("tr-TR").normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i").replace(/[^a-z]/g, "");
+}
+
+function inferCustomerGender(customer) {
+  const nameParts = String(customer?.first_name || "").split(/\s+/).map(normalizeTurkishName).filter(Boolean);
+  const femaleMatches = nameParts.filter((name) => FEMALE_FIRST_NAMES.has(name)).length;
+  const maleMatches = nameParts.filter((name) => MALE_FIRST_NAMES.has(name)).length;
+  if (femaleMatches > maleMatches) return "female";
+  if (maleMatches > femaleMatches) return "male";
+  return "unknown";
 }
 
 function customerMatchesSearch(customer, term) {
@@ -467,8 +490,13 @@ function App() {
   const [savingNote, setSavingNote] = useState(false);
 
   const [systemToast, setSystemToast] = useState(null);
+  const [messageNotices, setMessageNotices] = useState([]);
+  const [notificationPermission, setNotificationPermission] = useState(() =>
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission
+  );
   const toastTimerRef = useRef(null);
   const customerLogsRequestRef = useRef(0);
+  const usersRef = useRef([]);
   const [saleCelebration, setSaleCelebration] = useState(null);
 
   useEffect(() => {
@@ -548,6 +576,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    usersRef.current = users;
+  }, [users]);
+
+  useEffect(() => {
     if (!profile) return undefined;
     let mounted = true;
 
@@ -568,9 +600,44 @@ function App() {
     }
 
     refreshMessages();
+    function announceIncomingMessage(message) {
+      if (!message || message.sender_id === profile.id) return;
+      if (message.recipient_id && message.recipient_id !== profile.id) return;
+
+      const sender = usersRef.current.find((user) => user.id === message.sender_id);
+      const senderName = sender?.full_name || sender?.email || "Bir çalışan";
+      const notice = {
+        id: message.id || `${Date.now()}-${Math.random()}`,
+        title: message.recipient_id ? senderName : `Genel · ${senderName}`,
+        body: message.body || message.attachment_name || "Yeni mesaj",
+        target: message.recipient_id ? message.sender_id : "general",
+      };
+      setMessageNotices((current) => [...current.filter((item) => item.id !== notice.id), notice].slice(-4));
+      window.setTimeout(() => setMessageNotices((current) => current.filter((item) => item.id !== notice.id)), 7000);
+
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        const browserNotice = new Notification(`OSS CRM · ${notice.title}`, {
+          body: notice.body.slice(0, 180),
+          icon: "/oss-center-mark.png",
+          tag: `crm-message-${notice.id}`,
+        });
+        browserNotice.onclick = () => {
+          window.focus();
+          setMessageTarget(notice.target);
+          setActivePage("messages");
+          browserNotice.close();
+        };
+      }
+    }
+
     const channel = supabase
       .channel(`crm-messages-${profile.id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "app_messages" }, refreshMessages)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "app_messages" }, (payload) => {
+        announceIncomingMessage(payload.new);
+        refreshMessages();
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_messages" }, refreshMessages)
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "app_messages" }, refreshMessages)
       .subscribe();
 
     return () => {
@@ -634,6 +701,16 @@ function App() {
     setSystemToast({ message, tone });
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setSystemToast(null), 2500);
+  }
+
+  async function enableMessageNotifications() {
+    if (typeof Notification === "undefined") {
+      showSystemToast("Bu tarayıcı masaüstü bildirimlerini desteklemiyor.", "warning");
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+    showSystemToast(permission === "granted" ? "Mesaj bildirimleri açıldı" : "Bildirim izni verilmedi", permission === "granted" ? "success" : "warning");
   }
 
   async function loadCustomers() {
@@ -1715,6 +1792,22 @@ function App() {
           {systemToast.message}
         </div>
       )}
+      <div style={messageNoticeStack}>
+        {messageNotices.map((notice) => (
+          <button key={notice.id} type="button" style={messageNoticeCard} onClick={() => {
+            setMessageTarget(notice.target);
+            setActivePage("messages");
+            setMessageNotices((current) => current.filter((item) => item.id !== notice.id));
+          }}>
+            <span style={messageNoticeIcon}>✉</span>
+            <span style={messageNoticeCopy}><strong>{notice.title}</strong><small>{notice.body}</small></span>
+            <span style={messageNoticeClose} onClick={(event) => {
+              event.stopPropagation();
+              setMessageNotices((current) => current.filter((item) => item.id !== notice.id));
+            }}>×</span>
+          </button>
+        ))}
+      </div>
 
       <aside style={{ ...sidebar, width: sidebarCollapsed ? 74 : 260, padding: sidebarCollapsed ? 12 : 24 }}>
         <div style={sidebarTopRow}>
@@ -1796,7 +1889,12 @@ function App() {
               </div>
             </div>
           </div>
-          <button onClick={logout} style={logoutButton}>Çıkış</button>
+          <div style={topbarActions}>
+            {notificationPermission !== "granted" && notificationPermission !== "unsupported" && (
+              <button type="button" onClick={enableMessageNotifications} style={notificationButton}>🔔 Bildirimleri Aç</button>
+            )}
+            <button onClick={logout} style={logoutButton}>Çıkış</button>
+          </div>
         </header>
 
         {dataLoading && <div style={syncNotice}>Veriler güncelleniyor, lütfen bekleyin.</div>}
@@ -2340,14 +2438,22 @@ function CustomerTable({
   const canManage = profile.role === "boss" || profile.role === "manager";
   const canViewTc = profile.role !== "employee";
   const [assigneeFilter, setAssigneeFilter] = useState("all");
+  const [genderFilter, setGenderFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
   const pageSize = 100;
   const searchedData = data.filter((customer) => customerMatchesSearch(customer, searchTerm));
-  const filteredData = assigneeFilter === "all"
+  const assigneeFilteredData = assigneeFilter === "all"
     ? searchedData
     : assigneeFilter === "pool"
       ? searchedData.filter((customer) => !customer.assigned_employee)
       : searchedData.filter((customer) => customer.assigned_employee === assigneeFilter);
+  const genderFilteredData = genderFilter === "all"
+    ? assigneeFilteredData
+    : assigneeFilteredData.filter((customer) => inferCustomerGender(customer) === genderFilter);
+  const filteredData = statusFilter === "all"
+    ? genderFilteredData
+    : genderFilteredData.filter((customer) => customer.status === statusFilter);
   const pageCount = Math.max(Math.ceil(filteredData.length / pageSize), 1);
   const currentPage = Math.min(page, pageCount);
   const pageData = filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -2404,6 +2510,16 @@ function CustomerTable({
             ))}
           </select>
         )}
+        <select value={genderFilter} onChange={(event) => { setGenderFilter(event.target.value); setPage(1); }} style={toolbarSelect}>
+          <option value="all">Kadın / erkek: Tümü</option>
+          <option value="female">Kadın (isim tahmini)</option>
+          <option value="male">Erkek (isim tahmini)</option>
+          <option value="unknown">Unisex isimler</option>
+        </select>
+        <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }} style={toolbarSelect}>
+          <option value="all">Tüm durumlar</option>
+          {[...CUSTOMER_STATUSES].map((status) => <option key={status} value={status}>{statusLabel(status)}</option>)}
+        </select>
       </div>
 
       <div style={tableSummary}>
@@ -3434,6 +3550,8 @@ const brandMark = { display: "block", width: 42, height: "auto" };
 const sideEmail = { fontSize: 12, color: "#bfdbfe", margin: "6px 0 16px" };
 const mainArea = { flex: 1, minWidth: 0, padding: "24px 32px", overflowX: "hidden" };
 const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24 };
+const topbarActions = { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" };
+const notificationButton = { padding: "10px 13px", borderRadius: 9, border: "1px solid rgba(103,232,249,0.4)", background: "rgba(8,145,178,0.2)", color: "#cffafe", cursor: "pointer", fontWeight: 800 };
 const topbarIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
 const backButton = { width: 40, height: 40, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 8, border: "1px solid rgba(125,211,252,0.38)", background: "#10284f", color: "#e0f2fe", fontSize: 28, lineHeight: 1, cursor: "pointer" };
 const welcomeBlock = { minWidth: 0 };
@@ -3470,7 +3588,7 @@ const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "b
 const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
 const tableTitleRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 };
 const exportExcelButton = { minHeight: 40, padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(134,239,172,0.42)", background: "linear-gradient(135deg,#059669,#0891b2)", color: "white", cursor: "pointer", fontWeight: 800 };
-const customerToolbar = { display: "grid", gridTemplateColumns: "minmax(240px,1fr) minmax(210px,280px)", gap: 10, marginBottom: 10 };
+const customerToolbar = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10, marginBottom: 10 };
 const toolbarSelect = { width: "100%", padding: 12, borderRadius: 8, border: "1px solid rgba(147,197,253,0.28)", background: "#071a36", color: "#e0f2fe" };
 const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, color: "#94a3b8", fontSize: 12 };
 const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "1px solid #7dd3fc", cursor: "pointer", fontWeight: 700, background: "linear-gradient(135deg,#38bdf8,#2563eb)", color: "#ffffff" };
@@ -3719,6 +3837,11 @@ const noteMeta = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 
 const toastStyle = { position: "fixed", top: 18, left: "50%", transform: "translateX(-50%)", zIndex: 1201, padding: "12px 18px", borderRadius: 999, color: "white", fontWeight: 800, boxShadow: "0 18px 40px rgba(0,0,0,0.35)" };
 const toastSuccess = { background: "linear-gradient(135deg,rgba(37,99,235,0.96),rgba(8,145,178,0.92))", border: "1px solid rgba(125,211,252,0.35)" };
 const toastWarning = { background: "linear-gradient(135deg,rgba(180,83,9,0.96),rgba(127,29,29,0.92))", border: "1px solid rgba(251,191,36,0.35)" };
+const messageNoticeStack = { position: "fixed", top: 18, right: 18, zIndex: 1300, width: "min(390px,calc(100vw - 36px))", display: "grid", gap: 10 };
+const messageNoticeCard = { width: "100%", display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 24px", alignItems: "center", gap: 10, padding: 12, borderRadius: 12, border: "1px solid rgba(103,232,249,0.42)", background: "linear-gradient(135deg,rgba(9,35,72,0.98),rgba(15,76,92,0.98))", color: "white", boxShadow: "0 18px 45px rgba(0,0,0,0.4)", cursor: "pointer", textAlign: "left" };
+const messageNoticeIcon = { width: 42, height: 42, display: "grid", placeItems: "center", borderRadius: 11, background: "rgba(34,211,238,0.16)", color: "#67e8f9", fontSize: 20 };
+const messageNoticeCopy = { minWidth: 0, display: "grid", gap: 3 };
+const messageNoticeClose = { width: 24, height: 24, display: "grid", placeItems: "center", borderRadius: 7, background: "rgba(255,255,255,0.08)", color: "#cbd5e1", fontSize: 18 };
 const messageSetupNotice = { alignSelf: "center", justifySelf: "center", margin: 24, padding: 16, borderRadius: 8, background: "rgba(180,83,9,0.2)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", textAlign: "center" };
 const presenceVisuals = {
   online: { label: "Çevrimiçi", color: "#34d399" },
