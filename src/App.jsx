@@ -1833,20 +1833,20 @@ function App() {
           </div>
         )}
 
-        <MenuButton icon="●" title="Hesabım" page="account" tone="account" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="♙" title="Hesabım" page="account" tone="account" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="✉" title={`Mesajlar${unreadMessageCount ? ` (${unreadMessageCount})` : ""}`} page="messages" tone="messages" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="▦" title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="◉" title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"} page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
+        <MenuButton icon="♟" title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"} page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
         <MenuButton icon="✎" title="Notlarım" page="notes" tone="notes" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
         {profile.role === "employee" && (
           <>
-            <MenuButton icon="+" title={`Yeni Gelenler (${newIncomingCustomers.length})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="✓" title="Arandı" page="rep_called" tone="called" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="✦" title={`Yeni Gelenler (${newIncomingCustomers.length})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="☎" title="Arandı" page="rep_called" tone="called" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="◷" title="Randevu" page="rep_appointment" tone="appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="▢" title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="↶" title="Tekrar Aranacak" page="rep_callback" tone="callback" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="×" title="Yapmayacak" page="rep_not_approved" tone="closed" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="▤" title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="↻" title="Tekrar Aranacak" page="rep_callback" tone="callback" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="⊘" title="Yapmayacak" page="rep_not_approved" tone="closed" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="₺" title="Satış" page="rep_paid" tone="paid" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
           </>
         )}
@@ -2637,7 +2637,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
   const [savingCustomer, setSavingCustomer] = useState(false);
-  const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
+  const needsAppointment = detailStatus === "appointment";
   const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
@@ -2797,11 +2797,10 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
                 <label style={fieldLabel}>Yapmama nedeni (zorunlu)</label>
                 <select value={notApprovedReason} onChange={(event) => setNotApprovedReason(event.target.value)} style={inputStyle}>
                   <option value="">Neden seçin</option>
-                  <option value="Fiyat uygun değil">Fiyat uygun değil</option>
-                  <option value="Ulaşılamadı">Ulaşılamadı</option>
-                  <option value="Vazgeçti">Vazgeçti</option>
+                  <option value="Satılmış">Satılmış</option>
+                  <option value="Davalı / Avukatlık">Davalı / Avukatlık</option>
                   <option value="İlgilenmiyor">İlgilenmiyor</option>
-                  <option value="Hizmet uygun değil">Hizmet uygun değil</option>
+                  <option value="Vazgeçti">Vazgeçti</option>
                   <option value="Diğer">Diğer</option>
                 </select>
               </>
@@ -3531,7 +3530,7 @@ const appShell = {
   width: "100%",
   minWidth: 0,
   minHeight: "100vh",
-  background: `linear-gradient(135deg, ${parliamentDark}, #0f172a)`,
+  background: "#f4f7fb",
   color: "white",
   display: "flex",
 };
@@ -3541,6 +3540,7 @@ const sidebar = {
   borderRight: "1px solid rgba(147,197,253,0.25)",
   transition: "width 180ms ease, padding 180ms ease",
   flexShrink: 0,
+  boxShadow: "10px 0 30px rgba(15,23,42,0.12)",
 };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
 const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 8, background: "linear-gradient(135deg,#f0f9ff,#bae6fd)", border: "1px solid rgba(125,211,252,0.72)" };
@@ -3548,22 +3548,22 @@ const brandLogo = { display: "block", width: "100%", height: "auto" };
 const brandMarkFrame = { width: 46, height: 48, display: "grid", placeItems: "center", margin: "-4px auto 14px" };
 const brandMark = { display: "block", width: 42, height: "auto" };
 const sideEmail = { fontSize: 12, color: "#bfdbfe", margin: "6px 0 16px" };
-const mainArea = { flex: 1, minWidth: 0, padding: "24px 32px", overflowX: "hidden" };
-const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24 };
+const mainArea = { flex: 1, minWidth: 0, minHeight: "100vh", padding: "24px 32px", overflowX: "hidden", background: "linear-gradient(145deg,#ffffff 0%,#f5f8fc 58%,#edf3fa 100%)" };
+const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24, padding: "15px 18px", borderRadius: 16, background: "rgba(255,255,255,0.92)", border: "1px solid #dbe7f3", boxShadow: "0 12px 30px rgba(15,39,75,0.08)" };
 const topbarActions = { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" };
-const notificationButton = { padding: "10px 13px", borderRadius: 9, border: "1px solid rgba(103,232,249,0.4)", background: "rgba(8,145,178,0.2)", color: "#cffafe", cursor: "pointer", fontWeight: 800 };
+const notificationButton = { padding: "10px 13px", borderRadius: 9, border: "1px solid #bfdbfe", background: "#eff6ff", color: "#123b7a", cursor: "pointer", fontWeight: 800 };
 const topbarIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
 const backButton = { width: 40, height: 40, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 8, border: "1px solid rgba(125,211,252,0.38)", background: "#10284f", color: "#e0f2fe", fontSize: 28, lineHeight: 1, cursor: "pointer" };
 const welcomeBlock = { minWidth: 0 };
-const welcomeEyebrow = { display: "block", fontSize: 13, opacity: 0.65, marginBottom: 4 };
-const welcomeTitle = { margin: 0, fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
-const welcomeMeta = { margin: "6px 0 0", opacity: 0.7 };
+const welcomeEyebrow = { display: "block", fontSize: 13, color: "#64748b", marginBottom: 4 };
+const welcomeTitle = { margin: 0, color: "#0b2b5f", fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
+const welcomeMeta = { margin: "6px 0 0", color: "#475569" };
 const welcomeStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginTop: 6 };
 const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.22)", borderRadius: 8, cursor: "pointer", fontSize: 20 };
-const menuButton = { width: "100%", minHeight: 46, display: "flex", alignItems: "center", gap: 11, padding: 13, marginBottom: 9, background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.12)", borderRadius: 8, cursor: "pointer", textAlign: "left", fontWeight: 700 };
-const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 0 0 2px rgba(37,99,235,0.18)" };
+const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "rgba(18,38,71,0.82)", color: "white", border: "1px solid rgba(147,197,253,0.14)", borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, transition: "transform 150ms ease, border-color 150ms ease, background 150ms ease" };
+const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 8px 22px rgba(37,99,235,0.28)" };
 const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
-const menuIcon = { width: 22, height: 22, display: "grid", placeItems: "center", borderRadius: 6, background: "rgba(125,211,252,0.14)", color: "#bae6fd", fontSize: 14, lineHeight: 1 };
+const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: "linear-gradient(145deg,rgba(255,255,255,0.14),rgba(125,211,252,0.08))", color: "#e0f2fe", border: "1px solid rgba(186,230,253,0.16)", fontSize: 17, fontWeight: 900, lineHeight: 1 };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: "1px solid rgba(147,197,253,0.35)", cursor: "pointer", fontWeight: 700, background: "#16345f", color: "#e0f2fe" };
 const syncNotice = { margin: "-8px 0 16px", padding: "10px 12px", borderRadius: 8, background: "rgba(56,189,248,0.12)", border: "1px solid rgba(125,211,252,0.32)", color: "#bae6fd", fontSize: 13, fontWeight: 600 };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
@@ -3576,7 +3576,7 @@ const statCardTones = {
   paid: { background: "linear-gradient(135deg,#047857,#065f46)", borderColor: "rgba(110,231,183,0.46)" },
 };
 const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
-const panelCard = { background: "rgba(16,40,79,0.88)", padding: 22, borderRadius: 18, border: "1px solid rgba(147,197,253,0.22)" };
+const panelCard = { background: "linear-gradient(145deg,#12315f,#0d254a)", padding: 22, borderRadius: 18, border: "1px solid rgba(147,197,253,0.26)", boxShadow: "0 16px 34px rgba(15,39,75,0.13)" };
 const pipelinePanel = { background: "linear-gradient(145deg,rgba(16,40,79,0.96),rgba(7,26,54,0.94))" };
 const pipelineList = { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, marginTop: 18 };
 const pipelineRow = { minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 8, background: "rgba(2,16,39,0.58)", border: "1px solid rgba(147,197,253,0.12)" };
