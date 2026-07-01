@@ -167,10 +167,6 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
     });
 
     self.postMessage({ type: "progress", current: totalRows, total: totalRows });
-    if (preparedRows.length === 0) {
-      throw new Error("Dosyada geçerli isim + GSM eşleşmesi bulunamadı. Telefonlar 5 ile başlayan 10 haneli GSM olmalıdır.");
-    }
-
     self.postMessage({
       type: "result",
       result: {

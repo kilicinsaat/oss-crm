@@ -1069,6 +1069,12 @@ function App() {
       }));
 
       if (preparedRows.length === 0) {
+        if (duplicateRows > 0 && rejectedRows === 0) {
+          throw new Error(
+            `Dosya başarıyla okundu; ancak ${duplicateRows.toLocaleString("tr-TR")} kaydın tamamı sistemde zaten mevcut. `
+            + "Aynı telefon numarası güvenlik için ikinci kez eklenmedi."
+          );
+        }
         throw new Error(`Geçerli kayıt bulunamadı. ${rejectedRows} eksik/hatalı, ${duplicateRows} mükerrer satır tespit edildi.`);
       }
 
