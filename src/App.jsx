@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./lib/supabase";
 
 const COMPANY_MESSAGE = `
@@ -1873,7 +1873,7 @@ function App() {
         <MenuButton icon="!" title="Numara Yanlış" page="wrong_number" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
         {profile.role !== "employee" && (
-          <MenuButton icon="◎" title="Çalışanlar" page="employees" tone="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+          <MenuButton icon="◎" title="Rep Takip Merkezi" page="employees" tone="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
         <MenuButton icon="▤" title="Raporlar" page="reports" tone="reports" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -3299,57 +3299,231 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
 }
 
 function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff }) {
-  const statsFor = (userId) => getUserStats(customers, userId);
-  return (
-    <div style={panelCard}>
-      <h2>Çalışanlar ve Managerlar</h2>
+  const [activeTab, setActiveTab] = useState("overview");
+  const [selectedRep, setSelectedRep] = useState("all");
+  const [datePreset, setDatePreset] = useState("today");
+  const [activityLogs, setActivityLogs] = useState([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState("");
+  const [clockNow] = useState(() => Date.now());
+  const reps = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
+  const customerMap = useMemo(() => new Map(customers.map((customer) => [String(customer.id), customer])), [customers]);
+  const userMap = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
 
-      {profile.role === "boss" && (
-        <form onSubmit={addStaff} style={staffFormBox}>
-          <h3>Yeni Kullanıcı Profili Ekle</h3>
-          <div style={formGrid}>
-            <input placeholder="Auth UID" value={staffForm.id} onChange={(e) => setStaffForm({ ...staffForm, id: e.target.value })} style={inputStyle} />
-            <input placeholder="Ad Soyad" value={staffForm.full_name} onChange={(e) => setStaffForm({ ...staffForm, full_name: e.target.value })} style={inputStyle} />
-            <input placeholder="Email" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} style={inputStyle} />
-            <select value={staffForm.role} onChange={(e) => setStaffForm({ ...staffForm, role: e.target.value })} style={inputStyle}>
-              <option value="employee">Rep</option>
-              <option value="manager">Manager</option>
+  useEffect(() => {
+    let cancelled = false;
+    const now = new Date();
+    let start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (datePreset === "yesterday") start.setDate(start.getDate() - 1);
+    if (datePreset === "7days") start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    if (datePreset === "30days") start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const end = datePreset === "yesterday" ? new Date(start.getTime() + 24 * 60 * 60 * 1000) : null;
+
+    async function loadRepActivity() {
+      setActivityLoading(true);
+      setActivityError("");
+      let query = supabase
+        .from("customer_logs")
+        .select("id, customer_id, user_id, old_status, new_status, note, created_at")
+        .gte("created_at", start.toISOString())
+        .order("created_at", { ascending: false })
+        .limit(5000);
+      if (datePreset === "yesterday") {
+        query = query.lt("created_at", end.toISOString());
+      }
+      const { data, error } = await query;
+      if (cancelled) return;
+      setActivityLoading(false);
+      if (error) {
+        setActivityError("Rep işlem kayıtları okunamadı: " + error.message);
+        setActivityLogs([]);
+        return;
+      }
+      setActivityLogs(data || []);
+    }
+
+    loadRepActivity();
+    const activityChannel = supabase
+      .channel(`rep-activity-${datePreset}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "customer_logs" }, (payload) => {
+        const logTime = new Date(payload.new.created_at);
+        if (logTime < start || (end && logTime >= end)) return;
+        setActivityLogs((current) => [payload.new, ...current.filter((log) => log.id !== payload.new.id)].slice(0, 5000));
+      })
+      .subscribe();
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(activityChannel);
+    };
+  }, [datePreset]);
+
+  const visibleLogs = useMemo(() => selectedRep === "all"
+    ? activityLogs
+    : activityLogs.filter((log) => log.user_id === selectedRep), [activityLogs, selectedRep]);
+
+  const repRows = useMemo(() => reps.map((rep) => {
+    const logs = activityLogs.filter((log) => log.user_id === rep.id);
+    const assigned = customers.filter((customer) => customer.assigned_employee === rep.id);
+    const callActions = logs.filter((log) => ["called", "no_answer", "busy", "callback"].includes(log.new_status)).length;
+    const appointments = logs.filter((log) => ["appointment", "contract_appointment"].includes(log.new_status)).length;
+    const sales = logs.filter((log) => log.new_status === "paid").length;
+    const untouched = assigned.filter(isFreshAssignedCustomer).length;
+    const lastLog = logs[0];
+    return {
+      rep,
+      logs,
+      assigned: assigned.length,
+      uniqueCustomers: new Set(logs.map((log) => String(log.customer_id))).size,
+      callActions,
+      appointments,
+      sales,
+      untouched,
+      conversion: callActions ? Math.round((appointments / callActions) * 100) : 0,
+      lastAction: lastLog?.created_at || null,
+    };
+  }).sort((a, b) => b.logs.length - a.logs.length), [reps, activityLogs, customers]);
+
+  const delayedCustomers = useMemo(() => customers
+    .filter((customer) => selectedRep === "all" || customer.assigned_employee === selectedRep)
+    .filter((customer) => {
+      if (!customer.assigned_employee) return false;
+      const reminderLate = customer.appointment_date
+        && ["callback", "appointment", "contract_appointment"].includes(customer.status)
+        && new Date(customer.appointment_date).getTime() < clockNow;
+      const assignedAt = customer.assigned_at ? new Date(customer.assigned_at) : null;
+      const untouchedLate = isFreshAssignedCustomer(customer) && assignedAt && clockNow - assignedAt.getTime() > 24 * 60 * 60 * 1000;
+      return reminderLate || untouchedLate;
+    })
+    .sort((a, b) => new Date(a.appointment_date || a.assigned_at) - new Date(b.appointment_date || b.assigned_at)), [customers, selectedRep, clockNow]);
+
+  const totalActions = repRows.reduce((sum, row) => sum + row.logs.length, 0);
+  const totalAppointments = repRows.reduce((sum, row) => sum + row.appointments, 0);
+  const totalSales = repRows.reduce((sum, row) => sum + row.sales, 0);
+  const totalUntouched = repRows.reduce((sum, row) => sum + row.untouched, 0);
+
+  return (
+    <div style={repCenterLayout}>
+      <section style={panelCard}>
+        <div style={repCenterHeader}>
+          <div>
+            <span style={notesEyebrow}>YÖNETİM PANELİ</span>
+            <h2 style={sectionTitle}>Rep Takip Merkezi</h2>
+            <p style={mutedText}>Çalışanların gerçek işlem kayıtlarını, takip kalitesini ve geciken işlerini tek ekrandan izle.</p>
+          </div>
+          <div style={repCenterFilters}>
+            <select value={selectedRep} onChange={(event) => setSelectedRep(event.target.value)} style={toolbarSelect}>
+              <option value="all">Tüm çalışanlar</option>
+              {reps.map((rep) => <option key={rep.id} value={rep.id}>{rep.full_name || rep.email}</option>)}
+            </select>
+            <select value={datePreset} onChange={(event) => setDatePreset(event.target.value)} style={toolbarSelect}>
+              <option value="today">Bugün</option>
+              <option value="yesterday">Dün</option>
+              <option value="7days">Son 7 gün</option>
+              <option value="30days">Son 30 gün</option>
             </select>
           </div>
-          <button style={primaryButton}>Kullanıcı Profili Ekle</button>
-        </form>
-      )}
+        </div>
 
-      {users.map((user) => {
-        const stats = statsFor(user.id);
-        return (
-          <div key={user.id} style={employeeRow}>
-            <div style={employeeIdentity}>
-              <ProfileAvatar user={user} size={46} />
-              <div>
-                <strong>{user.full_name || "İsimsiz kullanıcı"}</strong>
-                <p style={{ margin: 0, opacity: 0.7 }}>{user.email}</p>
-                <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 13 }}>
-                  Müşteri: {stats.total} | Aranan: {stats.called} | Randevu: {stats.appointment} | Satış: {stats.paid}
-                </p>
-                <PresenceBadge user={user} onlineUserIds={onlineUserIds} />
+        <div style={repCenterTabs}>
+          {[["overview", "Genel Bakış"], ["stream", "Canlı İşlem Akışı"], ["delayed", `Geciken İşler (${delayedCustomers.length})`], ["staff", "Çalışan Yönetimi"]].map(([key, label]) => (
+            <button key={key} type="button" onClick={() => setActiveTab(key)} style={activeTab === key ? repTabActive : repTabButton}>{label}</button>
+          ))}
+        </div>
+
+        {activityError && <div style={messageSetupNotice}>{activityError}</div>}
+        {activityLoading && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
+
+        {activeTab === "overview" && (
+          <>
+            <div style={repMetricGrid}>
+              <RepMetric label="Toplam işlem" value={totalActions} tone="#38bdf8" />
+              <RepMetric label="Randevu" value={totalAppointments} tone="#fbbf24" />
+              <RepMetric label="Satış" value={totalSales} tone="#34d399" />
+              <RepMetric label="İşlem bekleyen" value={totalUntouched} tone="#f87171" />
+            </div>
+            <div style={repComparisonTable}>
+              <div style={repComparisonHeader}>
+                <span>Çalışan</span><span>İşlem</span><span>Müşteri</span><span>Arama</span><span>Randevu</span><span>Satış</span><span>Dönüşüm</span><span>Bekleyen</span><span>Son işlem</span>
               </div>
+              {repRows.filter((row) => selectedRep === "all" || row.rep.id === selectedRep).map((row) => (
+                <button key={row.rep.id} type="button" style={repComparisonRow} onClick={() => { setSelectedRep(row.rep.id); setActiveTab("stream"); }}>
+                  <span style={repTableIdentity}><ProfileAvatar user={row.rep} size={34} /><span><strong>{row.rep.full_name || row.rep.email}</strong><PresenceBadge user={row.rep} onlineUserIds={onlineUserIds} compact /></span></span>
+                  <strong>{row.logs.length}</strong><span>{row.uniqueCustomers}</span><span>{row.callActions}</span><span>{row.appointments}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched}</span><small>{formatDateTime(row.lastAction)}</small>
+                </button>
+              ))}
             </div>
-            <div style={staffActions}>
-              <span style={roleBadge}>{roleName(user.role)}</span>
-              {profile.role === "boss" && user.role === "employee" && (
-                <button type="button" onClick={() => deleteStaff(user)} style={deleteStaffButton}>Rep Sil</button>
-              )}
-            </div>
-          </div>
-        );
-      })}
+            {activityLogs.length >= 5000 && <p style={repLimitNotice}>Bu tarih aralığında 5.000’den fazla işlem var. Ekran en güncel 5.000 işlemi gösteriyor.</p>}
+          </>
+        )}
 
-      {profile.role !== "employee" && (
-        <AssignmentOverview employees={users.filter((user) => ["employee", "manager"].includes(user.role))} customers={customers} />
-      )}
+        {activeTab === "stream" && (
+          <div style={activityStream}>
+            {visibleLogs.length === 0 && !activityLoading && <p style={mutedText}>Seçilen aralıkta işlem kaydı yok.</p>}
+            {visibleLogs.slice(0, 500).map((log) => {
+              const customer = customerMap.get(String(log.customer_id));
+              const rep = userMap.get(log.user_id);
+              return (
+                <div key={log.id} style={{ ...activityStreamRow, borderLeftColor: customerHeat(log.new_status).color }}>
+                  <span style={activityTime}>{formatDateTime(log.created_at)}</span>
+                  <span style={activityRep}>{rep?.full_name || rep?.email || "Bilinmeyen çalışan"}</span>
+                  <span style={activityCustomer}>{customer ? customerFullName(customer) : `Müşteri #${log.customer_id}`}</span>
+                  <span style={statusBadge(log.new_status)}>{statusLabel(log.new_status)}</span>
+                  <span style={activityNote}>{log.note || "Not bırakılmadı"}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {activeTab === "delayed" && (
+          <div style={activityStream}>
+            {delayedCustomers.length === 0 && <p style={mutedText}>Geciken veya 24 saattir işlem yapılmayan müşteri yok.</p>}
+            {delayedCustomers.slice(0, 500).map((customer) => {
+              const rep = userMap.get(customer.assigned_employee);
+              const isReminder = customer.appointment_date && new Date(customer.appointment_date).getTime() < clockNow;
+              return (
+                <div key={customer.id} style={{ ...activityStreamRow, borderLeftColor: isReminder ? "#f87171" : "#fbbf24" }}>
+                  <span style={activityTime}>{isReminder ? formatDateTime(customer.appointment_date) : formatDateTime(customer.assigned_at)}</span>
+                  <span style={activityRep}>{rep?.full_name || rep?.email || "Atanmamış"}</span>
+                  <span style={activityCustomer}>{customerFullName(customer)}</span>
+                  <span style={isReminder ? overdueBadge : waitingBadge}>{isReminder ? "Takip gecikti" : "24 saattir işlem yok"}</span>
+                  <span style={activityNote}>{formatPhoneDisplay(customer.phone)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {activeTab === "staff" && (
+          <>
+            {profile.role === "boss" && (
+              <form onSubmit={addStaff} style={staffFormBox}>
+                <h3>Yeni Kullanıcı Profili Ekle</h3>
+                <div style={formGrid}>
+                  <input placeholder="Auth UID" value={staffForm.id} onChange={(e) => setStaffForm({ ...staffForm, id: e.target.value })} style={inputStyle} />
+                  <input placeholder="Ad Soyad" value={staffForm.full_name} onChange={(e) => setStaffForm({ ...staffForm, full_name: e.target.value })} style={inputStyle} />
+                  <input placeholder="Email" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} style={inputStyle} />
+                  <select value={staffForm.role} onChange={(e) => setStaffForm({ ...staffForm, role: e.target.value })} style={inputStyle}><option value="employee">Rep</option><option value="manager">Manager</option></select>
+                </div>
+                <button style={primaryButton}>Kullanıcı Profili Ekle</button>
+              </form>
+            )}
+            {users.map((user) => (
+              <div key={user.id} style={employeeRow}>
+                <div style={employeeIdentity}><ProfileAvatar user={user} size={46} /><div><strong>{user.full_name || "İsimsiz kullanıcı"}</strong><p style={{ margin: 0, opacity: 0.7 }}>{user.email}</p><PresenceBadge user={user} onlineUserIds={onlineUserIds} /></div></div>
+                <div style={staffActions}><span style={roleBadge}>{roleName(user.role)}</span>{profile.role === "boss" && user.role === "employee" && <button type="button" onClick={() => deleteStaff(user)} style={deleteStaffButton}>Rep Sil</button>}</div>
+              </div>
+            ))}
+            <AssignmentOverview employees={reps} customers={customers} />
+          </>
+        )}
+      </section>
     </div>
   );
+}
+
+function RepMetric({ label, value, tone }) {
+  return <div style={{ ...repMetricCard, borderColor: tone }}><span style={workSummaryLabel}>{label}</span><strong style={{ ...workSummaryValue, color: tone }}>{value.toLocaleString("tr-TR")}</strong></div>;
 }
 
 function TodayWorkView({ todayItems, overdueItems }) {
@@ -3644,6 +3818,27 @@ const roleBadge = { background: "#2563eb", padding: "6px 12px", borderRadius: 99
 const staffActions = { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 };
 const deleteStaffButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid rgba(252,165,165,0.55)", background: "rgba(127,29,29,0.5)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
 const staffFormBox = { background: "#071a36", padding: 18, borderRadius: 14, marginBottom: 20, border: "1px solid rgba(147,197,253,0.18)" };
+const repCenterLayout = { display: "grid", gap: 18 };
+const repCenterHeader = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 18, flexWrap: "wrap" };
+const repCenterFilters = { display: "grid", gridTemplateColumns: "minmax(200px,1fr) minmax(150px,190px)", gap: 10, minWidth: "min(100%,410px)" };
+const repCenterTabs = { display: "flex", gap: 8, flexWrap: "wrap", margin: "22px 0 18px", paddingBottom: 12, borderBottom: "1px solid rgba(147,197,253,0.16)" };
+const repTabButton = { padding: "9px 13px", borderRadius: 9, border: "1px solid rgba(147,197,253,0.18)", background: "rgba(7,26,54,0.66)", color: "#bfdbfe", cursor: "pointer", fontWeight: 700 };
+const repTabActive = { ...repTabButton, background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "white", borderColor: "rgba(125,211,252,0.6)", boxShadow: "0 8px 20px rgba(37,99,235,0.22)" };
+const repMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12, marginBottom: 18 };
+const repMetricCard = { display: "grid", gap: 7, minHeight: 92, alignContent: "center", padding: 15, borderRadius: 12, border: "1px solid", background: "rgba(7,26,54,0.72)" };
+const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: "1px solid rgba(147,197,253,0.16)", background: "#071a36" };
+const repComparisonHeader = { minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: parliamentMid, color: "#bfdbfe", fontSize: 11, fontWeight: 800 };
+const repComparisonRow = { width: "100%", minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: "1px solid rgba(147,197,253,0.12)", background: "#10284f", color: "#e0f2fe", cursor: "pointer", textAlign: "left" };
+const repTableIdentity = { display: "flex", alignItems: "center", gap: 9, minWidth: 0 };
+const repLimitNotice = { margin: "12px 0 0", color: "#fde68a", fontSize: 12 };
+const activityStream = { display: "grid", gap: 8, maxHeight: "68vh", overflowY: "auto", paddingRight: 4 };
+const activityStreamRow = { display: "grid", gridTemplateColumns: "145px minmax(140px,.8fr) minmax(180px,1fr) 150px minmax(180px,1.2fr)", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, border: "1px solid rgba(147,197,253,0.14)", borderLeft: "4px solid", background: "rgba(7,26,54,0.7)", minWidth: 830 };
+const activityTime = { color: "#94a3b8", fontSize: 11 };
+const activityRep = { color: "#7dd3fc", fontWeight: 800, fontSize: 12 };
+const activityCustomer = { color: "#f8fafc", fontWeight: 700, fontSize: 12 };
+const activityNote = { color: "#cbd5e1", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const overdueBadge = { padding: "5px 8px", borderRadius: 999, background: "rgba(239,68,68,0.2)", color: "#fca5a5", fontSize: 11, fontWeight: 800, textAlign: "center" };
+const waitingBadge = { ...overdueBadge, background: "rgba(245,158,11,0.18)", color: "#fde68a" };
 const modalBg = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 999 };
 const modalCard = { width: 860, maxWidth: "94%", maxHeight: "90vh", overflowY: "auto", background: `linear-gradient(135deg, ${cardBlue}, #0f172a)`, padding: 25, borderRadius: 20, border: "1px solid rgba(147,197,253,0.25)" };
 const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: "1px solid rgba(147,197,253,0.38)", background: "#16345f", color: "#e0f2fe" };
