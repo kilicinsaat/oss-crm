@@ -18,6 +18,24 @@ Esenyurt / İstanbul
 Herhangi bir sorunuz olursa bize ulaşabilirsiniz.
 `;
 
+const DEFAULT_SMS_MESSAGE = `🏢 KILIÇ İNŞAAT MİMARLIK
+
+📞 İletişim:
+0 (530) 350 12 76
+
+🌐 Web Sitesi:
+https://www.kilicinsaatmimarlik.com
+
+📧 Mail:
+info@kilicinsaatmimarlik.com
+
+📍 Adres:
+Namık Kemal Mah. 68. Sokak No:34513
+Lotus Çarşı Kat: 8 Daire: 36
+Esenyurt / İstanbul
+
+Herhangi bir sorunuz olursa bize ulaşabilirsiniz.`;
+
 const COMPANY_LOCATION_URL = "https://maps.app.goo.gl/c8cCAtc2671RzBZC9";
 const CUSTOMER_STATUSES = new Set([
   "pool",
@@ -2643,11 +2661,46 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
   const [savingCustomer, setSavingCustomer] = useState(false);
+  const [smsComposerOpen, setSmsComposerOpen] = useState(false);
+  const [smsMessage, setSmsMessage] = useState(DEFAULT_SMS_MESSAGE);
+  const [sendingSms, setSendingSms] = useState(false);
   const needsAppointment = detailStatus === "appointment";
   const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
   const hasRelatedPhoneLogs = customerLogs.some((log) => String(log.customer_id) !== String(selectedCustomer.id));
+
+  async function sendCustomerSms() {
+    if (sendingSms) return;
+    const phone = normalizePhone(selectedCustomer.phone);
+    const message = smsMessage.trim();
+
+    if (!isTurkishMobile(phone)) {
+      alert("SMS göndermek için müşterinin geçerli bir cep telefonu olmalı.");
+      return;
+    }
+    if (!message) {
+      alert("SMS metnini yazın.");
+      return;
+    }
+
+    setSendingSms(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("send-sms", {
+        body: { phone, message, customerId: selectedCustomer.id },
+      });
+      if (error) throw error;
+      if (!data?.success) throw new Error(data?.error || "SMS sağlayıcısı gönderimi kabul etmedi.");
+
+      setSmsMessage(DEFAULT_SMS_MESSAGE);
+      setSmsComposerOpen(false);
+      alert(`SMS gönderildi. Gönderim no: ${data.messageId || "-"}`);
+    } catch (error) {
+      alert("SMS gönderilemedi: " + (error?.message || "Bilinmeyen hata"));
+    } finally {
+      setSendingSms(false);
+    }
+  }
 
   async function saveCustomer() {
     if (savingCustomer) return;
@@ -2757,6 +2810,9 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
 
         <div style={quickActions}>
           <a href={`tel:${phoneDialValue(selectedCustomer.phone)}`} style={quickActionButton}>Ara</a>
+          <button type="button" style={quickActionButton} onClick={() => setSmsComposerOpen((value) => !value)}>
+            SMS Gönder
+          </button>
           <a
             href={`https://wa.me/${whatsappPhone(selectedCustomer.phone)}`}
             target="_blank"
@@ -2780,6 +2836,30 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             Numara yanlış
           </button>
         </div>
+
+        {smsComposerOpen && (
+          <div style={{ ...panelCard, margin: "0 0 18px", padding: 16 }}>
+            <label style={fieldLabel}>SMS — {formatPhoneDisplay(selectedCustomer.phone)}</label>
+            <textarea
+              value={smsMessage}
+              onChange={(event) => setSmsMessage(event.target.value)}
+              maxLength={1530}
+              placeholder="Kurumsal mesajı düzenleyebilir, randevu tarih ve saatini ekleyebilirsiniz..."
+              style={{ ...inputStyle, minHeight: 110, resize: "vertical" }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginTop: 10 }}>
+              <small style={{ opacity: 0.7 }}>{smsMessage.length} / 1530 karakter</small>
+              <button
+                type="button"
+                disabled={sendingSms || !smsMessage.trim()}
+                onClick={sendCustomerSms}
+                style={{ ...primaryButton, opacity: sendingSms || !smsMessage.trim() ? 0.6 : 1 }}
+              >
+                {sendingSms ? "Gönderiliyor..." : "SMS'i Gönder"}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={detailLayout} onKeyDown={handleSaveShortcut}>
           <div style={statusRail}>
