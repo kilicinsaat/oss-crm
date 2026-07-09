@@ -513,6 +513,7 @@ function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
+  const [customerLoadProgress, setCustomerLoadProgress] = useState(null);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
 
@@ -807,35 +808,58 @@ function App() {
 
   async function loadCustomers() {
     const pageSize = 1000;
-    const allCustomers = [];
+    const concurrency = 6;
     setDataLoading(true);
+    setCustomerLoadProgress({ loaded: 0, total: 0 });
 
     try {
-      for (let from = 0; ; from += pageSize) {
-        const { data, error } = await runWithRetry(() =>
-          supabase
-            .from("customers")
-            .select("*")
-            .order("created_at", { ascending: false })
-            .order("id", { ascending: false })
-            .range(from, from + pageSize - 1)
-        );
+      const { count, error: countError } = await runWithRetry(() =>
+        supabase
+          .from("customers")
+          .select("id", { count: "exact", head: true })
+      );
 
-        if (error) {
-          alert("Müşteriler yüklenemedi: " + error.message);
-          return;
-        }
-
-        allCustomers.push(...(data || []));
-        if (from === 0 || allCustomers.length % 10000 === 0) {
-          setCustomers([...allCustomers]);
-        }
-        if (!data || data.length < pageSize) break;
+      if (countError) {
+        alert("Müşteri sayısı alınamadı: " + countError.message);
+        return;
       }
 
-      setCustomers(allCustomers);
+      const total = count || 0;
+      const pageCount = Math.ceil(total / pageSize);
+      const pages = Array.from({ length: pageCount }, (_, index) => index);
+      const pageResults = new Array(pageCount);
+      let loaded = 0;
+      setCustomerLoadProgress({ loaded: 0, total });
+
+      for (let start = 0; start < pages.length; start += concurrency) {
+        const batch = pages.slice(start, start + concurrency);
+        const results = await Promise.all(batch.map(async (pageIndex) => {
+          const from = pageIndex * pageSize;
+          const { data, error } = await runWithRetry(() =>
+            supabase
+              .from("customers")
+              .select("*")
+              .order("created_at", { ascending: false })
+              .order("id", { ascending: false })
+              .range(from, from + pageSize - 1)
+          );
+          if (error) throw error;
+          return { pageIndex, rows: data || [] };
+        }));
+
+        results.forEach(({ pageIndex, rows }) => {
+          pageResults[pageIndex] = rows;
+          loaded += rows.length;
+        });
+        setCustomerLoadProgress({ loaded, total });
+      }
+
+      setCustomers(pageResults.flat());
+    } catch (error) {
+      alert("Müşteriler yüklenemedi: " + (error.message || "Bağlantı hatası"));
     } finally {
       setDataLoading(false);
+      setCustomerLoadProgress(null);
     }
   }
 
@@ -2047,7 +2071,12 @@ function App() {
           </div>
         </header>
 
-        {dataLoading && customers.length === 0 && <div style={syncNotice}>Müşteri listesi yükleniyor, lütfen bekleyin.</div>}
+        {dataLoading && customerLoadProgress && (
+          <div style={syncNotice}>
+            Müşteri listesi yükleniyor: {customerLoadProgress.loaded.toLocaleString("tr-TR")}
+            {customerLoadProgress.total ? ` / ${customerLoadProgress.total.toLocaleString("tr-TR")}` : ""} kayıt
+          </div>
+        )}
 
         {activePage === "dashboard" && (
           <>
