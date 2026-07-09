@@ -59,10 +59,6 @@ const brandRedSoft = "#fff1eb";
 const brandRedBorder = "rgba(226,68,7,0.24)";
 const appTextColor = brandRed;
 const mutedRedText = "#8a2a08";
-const parliament = brandRed;
-const parliamentDark = "#ffffff";
-const parliamentMid = brandRed;
-const cardBlue = "#ffffff";
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -531,8 +527,6 @@ function App() {
     info_note: "",
     batch_name: "",
     batch_page: "",
-    website: "",
-    address: "",
   });
   const [staffForm, setStaffForm] = useState({
     id: "",
@@ -1263,6 +1257,12 @@ function App() {
     event.preventDefault();
     if (!profile) return;
 
+    const normalizedPhone = normalizePhone(form.phone);
+    if (!normalizedPhone) {
+      alert("Gecerli bir telefon numarasi gir.");
+      return;
+    }
+
     const duplicate = findDuplicateCustomer(customers, form.phone);
     if (duplicate) {
       alert(`Bu telefon zaten ${duplicate.first_name || ""} ${duplicate.last_name || ""} adına kayıtlı.`);
@@ -1271,9 +1271,14 @@ function App() {
 
     const assignedToSelf = profile.role === "employee";
     const payload = {
-      ...form,
-      phone: normalizePhone(form.phone) || null,
+      first_name: form.first_name.trim(),
+      last_name: form.last_name.trim(),
+      email: form.email.trim(),
+      phone: normalizedPhone,
       phone_2: normalizePhone(form.phone_2) || null,
+      tc_no: form.tc_no.trim(),
+      info_note: form.info_note.trim(),
+      batch_name: form.batch_name.trim(),
       batch_page: form.batch_page ? Number(form.batch_page) : null,
       appointment_date: form.appointment_date || null,
       status: assignedToSelf ? "assigned" : "pool",
@@ -1290,7 +1295,8 @@ function App() {
     );
 
     if (error) {
-      alert("Müşteri eklenemedi: " + (error.message || "Bağlantı kurulamadı."));
+      const errorDetail = [error.message, error.details, error.hint, error.code].filter(Boolean).join(" ");
+      alert("Müşteri eklenemedi: " + (errorDetail || "Bağlantı kurulamadı."));
       return;
     }
 
@@ -1305,8 +1311,6 @@ function App() {
       info_note: "",
       batch_name: "",
       batch_page: "",
-      website: "",
-      address: "",
     });
 
     if (data) setCustomers((current) => [data, ...current]);
