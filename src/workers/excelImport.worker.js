@@ -7,11 +7,6 @@ const normalizeHeader = (value) => String(value || "")
   .replace(/\u0131/g, "i")
   .replace(/[^a-z0-9]/g, "");
 
-const normalizePhone = (value) => {
-  const digits = String(value || "").replace(/\D/g, "");
-  return digits.length >= 10 ? digits.slice(-10) : digits;
-};
-
 const spreadsheetPhone = (value) => {
   let text = String(value ?? "").trim();
   if (/^\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(text)) {
@@ -62,15 +57,12 @@ const splitName = (fullName) => {
   };
 };
 
-self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
+self.onmessage = ({ data: { buffer, fileName } }) => {
   try {
     const workbook = XLSX.read(buffer, { type: "array" });
-    const currentPhones = new Set((existingPhones || []).map(normalizePhone).filter(Boolean));
-    const filePhones = new Set();
     const preparedRows = [];
     const processedSheets = [];
     let rejectedRows = 0;
-    let duplicateRows = 0;
     let processedRowCount = 0;
 
     const sheets = workbook.SheetNames.map((sheetName) => {
@@ -92,14 +84,7 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
         rejectedRows += 1;
         return;
       }
-      if (filePhones.has(primaryPhone) || currentPhones.has(primaryPhone)) {
-        duplicateRows += 1;
-        return;
-      }
-
-      const secondPhone = uniquePhones.slice(1).find((phone) => !filePhones.has(phone) && !currentPhones.has(phone)) || null;
-      filePhones.add(primaryPhone);
-      if (secondPhone) filePhones.add(secondPhone);
+      const secondPhone = uniquePhones.slice(1)[0] || null;
       const names = splitName(fullName);
       preparedRows.push({
         ...names,
@@ -173,7 +158,6 @@ self.onmessage = ({ data: { buffer, fileName, existingPhones } }) => {
         rows: preparedRows,
         sheetName: processedSheets.join(", ") || workbook.SheetNames[0],
         rejectedRows,
-        duplicateRows,
       },
     });
   } catch (error) {

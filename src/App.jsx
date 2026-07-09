@@ -454,7 +454,7 @@ function rankMedal(index) {
   return { width: 28, height: 28, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: "50%", fontSize: 12, fontWeight: 900, ...(tones[index] || { background: "#1e3a5f", color: "#bae6fd" }) };
 }
 
-function parseExcelInWorker(buffer, fileName, existingPhones, onProgress) {
+function parseExcelInWorker(buffer, fileName, onProgress) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("./workers/excelImport.worker.js", import.meta.url), {
       type: "module",
@@ -479,7 +479,7 @@ function parseExcelInWorker(buffer, fileName, existingPhones, onProgress) {
       reject(error);
     };
 
-    worker.postMessage({ buffer, fileName, existingPhones }, [buffer]);
+    worker.postMessage({ buffer, fileName }, [buffer]);
   });
 }
 
@@ -1188,14 +1188,10 @@ function App() {
       setImportProgress({ phase: "Excel okunuyor", current: 0, total: 0 });
 
       const buffer = await file.arrayBuffer();
-      const existingPhones = customers
-        .flatMap((customer) => [customer.phone, customer.phone_2])
-        .map(normalizePhone)
-        .filter(Boolean);
-      const parsed = await parseExcelInWorker(buffer, file.name, existingPhones, (current, total) => {
+      const parsed = await parseExcelInWorker(buffer, file.name, (current, total) => {
         setImportProgress({ phase: "Satırlar arka planda kontrol ediliyor", current, total });
       });
-      const { sheetName, rejectedRows, duplicateRows } = parsed;
+      const { sheetName, rejectedRows } = parsed;
       const preparedRows = parsed.rows.map((row) => ({
         ...row,
         created_by: profile.id,
@@ -1203,20 +1199,14 @@ function App() {
       }));
 
       if (preparedRows.length === 0) {
-        if (duplicateRows > 0 && rejectedRows === 0) {
-          throw new Error(
-            `Dosya başarıyla okundu; ancak ${duplicateRows.toLocaleString("tr-TR")} kaydın tamamı sistemde zaten mevcut. `
-            + "Aynı telefon numarası güvenlik için ikinci kez eklenmedi."
-          );
-        }
-        throw new Error(`Geçerli kayıt bulunamadı. ${rejectedRows} eksik/hatalı, ${duplicateRows} mükerrer satır tespit edildi.`);
+        throw new Error(`Geçerli kayıt bulunamadı. ${rejectedRows} eksik/hatalı satır tespit edildi.`);
       }
 
       const confirmed = window.confirm(
         `'${sheetName}' sayfası kontrol edildi.\n\n`
         + `${preparedRows.length} geçerli kayıt yüklenecek.\n`
         + `${rejectedRows} eksik ad/telefon satırı yüklenmeyecek.\n`
-        + `${duplicateRows} mükerrer satır yüklenmeyecek.\n\nDevam edilsin mi?`
+        + "Aynı telefon numarasına sahip satırlar da ayrı müşteri olarak yüklenecek.\n\nDevam edilsin mi?"
       );
       if (!confirmed) return;
 
@@ -1229,7 +1219,7 @@ function App() {
         const { error } = await runWithRetry(() =>
           supabase
             .from("customers")
-            .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true })
+            .insert(chunk)
         );
 
         if (error) {
