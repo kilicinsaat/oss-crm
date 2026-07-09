@@ -1,0 +1,27 @@
+OSS CALL BRIDGE USB KURULUMU
+
+En basit anlatim:
+
+1) Bu klasoru USB'ye kopyala.
+2) MicroSIP kurulu olan temsilci bilgisayarina git.
+3) USB'deki KURULUM-BASLAT.bat dosyasina cift tikla.
+4) Siyah ekranda o bilgisayarin sahibini sec.
+5) Kurulum bitince MicroSIP otomatik yeniden acilir.
+6) Bitti. Artik o bilgisayardaki yeni aramalar OSS Center'a duser.
+
+Yeni kisi eklemek:
+- repler.csv dosyasini Excel veya Not Defteri ile ac.
+- En alta yeni satir ekle:
+  Ad Soyad,email,profile_id
+- ProfileId bilmiyorsan bos birakabilirsin.
+- Kurulumda o kisiyi secince senden ID'yi elle ister.
+
+Dikkat:
+- Bu kurulum gecmis aramalari cekmez.
+- Kurulumdan sonraki aramalari yakalar.
+- Her MicroSIP bilgisayarinda bir kez calistirilir.
+- Yanlis temsilci secersen aramalar CRM'de yanlis kisiye yazilir.
+- Listede kisi yoksa "M) ID'yi elle girecegim" secenegini kullan.
+
+Kurulumdan sonra sorun olursa bakilacak yer:
+%LOCALAPPDATA%\OSSCallBridge\bridge.log

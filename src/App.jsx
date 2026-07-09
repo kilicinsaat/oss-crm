@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "./lib/supabase";
+import { supabase, supabaseConfigMissing } from "./lib/supabase";
 
 const COMPANY_MESSAGE = `
 KILIÇ İNŞAAT MİMARLIK
@@ -40,7 +40,6 @@ const COMPANY_LOCATION_URL = "https://maps.app.goo.gl/c8cCAtc2671RzBZC9";
 const CUSTOMER_STATUSES = new Set([
   "pool",
   "assigned",
-  "called",
   "no_answer",
   "busy",
   "callback",
@@ -49,9 +48,21 @@ const CUSTOMER_STATUSES = new Set([
   "meeting_done",
   "not_approved",
   "wrong_number",
+  "using",
   "approved",
   "paid",
 ]);
+
+const brandRed = "#e24407";
+const brandRedDark = "#b73505";
+const brandRedSoft = "#fff1eb";
+const brandRedBorder = "rgba(226,68,7,0.24)";
+const appTextColor = brandRed;
+const mutedRedText = "#8a2a08";
+const parliament = brandRed;
+const parliamentDark = "#ffffff";
+const parliamentMid = brandRed;
+const cardBlue = "#ffffff";
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -252,6 +263,40 @@ function userDisplayName(users, userId) {
   return user?.full_name || user?.email || "-";
 }
 
+function callStatusLabel(call) {
+  if (call?.status === "ringing") return "Çalıyor";
+  if (call?.status === "answered") return "Görüşme devam ediyor";
+  if (call?.status === "missed") return "Cevapsız";
+  return "Tamamlandı";
+}
+
+function formatCallDuration(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(total / 60);
+  const remaining = total % 60;
+  return `${minutes}:${String(remaining).padStart(2, "0")}`;
+}
+
+function customerCallStatusLabel(calls = []) {
+  const latestCall = calls[0];
+  if (!latestCall) return "Henüz arama yok";
+  if (latestCall.status === "ringing") return "Şu an çalıyor";
+  if (latestCall.status === "answered" && !latestCall.ended_at) return "Görüşme devam ediyor";
+  if (latestCall.status === "missed") return "Son arama: Cevapsız";
+  if (latestCall.status === "completed") return `Son arama: Görüşüldü (${formatCallDuration(latestCall.duration_seconds)})`;
+  return `Son arama: ${callStatusLabel(latestCall)}`;
+}
+
+function customerCallStatusTone(calls = []) {
+  const latestCall = calls[0];
+  if (!latestCall) return { color: "#94a3b8", background: "rgba(148,163,184,0.14)" };
+  if (latestCall.status === "ringing" || (latestCall.status === "answered" && !latestCall.ended_at)) {
+    return { color: "#38bdf8", background: "rgba(56,189,248,0.16)" };
+  }
+  if (latestCall.status === "missed") return { color: "#f87171", background: "rgba(248,113,113,0.16)" };
+  return { color: "#34d399", background: "rgba(52,211,153,0.16)" };
+}
+
 function customerLogSourceLabel(log, selectedCustomer, customers) {
   if (String(log.customer_id) === String(selectedCustomer.id)) return "";
   const sourceCustomer = customers.find((customer) => String(customer.id) === String(log.customer_id));
@@ -280,6 +325,7 @@ function statusLabel(status) {
     meeting_done: "Görüşüldü",
     not_approved: "Yapmayacak",
     wrong_number: "Numara yanlış",
+    using: "Kullanıyor",
     approved: "Onaylandı",
     paid: "Para Alındı",
   };
@@ -298,6 +344,7 @@ function statusBadge(status) {
     contract_appointment: "#06b6d4",
     not_approved: "#ef4444",
     wrong_number: "#64748b",
+    using: "#14b8a6",
     approved: "#22c55e",
     paid: "#059669",
   };
@@ -327,6 +374,7 @@ function customerHeat(status) {
     paid: { label: "Satış tamamlandı", color: "#34d399", background: "rgba(52,211,153,0.14)" },
     not_approved: { label: "Kapandı", color: "#f87171", background: "rgba(248,113,113,0.14)" },
     wrong_number: { label: "Numara yanlış", color: "#94a3b8", background: "rgba(148,163,184,0.14)" },
+    using: { label: "Kullanıyor", color: "#2dd4bf", background: "rgba(45,212,191,0.14)" },
   };
   return levels[status] || { label: "Yeni müşteri", color: "#94a3b8", background: "rgba(148,163,184,0.14)" };
 }
@@ -458,6 +506,8 @@ function App() {
   const [customers, setCustomers] = useState([]);
   const [customerLogs, setCustomerLogs] = useState([]);
   const [customerLogsLoading, setCustomerLogsLoading] = useState(false);
+  const [customerCalls, setCustomerCalls] = useState([]);
+  const [customerCallsLoading, setCustomerCallsLoading] = useState(false);
   const [users, setUsers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -515,12 +565,18 @@ function App() {
   const toastTimerRef = useRef(null);
   const customerLogsRequestRef = useRef(0);
   const usersRef = useRef([]);
+  const customersRef = useRef([]);
   const [saleCelebration, setSaleCelebration] = useState(null);
 
   useEffect(() => {
     let mounted = true;
 
     async function restoreSession() {
+      if (supabaseConfigMissing) {
+        if (mounted) setAuthReady(true);
+        return;
+      }
+
       try {
         const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) throw sessionError;
@@ -596,6 +652,10 @@ function App() {
   useEffect(() => {
     usersRef.current = users;
   }, [users]);
+
+  useEffect(() => {
+    customersRef.current = customers;
+  }, [customers]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -710,6 +770,41 @@ function App() {
       supabase.removeChannel(presenceChannel);
     };
   }, [profile]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
+    const callChannel = supabase
+      .channel(`crm-call-events-${profile.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "call_sessions" }, (payload) => {
+        const call = payload.new;
+        if (!call?.id || call.profile_id !== profile.id) return;
+        const customer = customersRef.current.find((item) =>
+          item.id === call.customer_id
+          || [item.phone, item.phone_2].some((phone) => normalizePhone(phone) === normalizePhone(call.phone))
+        );
+
+        if (selectedCustomer && customer?.id === selectedCustomer.id) {
+          loadCustomerCalls(customer);
+        }
+        if (payload.eventType === "INSERT" && call.direction === "incoming" && call.status === "ringing") {
+          showSystemToast(customer
+            ? `Gelen arama: ${customer.first_name || ""} ${customer.last_name || ""}`.trim()
+            : `Gelen arama: ${formatPhoneDisplay(call.phone)}`);
+          if (customer) {
+            setSelectedCustomer(customer);
+            loadCustomerLogs(customer);
+            loadCustomerCalls(customer);
+          }
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(callChannel);
+    };
+  // The loaders intentionally use the latest customer refs; resubscribing on every render would duplicate channels.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, selectedCustomer]);
 
   useEffect(() => () => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -1061,6 +1156,32 @@ function App() {
     }
 
     setCustomerLogs(data || []);
+  }
+
+  async function loadCustomerCalls(customerOrId) {
+    const customer = typeof customerOrId === "object"
+      ? customerOrId
+      : customersRef.current.find((item) => item.id === customerOrId);
+    const phones = [customer?.phone, customer?.phone_2].map(normalizePhone).filter(Boolean);
+    if (phones.length === 0) {
+      setCustomerCalls([]);
+      return;
+    }
+
+    setCustomerCallsLoading(true);
+    const { data, error } = await runWithRetry(() =>
+      supabase
+        .from("call_sessions")
+        .select("*")
+        .in("phone", [...new Set(phones)])
+        .order("created_at", { ascending: false })
+        .limit(100)
+    );
+    setCustomerCallsLoading(false);
+    setCustomerCalls(error ? [] : (data || []));
+    if (error && error.code !== "42P01") {
+      showSystemToast("Arama geçmişi okunamadı.", "warning");
+    }
   }
 
   async function importExcel(event) {
@@ -1692,14 +1813,17 @@ function App() {
     if (!customerId || !customer) return;
     setCustomerLogs([]);
     setCustomerLogsLoading(true);
+    setCustomerCalls([]);
     setSelectedCustomer(customer);
-    await loadCustomerLogs(customer);
+    await Promise.all([loadCustomerLogs(customer), loadCustomerCalls(customer)]);
   }
 
   function closeCustomerModal() {
     customerLogsRequestRef.current += 1;
     setCustomerLogsLoading(false);
     setCustomerLogs([]);
+    setCustomerCallsLoading(false);
+    setCustomerCalls([]);
     setSelectedCustomer(null);
   }
 
@@ -1730,7 +1854,7 @@ function App() {
     .filter((customer) => customerMatchesSearch(customer, searchTerm));
 
   const followUps = customers.filter((customer) =>
-    ["called", "no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(customer.status)
+    ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(customer.status)
   );
 
   const welcomeName = profileFullName || profileEmail || "Kullanıcı";
@@ -1748,12 +1872,13 @@ function App() {
     .sort((a, b) => b.stats.paid - a.stats.paid || b.stats.appointment - a.stats.appointment);
   const reportStats = [
     { key: "pool", title: "Havuz", value: reportCustomers.filter((customer) => customer.status === "pool").length },
-    { key: "called", title: "Aranan", value: reportCustomers.filter((customer) => customer.status === "called").length },
+    { key: "no_answer", title: "Ulaşılamadı", value: reportCustomers.filter((customer) => customer.status === "no_answer").length },
     { key: "callback", title: "Tekrar Aranacak", value: reportCustomers.filter((customer) => customer.status === "callback").length },
     { key: "appointment", title: "Randevu", value: reportCustomers.filter((customer) => customer.status === "appointment").length },
     { key: "contract_appointment", title: "Sözleşmeli Randevu", value: reportCustomers.filter((customer) => customer.status === "contract_appointment").length },
     { key: "not_approved", title: "Yapmayacak", value: reportCustomers.filter((customer) => customer.status === "not_approved").length },
     { key: "wrong_number", title: "Numara yanlış", value: reportCustomers.filter((customer) => customer.status === "wrong_number").length },
+    { key: "using", title: "Kullanıyor", value: reportCustomers.filter((customer) => customer.status === "using").length },
     { key: "paid", title: "Satış", value: reportCustomers.filter((customer) => customer.status === "paid").length },
   ];
   const dataStats = getDataStats(reportCustomers);
@@ -1768,6 +1893,20 @@ function App() {
         <div style={{ ...loginCard, textAlign: "center" }}>
           <h2>Oturum açılıyor...</h2>
           <p style={{ opacity: 0.65 }}>Panel hazırlanıyor</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (supabaseConfigMissing) {
+    return (
+      <div style={loginPage}>
+        <div style={{ ...loginCard, textAlign: "center" }}>
+          <h2>Supabase ayarlari eksik</h2>
+          <p style={{ opacity: 0.75, lineHeight: 1.6 }}>
+            Local .env dosyasinda VITE_SUPABASE_URL ve VITE_SUPABASE_ANON_KEY bulunmali.
+            Dosya su an silinmis gorunuyor; geri geldiginde sayfayi yenilemen yeterli.
+          </p>
         </div>
       </div>
     );
@@ -1866,7 +2005,7 @@ function App() {
         {profile.role === "employee" && (
           <>
             <MenuButton icon="✦" title={`Yeni Gelenler (${newIncomingCustomers.length})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="☎" title="Arandı" page="rep_called" tone="called" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="…" title="Ulaşılamadı" page="rep_no_answer" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="◷" title="Randevu" page="rep_appointment" tone="appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="▤" title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="↻" title="Tekrar Aranacak" page="rep_callback" tone="callback" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -1940,9 +2079,10 @@ function App() {
                 <div style={pipelineList}>
                   {profile.role !== "employee" && <PipelineRow label="Yeni Müşteriler" value={customers.filter((c) => c.status === "pool").length} color="#38bdf8" />}
                   {profile.role !== "employee" && <PipelineRow label="Atandı" value={customers.filter((c) => c.status === "assigned").length} color="#818cf8" />}
-                  <PipelineRow label="Arandı" value={visibleCustomers.filter((c) => c.status === "called").length} color="#fb923c" />
+                  <PipelineRow label="Ulaşılamadı" value={visibleCustomers.filter((c) => c.status === "no_answer").length} color="#94a3b8" />
                   <PipelineRow label="Randevu" value={visibleCustomers.filter((c) => c.status === "appointment").length} color="#fbbf24" />
                   <PipelineRow label="Yapmayacak" value={visibleCustomers.filter((c) => c.status === "not_approved").length} color="#f87171" />
+                  <PipelineRow label="Kullanıyor" value={visibleCustomers.filter((c) => c.status === "using").length} color="#2dd4bf" />
                   <PipelineRow label="Onaylandı" value={visibleCustomers.filter((c) => c.status === "approved").length} color="#4ade80" />
                   <PipelineRow label="Para Alındı" value={visibleCustomers.filter((c) => c.status === "paid").length} color="#34d399" />
                 </div>
@@ -2059,10 +2199,10 @@ function App() {
           />
         )}
 
-        {activePage === "rep_called" && (
+        {activePage === "rep_no_answer" && (
           <CustomerTable
-            title="Aranan Müşteriler"
-            data={visibleCustomers.filter((customer) => customer.status === "called")}
+            title="Ulaşılamayan Müşteriler"
+            data={visibleCustomers.filter((customer) => customer.status === "no_answer")}
             employees={employees}
             profile={profile}
             assignCustomer={assignCustomer}
@@ -2339,6 +2479,8 @@ function App() {
             closeCustomerModal={closeCustomerModal}
             customerLogs={customerLogs}
             customerLogsLoading={customerLogsLoading}
+            customerCalls={customerCalls}
+            customerCallsLoading={customerCallsLoading}
             updateCustomer={updateCustomer}
             users={users}
             customers={customers}
@@ -2655,7 +2797,7 @@ function CustomerTable({
   );
 }
 
-function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, updateCustomer, users, customers, profile }) {
+function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, customerCalls, customerCallsLoading, updateCustomer, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
@@ -2667,6 +2809,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   const needsAppointment = detailStatus === "appointment";
   const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
+  const callTone = customerCallStatusTone(customerCalls);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
   const hasRelatedPhoneLogs = customerLogs.some((log) => String(log.customer_id) !== String(selectedCustomer.id));
 
@@ -2760,7 +2903,6 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
 
   const statusButtons = [
     ["assigned", "Yeni", "new"],
-    ["called", "Arandı", "called"],
     ["no_answer", "Ulaşılamadı", "muted"],
     ["busy", "Meşgul", "warn"],
     ["callback", "Sonra ara", "callback"],
@@ -2768,6 +2910,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
     ["contract_appointment", "Sözleşmeli", "contract"],
     ["not_approved", "Yapmayacak", "danger"],
     ["wrong_number", "Numara yanlış", "muted"],
+    ["using", "Kullanıyor", "using"],
     ["approved", "Onaylandı", "success"],
     ["paid", "Satış", "paid"],
   ];
@@ -2788,7 +2931,8 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             {selectedCustomer.first_name} {selectedCustomer.last_name}
           </h2>
           <div style={customerSummary}>
-            <span style={{ ...heatBadge, background: heat.background, color: heat.color }}>{heat.label}</span>
+            <span style={{ ...heatBadge, background: callTone.background, color: callTone.color }}>{customerCallStatusLabel(customerCalls)}</span>
+            <span style={{ ...heatBadge, background: heat.background, color: heat.color }}>Durum: {statusLabel(detailStatus)}</span>
             <span style={customerSummaryText}>
               {customerLogsLoading
                 ? "İşlem geçmişi yükleniyor..."
@@ -2924,6 +3068,24 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             </button>
           </div>
         </div>
+
+        <h3 style={historyTitle}>Arama Geçmişi</h3>
+        {customerCallsLoading && <p style={logLoadingText}>Arama geçmişi yükleniyor...</p>}
+        {!customerCallsLoading && customerCalls.length === 0 && <p style={{ opacity: 0.7 }}>Henüz arama kaydı bulunamadı.</p>}
+        {!customerCallsLoading && customerCalls.map((call) => (
+          <div key={call.id} style={{ ...logBox, borderLeft: `4px solid ${call.status === "missed" ? "#ef4444" : call.ended_at ? "#22c55e" : "#38bdf8"}` }}>
+            <strong style={logUser}>
+              {call.direction === "incoming" ? "Gelen arama" : "Giden arama"} · {callStatusLabel(call)}
+            </strong>
+            <p style={logStatusRow}>
+              {formatPhoneDisplay(call.phone)} · Süre: {formatCallDuration(call.duration_seconds)}
+            </p>
+            <p style={logNote}>
+              Temsilci: {users.find((user) => user.id === call.profile_id)?.full_name || "Bilinmeyen kullanıcı"}
+            </p>
+            <small style={logTime}>{formatDateTime(call.ringing_at || call.started_at || call.created_at)}</small>
+          </div>
+        ))}
 
         <h3 style={historyTitle}>İşlem Geçmişi</h3>
         {customerLogsLoading && <p style={logLoadingText}>İşlem geçmişi yükleniyor...</p>}
@@ -3444,7 +3606,7 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
   const repRows = useMemo(() => reps.map((rep) => {
     const logs = activityLogs.filter((log) => log.user_id === rep.id);
     const assigned = customers.filter((customer) => customer.assigned_employee === rep.id);
-    const callActions = logs.filter((log) => ["called", "no_answer", "busy", "callback"].includes(log.new_status)).length;
+    const callActions = logs.filter((log) => ["no_answer", "busy", "callback"].includes(log.new_status)).length;
     const appointments = logs.filter((log) => ["appointment", "contract_appointment"].includes(log.new_status)).length;
     const sales = logs.filter((log) => log.new_status === "paid").length;
     const untouched = assigned.filter(isFreshAssignedCustomer).length;
@@ -3642,15 +3804,15 @@ function TodayWorkView({ todayItems, overdueItems }) {
 }
 
 function RepDailyOverview({ customers, todayItems, onNavigate }) {
-  const called = customers.filter((customer) => customer.status === "called").length;
+  const noAnswer = customers.filter((customer) => customer.status === "no_answer").length;
   const appointments = customers.filter((customer) => ["appointment", "contract_appointment"].includes(customer.status)).length;
   const paid = customers.filter((customer) => customer.status === "paid").length;
-  const maxValue = Math.max(called, appointments, paid, todayItems.length, 1);
+  const maxValue = Math.max(noAnswer, appointments, paid, todayItems.length, 1);
   const metrics = [
-    { label: "Bugün sırada", value: todayItems.length, color: "#60a5fa", page: "today_work", background: "linear-gradient(135deg, rgba(14,116,144,0.35), rgba(12,74,110,0.22))" },
-    { label: "Arandı", value: called, color: "#fb923c", page: "rep_called", background: "linear-gradient(135deg, rgba(194,65,12,0.36), rgba(124,45,18,0.2))" },
-    { label: "Randevu", value: appointments, color: "#fbbf24", page: "rep_appointment", background: "linear-gradient(135deg, rgba(161,98,7,0.36), rgba(113,63,18,0.2))" },
-    { label: "Satış", value: paid, color: "#34d399", page: "rep_paid", background: "linear-gradient(135deg, rgba(4,120,87,0.38), rgba(6,78,59,0.2))" },
+    { label: "Bugün sırada", value: todayItems.length, color: brandRed, page: "today_work", background: brandRedSoft },
+    { label: "Ulaşılamadı", value: noAnswer, color: brandRed, page: "rep_no_answer", background: brandRedSoft },
+    { label: "Randevu", value: appointments, color: brandRed, page: "rep_appointment", background: brandRedSoft },
+    { label: "Satış", value: paid, color: brandRed, page: "rep_paid", background: brandRedSoft },
   ];
 
   return (
@@ -3759,111 +3921,107 @@ function CalendarView({ customers, setSelectedCustomer }) {
 }
 
 const menuIconTones = {
-  default: { background: "rgba(125,211,252,0.14)", color: "#bae6fd" },
-  dashboard: { background: "rgba(56,189,248,0.16)", color: "#7dd3fc" },
-  customers: { background: "rgba(96,165,250,0.16)", color: "#93c5fd" },
-  new: { background: "rgba(59,130,246,0.16)", color: "#60a5fa" },
+  default: { background: "#fff1eb", color: "#e24407" },
+  dashboard: { background: "#fff1eb", color: "#e24407" },
+  customers: { background: "#fff1eb", color: "#e24407" },
+  new: { background: "#fff1eb", color: "#e24407" },
   called: { background: "rgba(251,146,60,0.16)", color: "#fdba74" },
   appointment: { background: "rgba(251,191,36,0.16)", color: "#fde68a" },
-  contract: { background: "rgba(34,211,238,0.16)", color: "#67e8f9" },
+  contract: { background: "#fff1eb", color: "#e24407" },
   callback: { background: "rgba(192,132,252,0.16)", color: "#d8b4fe" },
   closed: { background: "rgba(248,113,113,0.16)", color: "#fca5a5" },
   paid: { background: "rgba(52,211,153,0.16)", color: "#6ee7b7" },
   pool: { background: "rgba(45,212,191,0.16)", color: "#5eead4" },
   urgent: { background: "rgba(248,113,113,0.16)", color: "#f87171" },
   today: { background: "rgba(251,146,60,0.16)", color: "#fdba74" },
-  calendar: { background: "rgba(129,140,248,0.16)", color: "#a5b4fc" },
+  calendar: { background: "#fff1eb", color: "#e24407" },
   wrong: { background: "rgba(148,163,184,0.18)", color: "#cbd5e1" },
   employees: { background: "rgba(74,222,128,0.16)", color: "#86efac" },
-  reports: { background: "rgba(45,212,191,0.16)", color: "#5eead4" },
-  account: { background: "rgba(129,140,248,0.18)", color: "#c7d2fe" },
-  messages: { background: "rgba(34,211,238,0.18)", color: "#67e8f9" },
-  notes: { background: "rgba(167,139,250,0.18)", color: "#ddd6fe" },
+  reports: { background: "#fff1eb", color: "#e24407" },
+  account: { background: "#fff1eb", color: "#e24407" },
+  messages: { background: "#fff1eb", color: "#e24407" },
+  notes: { background: "#fff1eb", color: "#e24407" },
 };
-
-const parliament = "#123b7a";
-const parliamentDark = "#061834";
-const parliamentMid = "#0b2b5f";
-const cardBlue = "#10284f";
 
 const appShell = {
   width: "100%",
   minWidth: 0,
   minHeight: "100vh",
-  background: "#f4f7fb",
-  color: "white",
+  background: "#ffffff",
+  color: appTextColor,
   display: "flex",
 };
 const sidebar = {
-  background: `linear-gradient(180deg, ${parliamentDark}, #020617)`,
+  background: "#ffffff",
   padding: 24,
-  borderRight: "1px solid rgba(147,197,253,0.25)",
+  borderRight: `1px solid ${brandRedBorder}`,
   transition: "width 180ms ease, padding 180ms ease",
   flexShrink: 0,
-  boxShadow: "10px 0 30px rgba(15,23,42,0.12)",
+  boxShadow: "10px 0 30px rgba(226,68,7,0.08)",
 };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
-const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 8, background: "linear-gradient(135deg,#f0f9ff,#bae6fd)", border: "1px solid rgba(125,211,252,0.72)" };
+const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 8, background: "#ffffff", border: `1px solid ${brandRedBorder}` };
 const brandLogo = { display: "block", width: "100%", height: "auto" };
 const brandMarkFrame = { width: 46, height: 48, display: "grid", placeItems: "center", margin: "-4px auto 14px" };
 const brandMark = { display: "block", width: 42, height: "auto" };
-const sideEmail = { fontSize: 12, color: "#bfdbfe", margin: "6px 0 16px" };
-const mainArea = { flex: 1, minWidth: 0, minHeight: "100vh", padding: "24px 32px", overflowX: "hidden", background: "linear-gradient(145deg,#ffffff 0%,#f5f8fc 58%,#edf3fa 100%)" };
-const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24, padding: "15px 18px", borderRadius: 16, background: "rgba(255,255,255,0.92)", border: "1px solid #dbe7f3", boxShadow: "0 12px 30px rgba(15,39,75,0.08)" };
+const sideEmail = { fontSize: 12, color: mutedRedText, margin: "6px 0 16px" };
+const mainArea = { flex: 1, minWidth: 0, minHeight: "100vh", padding: "24px 32px", overflowX: "hidden", background: "#ffffff" };
+const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24, padding: "15px 18px", borderRadius: 16, background: "#ffffff", border: `1px solid ${brandRedBorder}`, boxShadow: "0 12px 30px rgba(226,68,7,0.08)" };
 const topbarActions = { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" };
-const notificationButton = { padding: "10px 13px", borderRadius: 9, border: "1px solid #bfdbfe", background: "#eff6ff", color: "#123b7a", cursor: "pointer", fontWeight: 800 };
+const notificationButton = { padding: "10px 13px", borderRadius: 9, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer", fontWeight: 800 };
 const topbarIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
-const backButton = { width: 40, height: 40, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 8, border: "1px solid rgba(125,211,252,0.38)", background: "#10284f", color: "#e0f2fe", fontSize: 28, lineHeight: 1, cursor: "pointer" };
+const backButton = { width: 40, height: 40, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 8, border: `1px solid ${brandRed}`, background: brandRed, color: "#ffffff", fontSize: 28, lineHeight: 1, cursor: "pointer" };
 const welcomeBlock = { minWidth: 0 };
-const welcomeEyebrow = { display: "block", fontSize: 13, color: "#64748b", marginBottom: 4 };
-const welcomeTitle = { margin: 0, color: "#0b2b5f", fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
-const welcomeMeta = { margin: "6px 0 0", color: "#475569" };
+const welcomeEyebrow = { display: "block", fontSize: 13, color: mutedRedText, marginBottom: 4 };
+const welcomeTitle = { margin: 0, color: brandRed, fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
+const welcomeMeta = { margin: "6px 0 0", color: mutedRedText };
 const welcomeStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginTop: 6 };
-const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: "#122647", color: "white", border: "1px solid rgba(147,197,253,0.22)", borderRadius: 8, cursor: "pointer", fontSize: 20 };
-const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "rgba(18,38,71,0.82)", color: "white", border: "1px solid rgba(147,197,253,0.14)", borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, transition: "transform 150ms ease, border-color 150ms ease, background 150ms ease" };
-const menuButtonActive = { ...menuButton, background: `linear-gradient(135deg, ${parliament}, #2563eb)`, border: "1px solid #93c5fd", boxShadow: "0 8px 22px rgba(37,99,235,0.28)" };
+const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: brandRed, color: "white", border: `1px solid ${brandRed}`, borderRadius: 8, cursor: "pointer", fontSize: 20 };
+const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, transition: "transform 150ms ease, border-color 150ms ease, background 150ms ease" };
+const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
 const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
-const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: "linear-gradient(145deg,rgba(255,255,255,0.14),rgba(125,211,252,0.08))", color: "#e0f2fe", border: "1px solid rgba(186,230,253,0.16)", fontSize: 17, fontWeight: 900, lineHeight: 1 };
-const logoutButton = { padding: "12px 22px", borderRadius: 10, border: "1px solid rgba(147,197,253,0.35)", cursor: "pointer", fontWeight: 700, background: "#16345f", color: "#e0f2fe" };
-const syncNotice = { margin: "-8px 0 16px", padding: "10px 12px", borderRadius: 8, background: "rgba(56,189,248,0.12)", border: "1px solid rgba(125,211,252,0.32)", color: "#bae6fd", fontSize: 13, fontWeight: 600 };
+const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: brandRedSoft, color: brandRed, border: `1px solid ${brandRedBorder}`, fontSize: 17, fontWeight: 900, lineHeight: 1 };
+const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
+const syncNotice = { margin: "-8px 0 16px", padding: "10px 12px", borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, color: brandRed, fontSize: 13, fontWeight: 600 };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
-const statCard = { width: "100%", minHeight: 116, display: "grid", alignContent: "center", gap: 7, padding: 20, borderRadius: 8, border: "1px solid rgba(147,197,253,0.25)", color: "#f8fafc", cursor: "pointer", textAlign: "left", font: "inherit" };
+const statCard = { width: "100%", minHeight: 116, display: "grid", alignContent: "center", gap: 7, padding: 20, borderRadius: 8, border: `1px solid ${brandRed}`, color: "#ffffff", cursor: "pointer", textAlign: "left", font: "inherit" };
 const statCardTones = {
-  total: { background: "linear-gradient(135deg,#164e8a,#123b7a)", borderColor: "rgba(125,211,252,0.48)" },
-  new: { background: "linear-gradient(135deg,#0e7490,#155e75)", borderColor: "rgba(103,232,249,0.42)" },
-  assigned: { background: "linear-gradient(135deg,#4338ca,#3730a3)", borderColor: "rgba(165,180,252,0.42)" },
+  total: { background: `linear-gradient(135deg,${brandRed},${brandRedDark})`, borderColor: brandRed },
+  new: { background: `linear-gradient(135deg,${brandRed},#f06a30)`, borderColor: brandRed },
+  assigned: { background: `linear-gradient(135deg,${brandRedDark},${brandRed})`, borderColor: brandRed },
   approved: { background: "linear-gradient(135deg,#15803d,#166534)", borderColor: "rgba(134,239,172,0.42)" },
   paid: { background: "linear-gradient(135deg,#047857,#065f46)", borderColor: "rgba(110,231,183,0.46)" },
 };
 const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
-const panelCard = { background: "linear-gradient(145deg,#12315f,#0d254a)", padding: 22, borderRadius: 18, border: "1px solid rgba(147,197,253,0.26)", boxShadow: "0 16px 34px rgba(15,39,75,0.13)" };
-const pipelinePanel = { background: "linear-gradient(145deg,rgba(16,40,79,0.96),rgba(7,26,54,0.94))" };
+const panelCard = { background: "#ffffff", color: brandRed, padding: 22, borderRadius: 18, border: `1px solid ${brandRedBorder}`, boxShadow: "0 16px 34px rgba(226,68,7,0.08)" };
+const pipelinePanel = { background: "#ffffff" };
 const pipelineList = { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, marginTop: 18 };
-const pipelineRow = { minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 8, background: "rgba(2,16,39,0.58)", border: "1px solid rgba(147,197,253,0.12)" };
+const pipelineRow = { minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}` };
 const pipelineDot = { width: 8, height: 24, flexShrink: 0, borderRadius: 4 };
-const pipelineLabel = { flex: 1, color: "#cbd5e1", fontSize: 13 };
+const pipelineLabel = { flex: 1, color: mutedRedText, fontSize: 13 };
 const pipelineValue = { fontSize: 18 };
 const formGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 };
-const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: "1px solid #bfdbfe", background: "#f8fafc", color: "#0b2b5f" };
-const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: "1px solid rgba(147,197,253,0.25)", background: "#071a36", color: "white", boxSizing: "border-box" };
+const inputStyle = { width: "100%", padding: 12, marginBottom: 12, boxSizing: "border-box", borderRadius: 10, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const searchInput = { width: "100%", padding: 13, marginBottom: 15, borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, boxSizing: "border-box" };
 const tableTitleRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 };
 const exportExcelButton = { minHeight: 40, padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(134,239,172,0.42)", background: "linear-gradient(135deg,#059669,#0891b2)", color: "white", cursor: "pointer", fontWeight: 800 };
 const customerToolbar = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10, marginBottom: 10 };
-const toolbarSelect = { width: "100%", padding: 12, borderRadius: 8, border: "1px solid rgba(147,197,253,0.28)", background: "#071a36", color: "#e0f2fe" };
-const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, color: "#94a3b8", fontSize: 12 };
-const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: "1px solid #7dd3fc", cursor: "pointer", fontWeight: 700, background: "linear-gradient(135deg,#38bdf8,#2563eb)", color: "#ffffff" };
-const importProgressBox = { display: "grid", gap: 8, margin: "4px 0 14px", padding: 12, borderRadius: 8, background: "rgba(7,26,54,0.62)", border: "1px solid rgba(125,211,252,0.2)", fontSize: 13 };
-const dataActions = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8, paddingTop: 14, borderTop: "1px solid rgba(147,197,253,0.16)" };
+const toolbarSelect = { width: "100%", padding: 12, borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, color: mutedRedText, fontSize: 12 };
+const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
+const importProgressBox = { display: "grid", gap: 8, margin: "4px 0 14px", padding: 12, borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, fontSize: 13 };
+const dataActions = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8, paddingTop: 14, borderTop: `1px solid ${brandRedBorder}` };
 const cleanupButtons = { display: "flex", flexWrap: "wrap", gap: 8 };
 const cleanInvalidButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(251,191,36,0.55)", background: "rgba(180,83,9,0.38)", color: "#fde68a", cursor: "pointer", fontWeight: 700 };
 const deleteAllButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(252,165,165,0.6)", background: "rgba(127,29,29,0.56)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
-const tableWrapper = { width: "100%", overflowX: "auto", background: "#071a36", borderRadius: 14 };
+const tableWrapper = { width: "100%", overflowX: "auto", background: "#ffffff", borderRadius: 14, border: `1px solid ${brandRedBorder}` };
 const tableHeader = {
   display: "grid",
   gridTemplateColumns: "52px minmax(180px, 1.4fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(130px, 1fr)",
   gap: 6,
   padding: 10,
-  background: parliamentMid,
+  background: brandRed,
+  color: "#ffffff",
   fontWeight: 700,
   minWidth: 970,
   fontSize: 12,
@@ -3874,8 +4032,9 @@ const tableRow = {
   gap: 6,
   alignItems: "center",
   padding: 10,
-  background: "#10284f",
-  borderBottom: "1px solid rgba(147,197,253,0.16)",
+  background: "#ffffff",
+  color: brandRed,
+  borderBottom: `1px solid ${brandRedBorder}`,
   minWidth: 970,
   fontSize: 14,
 };
@@ -3884,60 +4043,61 @@ const tableWithoutTc = {
   minWidth: 850,
 };
 const selectStyle = { width: "100%", padding: 8, borderRadius: 8 };
-const smallButton = { padding: "8px 12px", borderRadius: 8, border: "1px solid rgba(125,211,252,0.4)", cursor: "pointer", fontWeight: 700, background: "#dbeafe", color: "#0b2b5f" };
-const phoneLink = { color: "#7dd3fc", fontWeight: 800, fontSize: 15 };
-const bulkBar = { display: "grid", gridTemplateColumns: "120px 150px 1fr 150px", gap: 10, alignItems: "center", marginBottom: 12, background: "#071a36", padding: 12, borderRadius: 12 };
+const smallButton = { padding: "8px 12px", borderRadius: 8, border: `1px solid ${brandRedBorder}`, cursor: "pointer", fontWeight: 700, background: brandRedSoft, color: brandRed };
+const phoneLink = { color: brandRed, fontWeight: 800, fontSize: 15 };
+const bulkBar = { display: "grid", gridTemplateColumns: "120px 150px 1fr 150px", gap: 10, alignItems: "center", marginBottom: 12, background: brandRedSoft, padding: 12, borderRadius: 12 };
 const paginationBar = { display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "center", gap: 8, marginTop: 16 };
-const topPaginationBar = { marginTop: 0, marginBottom: 14, padding: "10px 12px", borderRadius: 9, background: "rgba(7,26,54,0.55)", border: "1px solid rgba(147,197,253,0.16)" };
+const topPaginationBar = { marginTop: 0, marginBottom: 14, padding: "10px 12px", borderRadius: 9, background: brandRedSoft, border: `1px solid ${brandRedBorder}` };
 const releaseRepBar = { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, padding: "10px 12px", borderRadius: 9, background: "rgba(180,83,9,0.18)", border: "1px solid rgba(251,191,36,0.35)", color: "#fde68a", fontSize: 13 };
 const releaseToPoolButton = { padding: "8px 11px", borderRadius: 7, border: "1px solid rgba(125,211,252,0.5)", background: "rgba(14,116,144,0.35)", color: "#cffafe", cursor: "pointer", fontWeight: 800 };
-const paginationButton = { minWidth: 66, padding: "8px 10px", borderRadius: 7, border: "1px solid rgba(125,211,252,0.35)", background: "#10284f", color: "#e0f2fe", cursor: "pointer", fontWeight: 700 };
-const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#071a36", padding: 14, borderRadius: 12, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const paginationButton = { minWidth: 66, padding: "8px 10px", borderRadius: 7, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", fontWeight: 700 };
+const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff", color: brandRed, padding: 14, borderRadius: 12, marginBottom: 10, border: `1px solid ${brandRedBorder}` };
 const employeeIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
-const roleBadge = { background: "#2563eb", padding: "6px 12px", borderRadius: 999, fontSize: 13 };
+const roleBadge = { background: brandRed, color: "#ffffff", padding: "6px 12px", borderRadius: 999, fontSize: 13 };
 const staffActions = { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 };
 const deleteStaffButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid rgba(252,165,165,0.55)", background: "rgba(127,29,29,0.5)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
-const staffFormBox = { background: "#071a36", padding: 18, borderRadius: 14, marginBottom: 20, border: "1px solid rgba(147,197,253,0.18)" };
+const staffFormBox = { background: "#ffffff", color: brandRed, padding: 18, borderRadius: 14, marginBottom: 20, border: `1px solid ${brandRedBorder}` };
 const repCenterLayout = { display: "grid", gap: 18 };
 const repCenterHeader = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 18, flexWrap: "wrap" };
 const repCenterFilters = { display: "grid", gridTemplateColumns: "minmax(200px,1fr) minmax(150px,190px)", gap: 10, minWidth: "min(100%,410px)" };
-const repCenterTabs = { display: "flex", gap: 8, flexWrap: "wrap", margin: "22px 0 18px", paddingBottom: 12, borderBottom: "1px solid rgba(147,197,253,0.16)" };
-const repTabButton = { padding: "9px 13px", borderRadius: 9, border: "1px solid rgba(147,197,253,0.18)", background: "rgba(7,26,54,0.66)", color: "#bfdbfe", cursor: "pointer", fontWeight: 700 };
-const repTabActive = { ...repTabButton, background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "white", borderColor: "rgba(125,211,252,0.6)", boxShadow: "0 8px 20px rgba(37,99,235,0.22)" };
+const repCenterTabs = { display: "flex", gap: 8, flexWrap: "wrap", margin: "22px 0 18px", paddingBottom: 12, borderBottom: `1px solid ${brandRedBorder}` };
+const repTabButton = { padding: "9px 13px", borderRadius: 9, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", fontWeight: 700 };
+const repTabActive = { ...repTabButton, background: brandRed, color: "white", borderColor: brandRed, boxShadow: "0 8px 20px rgba(226,68,7,0.22)" };
 const repMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12, marginBottom: 18 };
-const repMetricCard = { display: "grid", gap: 7, minHeight: 92, alignContent: "center", padding: 15, borderRadius: 12, border: "1px solid", background: "rgba(7,26,54,0.72)" };
-const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: "1px solid rgba(147,197,253,0.16)", background: "#071a36" };
-const repComparisonHeader = { minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: parliamentMid, color: "#bfdbfe", fontSize: 11, fontWeight: 800 };
-const repComparisonRow = { width: "100%", minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: "1px solid rgba(147,197,253,0.12)", background: "#10284f", color: "#e0f2fe", cursor: "pointer", textAlign: "left" };
+const repMetricCard = { display: "grid", gap: 7, minHeight: 92, alignContent: "center", padding: 15, borderRadius: 12, border: "1px solid", background: "#ffffff" };
+const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
+const repComparisonHeader = { minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 11, fontWeight: 800 };
+const repComparisonRow = { width: "100%", minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", textAlign: "left" };
 const repTableIdentity = { display: "flex", alignItems: "center", gap: 9, minWidth: 0 };
 const repLimitNotice = { margin: "12px 0 0", color: "#fde68a", fontSize: 12 };
 const activityStream = { display: "grid", gap: 8, maxHeight: "68vh", overflowY: "auto", paddingRight: 4 };
-const activityStreamRow = { display: "grid", gridTemplateColumns: "145px minmax(140px,.8fr) minmax(180px,1fr) 150px minmax(180px,1.2fr)", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, border: "1px solid rgba(147,197,253,0.14)", borderLeft: "4px solid", background: "rgba(7,26,54,0.7)", minWidth: 830 };
-const activityTime = { color: "#94a3b8", fontSize: 11 };
-const activityRep = { color: "#7dd3fc", fontWeight: 800, fontSize: 12 };
-const activityCustomer = { color: "#f8fafc", fontWeight: 700, fontSize: 12 };
-const activityNote = { color: "#cbd5e1", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const activityStreamRow = { display: "grid", gridTemplateColumns: "145px minmax(140px,.8fr) minmax(180px,1fr) 150px minmax(180px,1.2fr)", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, border: `1px solid ${brandRedBorder}`, borderLeft: "4px solid", background: "#ffffff", minWidth: 830 };
+const activityTime = { color: mutedRedText, fontSize: 11 };
+const activityRep = { color: brandRed, fontWeight: 800, fontSize: 12 };
+const activityCustomer = { color: brandRed, fontWeight: 700, fontSize: 12 };
+const activityNote = { color: mutedRedText, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const overdueBadge = { padding: "5px 8px", borderRadius: 999, background: "rgba(239,68,68,0.2)", color: "#fca5a5", fontSize: 11, fontWeight: 800, textAlign: "center" };
 const waitingBadge = { ...overdueBadge, background: "rgba(245,158,11,0.18)", color: "#fde68a" };
 const modalBg = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 999 };
-const modalCard = { width: 860, maxWidth: "94%", maxHeight: "90vh", overflowY: "auto", background: `linear-gradient(135deg, ${cardBlue}, #0f172a)`, padding: 25, borderRadius: 20, border: "1px solid rgba(147,197,253,0.25)" };
-const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: "1px solid rgba(147,197,253,0.38)", background: "#16345f", color: "#e0f2fe" };
-const customerHero = { background: `linear-gradient(135deg, ${parliamentMid}, ${parliament})`, padding: 18, borderRadius: 16, marginBottom: 16, border: "1px solid #60a5fa" };
+const modalCard = { width: 860, maxWidth: "94%", maxHeight: "90vh", overflowY: "auto", background: "#ffffff", color: brandRed, padding: 25, borderRadius: 20, border: `1px solid ${brandRedBorder}` };
+const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: `1px solid ${brandRed}`, background: brandRed, color: "#ffffff" };
+const customerHero = { background: brandRed, color: "#ffffff", padding: 18, borderRadius: 16, marginBottom: 16, border: `1px solid ${brandRed}` };
 const customerHeroTitle = { color: "white", textAlign: "center", marginBottom: 15, fontSize: 28 };
 const customerInfoGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 };
-const infoPill = { background: "rgba(7,26,54,0.85)", padding: 12, borderRadius: 12, color: "#e0f2fe", textAlign: "center", border: "1px solid rgba(147,197,253,0.22)" };
+const infoPill = { background: "rgba(255,255,255,0.14)", padding: 12, borderRadius: 12, color: "#ffffff", textAlign: "center", border: "1px solid rgba(255,255,255,0.32)" };
 const quickActions = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, margin: "15px 0" };
-const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: "linear-gradient(135deg,#2563eb,#1d4ed8)", color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: 700 };
+const quickActionButton = { padding: 11, borderRadius: 10, border: "none", background: brandRed, color: "white", textAlign: "center", textDecoration: "none", cursor: "pointer", fontWeight: 700 };
 const wrongNumberButton = { background: "linear-gradient(135deg,#ef4444,#b91c1c)" };
 const detailLayout = { display: "grid", gridTemplateColumns: "250px minmax(0,1fr)", gap: 14, marginBottom: 16 };
-const statusRail = { background: "rgba(7,26,54,0.72)", borderRadius: 14, border: "1px solid rgba(147,197,253,0.15)", padding: 12 };
-const railTitle = { margin: "0 0 10px", fontSize: 14, color: "#bfdbfe" };
-const statusMenuButton = { width: "100%", display: "block", marginBottom: 8, padding: "10px 12px", borderRadius: 10, border: "1px solid transparent", cursor: "pointer", fontWeight: 700, color: "white", background: "#17355f" };
+const statusRail = { background: "#ffffff", borderRadius: 14, border: `1px solid ${brandRedBorder}`, padding: 12 };
+const railTitle = { margin: "0 0 10px", fontSize: 14, color: brandRed };
+const statusMenuButton = { width: "100%", display: "block", marginBottom: 8, padding: "10px 12px", borderRadius: 10, border: `1px solid ${brandRedBorder}`, cursor: "pointer", fontWeight: 700, color: brandRed, background: "#ffffff" };
 const statusMenuTone = {
   new: { background: "rgba(37,99,235,0.4)" },
   called: { background: "rgba(251,146,60,0.28)" },
   muted: { background: "rgba(71,85,105,0.35)" },
   warn: { background: "rgba(245,158,11,0.3)" },
+  using: { background: "rgba(20,184,166,0.28)" },
   callback: { background: "rgba(168,85,247,0.28)" },
   appointment: { background: "rgba(234,179,8,0.3)" },
   contract: { background: "rgba(6,182,212,0.28)" },
@@ -3945,175 +4105,177 @@ const statusMenuTone = {
   success: { background: "rgba(34,197,94,0.26)" },
   paid: { background: "rgba(5,150,105,0.3)" },
 };
-const statusMenuActive = { outline: "2px solid #e0f2fe", outlineOffset: 2 };
-const detailFormColumn = { background: "rgba(7,26,54,0.42)", borderRadius: 14, border: "1px solid rgba(147,197,253,0.12)", padding: 16 };
+const statusMenuActive = { outline: `2px solid ${brandRed}`, outlineOffset: 2 };
+const detailFormColumn = { background: "#ffffff", borderRadius: 14, border: `1px solid ${brandRedBorder}`, padding: 16 };
 const duplicateWarning = { marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", fontSize: 13, lineHeight: 1.45 };
 const customerHeatBar = { height: 4, borderRadius: 999, marginBottom: 16, opacity: 0.95 };
 const customerSummary = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 9, margin: "-4px 0 16px" };
 const heatBadge = { padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700 };
-const customerSummaryText = { color: "#cbd5e1", fontSize: 13 };
+const customerSummaryText = { color: mutedRedText, fontSize: 13 };
 const historyTitle = { margin: "24px 0 12px", fontSize: 18, fontWeight: 600, letterSpacing: 0 };
-const logBox = { background: "rgba(7,26,54,0.72)", padding: "14px 16px", borderRadius: 10, marginBottom: 10, border: "1px solid rgba(147,197,253,0.16)" };
-const logUser = { display: "block", fontSize: 14, fontWeight: 600, color: "#e0f2fe" };
-const logSourceText = { display: "inline-block", marginTop: 8, padding: "4px 8px", borderRadius: 999, background: "rgba(56,189,248,0.12)", color: "#bae6fd", fontSize: 12, fontWeight: 700 };
-const logStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 7, margin: "10px 0 0", color: "#cbd5e1", fontSize: 13 };
-const logNote = { margin: "12px 0 0", color: "#f1f5f9", fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" };
+const logBox = { background: "#ffffff", color: brandRed, padding: "14px 16px", borderRadius: 10, marginBottom: 10, border: `1px solid ${brandRedBorder}` };
+const logUser = { display: "block", fontSize: 14, fontWeight: 600, color: brandRed };
+const logSourceText = { display: "inline-block", marginTop: 8, padding: "4px 8px", borderRadius: 999, background: brandRedSoft, color: brandRed, fontSize: 12, fontWeight: 700 };
+const logStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 7, margin: "10px 0 0", color: mutedRedText, fontSize: 13 };
+const logNote = { margin: "12px 0 0", color: brandRed, fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" };
 const logEmptyNote = { margin: "12px 0 0", color: "#94a3b8", fontSize: 13, fontStyle: "italic" };
 const logTime = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 12 };
-const logLoadingText = { padding: "14px 16px", borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(147,197,253,0.18)", color: "#bfdbfe" };
-const fieldLabel = { display: "block", margin: "12px 0 6px", fontWeight: 700, fontSize: 13, color: "#bfdbfe" };
+const logLoadingText = { padding: "14px 16px", borderRadius: 10, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, color: brandRed };
+const fieldLabel = { display: "block", margin: "12px 0 6px", fontWeight: 700, fontSize: 13, color: brandRed };
 const reportsLayout = { display: "grid", gap: 18 };
 const sectionHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, marginBottom: 18 };
 const chartList = { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 };
 const chartRow = { display: "grid", gap: 12, padding: 14, borderRadius: 8, border: "1px solid" };
 const chartLabel = { display: "flex", justifyContent: "space-between", gap: 12 };
-const chartTrack = { height: 12, borderRadius: 999, background: "#071a36", overflow: "hidden", border: "1px solid rgba(147,197,253,0.18)" };
-const chartBar = { height: "100%", borderRadius: 999, background: "linear-gradient(90deg,#38bdf8,#22c55e)" };
+const chartTrack = { height: 12, borderRadius: 999, background: brandRedSoft, overflow: "hidden", border: `1px solid ${brandRedBorder}` };
+const chartBar = { height: "100%", borderRadius: 999, background: brandRed };
 const reportChartHeader = { display: "flex", alignItems: "center", gap: 10, minWidth: 0 };
 const reportIcon = { width: 34, height: 34, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: 7, fontWeight: 900 };
-const reportChartTitle = { flex: 1, minWidth: 0, color: "#e2e8f0" };
+const reportChartTitle = { flex: 1, minWidth: 0, color: brandRed };
 const reportFigure = { minWidth: 52, textAlign: "right", fontSize: 22, fontWeight: 900 };
 const reportVisuals = {
-  pool: { icon: "+", color: "#7dd3fc", background: "linear-gradient(135deg,rgba(14,116,144,0.3),rgba(7,26,54,0.62))", border: "rgba(125,211,252,0.3)", iconBackground: "rgba(56,189,248,0.16)", bar: "linear-gradient(90deg,#0ea5e9,#67e8f9)" },
-  called: { icon: "✓", color: "#fdba74", background: "linear-gradient(135deg,rgba(154,52,18,0.3),rgba(7,26,54,0.62))", border: "rgba(251,146,60,0.3)", iconBackground: "rgba(251,146,60,0.16)", bar: "linear-gradient(90deg,#f97316,#fdba74)" },
-  callback: { icon: "↶", color: "#d8b4fe", background: "linear-gradient(135deg,rgba(107,33,168,0.3),rgba(7,26,54,0.62))", border: "rgba(192,132,252,0.3)", iconBackground: "rgba(192,132,252,0.16)", bar: "linear-gradient(90deg,#9333ea,#d8b4fe)" },
-  appointment: { icon: "◦", color: "#fde68a", background: "linear-gradient(135deg,rgba(161,98,7,0.3),rgba(7,26,54,0.62))", border: "rgba(251,191,36,0.3)", iconBackground: "rgba(251,191,36,0.16)", bar: "linear-gradient(90deg,#eab308,#fde68a)" },
-  contract_appointment: { icon: "▢", color: "#67e8f9", background: "linear-gradient(135deg,rgba(14,116,144,0.3),rgba(7,26,54,0.62))", border: "rgba(34,211,238,0.3)", iconBackground: "rgba(34,211,238,0.16)", bar: "linear-gradient(90deg,#0891b2,#67e8f9)" },
-  not_approved: { icon: "×", color: "#fca5a5", background: "linear-gradient(135deg,rgba(153,27,27,0.3),rgba(7,26,54,0.62))", border: "rgba(248,113,113,0.3)", iconBackground: "rgba(248,113,113,0.16)", bar: "linear-gradient(90deg,#dc2626,#fca5a5)" },
-  wrong_number: { icon: "!", color: "#cbd5e1", background: "linear-gradient(135deg,rgba(71,85,105,0.32),rgba(7,26,54,0.62))", border: "rgba(148,163,184,0.3)", iconBackground: "rgba(148,163,184,0.16)", bar: "linear-gradient(90deg,#64748b,#cbd5e1)" },
-  paid: { icon: "₺", color: "#6ee7b7", background: "linear-gradient(135deg,rgba(4,120,87,0.32),rgba(7,26,54,0.62))", border: "rgba(52,211,153,0.3)", iconBackground: "rgba(52,211,153,0.16)", bar: "linear-gradient(90deg,#059669,#6ee7b7)" },
+  pool: { icon: "+", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  called: { icon: "✓", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  no_answer: { icon: "…", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  callback: { icon: "↶", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  appointment: { icon: "◦", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  contract_appointment: { icon: "▢", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  not_approved: { icon: "×", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  wrong_number: { icon: "!", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  using: { icon: "✓", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  paid: { icon: "₺", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
 };
-const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px", gap: 10, alignItems: "center", background: "#071a36", padding: 12, borderRadius: 8, marginTop: 10, border: "1px solid rgba(147,197,253,0.18)" };
-const leaderFigure = { display: "flex", alignItems: "center", gap: 7, color: "#bfdbfe", fontSize: 13 };
-const dataSourceRow = { display: "grid", gridTemplateColumns: "minmax(170px, 1fr) repeat(4, auto)", gap: 16, alignItems: "center", background: "#071a36", padding: 12, borderRadius: 10, marginTop: 10, border: "1px solid rgba(147,197,253,0.15)", fontSize: 13 };
-const dataMetric = { minWidth: 64, padding: "5px 8px", borderRadius: 6, background: "rgba(15,35,68,0.9)", fontWeight: 800, textAlign: "center" };
+const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px", gap: 10, alignItems: "center", background: "#ffffff", color: brandRed, padding: 12, borderRadius: 8, marginTop: 10, border: `1px solid ${brandRedBorder}` };
+const leaderFigure = { display: "flex", alignItems: "center", gap: 7, color: brandRed, fontSize: 13 };
+const dataSourceRow = { display: "grid", gridTemplateColumns: "minmax(170px, 1fr) repeat(4, auto)", gap: 16, alignItems: "center", background: "#ffffff", color: brandRed, padding: 12, borderRadius: 10, marginTop: 10, border: `1px solid ${brandRedBorder}`, fontSize: 13 };
+const dataMetric = { minWidth: 64, padding: "5px 8px", borderRadius: 6, background: brandRedSoft, fontWeight: 800, textAlign: "center" };
 const workSummaryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 };
-const workSummaryItem = { display: "grid", gap: 6, padding: 14, borderLeft: "3px solid", background: "rgba(7,26,54,0.62)", borderRadius: 8 };
-const workSummaryLabel = { color: "#cbd5e1", fontSize: 13 };
+const workSummaryItem = { display: "grid", gap: 6, padding: 14, borderLeft: "3px solid", background: "#ffffff", borderRadius: 8 };
+const workSummaryLabel = { color: mutedRedText, fontSize: 13 };
 const workSummaryValue = { fontSize: 26, lineHeight: 1 };
-const todayDateBadge = { padding: "7px 10px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 13, fontWeight: 600 };
+const todayDateBadge = { padding: "7px 10px", borderRadius: 999, background: brandRedSoft, color: brandRed, fontSize: 13, fontWeight: 600 };
 const dailyFocusBadge = { padding: "7px 10px", borderRadius: 999, background: "rgba(52,211,153,0.14)", color: "#a7f3d0", fontSize: 13, fontWeight: 600 };
 const dailyMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 };
-const dailyMetricItem = { display: "grid", gap: 9, padding: 14, borderRadius: 8, border: "1px solid rgba(147,197,253,0.22)", color: "#e0f2fe", cursor: "pointer", textAlign: "left", font: "inherit" };
-const assignmentSection = { marginTop: 24, paddingTop: 20, borderTop: "1px solid rgba(147,197,253,0.18)" };
-const workloadRow = { display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 10, alignItems: "center", padding: "10px 0", borderBottom: "1px solid rgba(147,197,253,0.12)" };
+const dailyMetricItem = { display: "grid", gap: 9, padding: 14, borderRadius: 8, border: `1px solid ${brandRedBorder}`, color: brandRed, cursor: "pointer", textAlign: "left", font: "inherit" };
+const assignmentSection = { marginTop: 24, paddingTop: 20, borderTop: `1px solid ${brandRedBorder}` };
+const workloadRow = { display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 10, alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${brandRedBorder}` };
 const workloadAvailable = { color: "#86efac", fontSize: 13, fontWeight: 600 };
 const workloadBusy = { color: "#fcd34d", fontSize: 13, fontWeight: 600 };
 const customerNameCell = { display: "grid", gap: 6, minWidth: 0 };
 const customerNameLine = { display: "flex", alignItems: "center", gap: 8, minWidth: 0, flexWrap: "wrap" };
-const freshCustomerBadge = { display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "3px 8px", borderRadius: 999, background: "linear-gradient(135deg,#22d3ee,#2563eb)", color: "white", fontSize: 11, fontWeight: 900, boxShadow: "0 0 14px rgba(34,211,238,0.35)", letterSpacing: 0.2 };
+const freshCustomerBadge = { display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "3px 8px", borderRadius: 999, background: brandRed, color: "white", fontSize: 11, fontWeight: 900, boxShadow: "0 0 14px rgba(226,68,7,0.28)", letterSpacing: 0.2 };
 const customerStatusLine = { width: "100%", height: 4, borderRadius: 4, opacity: 0.95 };
 const celebrationBackdrop = { position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgba(2,6,23,0.78)", backdropFilter: "blur(5px)" };
-const celebrationCard = { width: 380, maxWidth: "100%", position: "relative", overflow: "hidden", padding: 32, borderRadius: 12, textAlign: "center", background: "linear-gradient(145deg,#123b7a,#064e3b)", border: "1px solid rgba(167,243,208,0.5)" };
+const celebrationCard = { width: 380, maxWidth: "100%", position: "relative", overflow: "hidden", padding: 32, borderRadius: 12, textAlign: "center", background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}` };
 const celebrationConfetti = { height: 26, display: "flex", justifyContent: "space-around", alignItems: "center", marginBottom: 14 };
 const confettiPiece = { width: 9, height: 20, display: "block", borderRadius: 2 };
 const celebrationEyebrow = { color: "#a7f3d0", fontSize: 12, fontWeight: 800, letterSpacing: 1.2 };
 const celebrationTitle = { margin: "12px 0 4px", color: "#f8fafc", fontSize: 32 };
 const celebrationCustomer = { margin: "0 0 10px", color: "#fde68a", fontSize: 18, fontWeight: 700 };
 const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginTop: 16 };
-const calendarDay = { background: "#071a36", padding: 14, borderRadius: 14, border: "1px solid rgba(147,197,253,0.18)" };
-const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: "1px solid rgba(147,197,253,0.18)", background: "#10284f", color: "white", cursor: "pointer" };
-const loginPage = { minHeight: "100vh", background: `radial-gradient(circle at top left, ${parliament} 0, ${parliamentDark} 38%, #020617 100%)`, display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: "white" };
+const calendarDay = { background: "#ffffff", color: brandRed, padding: 14, borderRadius: 14, border: `1px solid ${brandRedBorder}` };
+const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer" };
+const loginPage = { minHeight: "100vh", background: "#ffffff", display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: brandRed };
 const loginLeft = { maxWidth: 620 };
-const brandBadge = { display: "inline-block", background: "rgba(37,99,235,0.25)", border: "1px solid rgba(147,197,253,0.35)", padding: "8px 14px", borderRadius: 999, fontSize: 13, letterSpacing: 1, marginBottom: 22 };
+const brandBadge = { display: "inline-block", background: brandRedSoft, border: `1px solid ${brandRedBorder}`, padding: "8px 14px", borderRadius: 999, fontSize: 13, letterSpacing: 1, marginBottom: 22 };
 const loginHeroTitle = { fontSize: 56, lineHeight: 1.05, margin: "0 0 20px 0" };
 const loginHeroText = { fontSize: 18, lineHeight: 1.6, opacity: 0.9, maxWidth: 520 };
 const loginFeatureGrid = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, marginTop: 35, maxWidth: 500 };
-const loginFeature = { background: "rgba(15,23,42,0.7)", border: "1px solid rgba(148,163,184,0.2)", padding: 16, borderRadius: 16 };
-const loginCard = { background: "rgba(15,23,42,0.82)", border: "1px solid rgba(148,163,184,0.25)", boxShadow: "0 30px 80px rgba(0,0,0,0.45)", backdropFilter: "blur(16px)", padding: 34, borderRadius: 24, color: "white" };
+const loginFeature = { background: "#ffffff", border: `1px solid ${brandRedBorder}`, padding: 16, borderRadius: 16 };
+const loginCard = { background: "#ffffff", border: `1px solid ${brandRedBorder}`, boxShadow: "0 30px 80px rgba(226,68,7,0.16)", backdropFilter: "blur(16px)", padding: 34, borderRadius: 24, color: brandRed };
 const loginCardStack = { display: "grid", gap: 14 };
 const poweredByVercel = { display: "flex", alignItems: "center", justifyContent: "center", gap: 7, color: "#94a3b8", fontSize: 12, fontWeight: 600 };
 const vercelMark = { color: "#e2e8f0", fontSize: 11, lineHeight: 1 };
-const loginInput = { width: "100%", padding: "14px 15px", marginBottom: 16, boxSizing: "border-box", borderRadius: 12, border: "1px solid #334155", background: "#020617", color: "white" };
-const loginButton = { width: "100%", padding: 14, borderRadius: 12, border: "none", background: "linear-gradient(135deg,#2563eb,#123b7a)", color: "white", fontWeight: 700, cursor: "pointer" };
-const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#071a36", padding: 12, borderRadius: 8, marginBottom: 10, border: "1px solid rgba(147,197,253,0.18)" };
+const loginInput = { width: "100%", padding: "14px 15px", marginBottom: 16, boxSizing: "border-box", borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const loginButton = { width: "100%", padding: 14, borderRadius: 12, border: "none", background: brandRed, color: "white", fontWeight: 700, cursor: "pointer" };
+const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#ffffff", color: brandRed, padding: 12, borderRadius: 8, marginBottom: 10, border: `1px solid ${brandRedBorder}` };
 const salesFigure = { minWidth: 54, padding: "5px 8px", borderRadius: 6, background: "rgba(5,150,105,0.16)", color: "#6ee7b7", fontWeight: 800, textAlign: "center" };
-const avatarBase = { display: "grid", placeItems: "center", overflow: "hidden", boxSizing: "border-box", borderRadius: "50%", background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "#f8fafc", border: "2px solid rgba(125,211,252,0.48)", fontWeight: 800 };
+const avatarBase = { display: "grid", placeItems: "center", overflow: "hidden", boxSizing: "border-box", borderRadius: "50%", background: brandRed, color: "#ffffff", border: `2px solid ${brandRedBorder}`, fontWeight: 800 };
 const accountLayout = { display: "grid", gap: 18 };
-const accountHero = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18, padding: 22, borderRadius: 8, background: "linear-gradient(135deg,rgba(30,64,175,0.72),rgba(8,145,178,0.42))", border: "1px solid rgba(125,211,252,0.36)" };
-const avatarUploadButton = { marginLeft: "auto", padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(186,230,253,0.48)", background: "rgba(7,26,54,0.68)", color: "#e0f2fe", cursor: "pointer", fontWeight: 700 };
+const accountHero = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18, padding: 22, borderRadius: 8, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}` };
+const avatarUploadButton = { marginLeft: "auto", padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.48)", background: "rgba(255,255,255,0.14)", color: "#ffffff", cursor: "pointer", fontWeight: 700 };
 const accountGrid = { display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(280px,0.8fr)", gap: 18, alignItems: "start" };
-const accountEmailBox = { display: "grid", gap: 5, margin: "18px 0", padding: 14, borderRadius: 8, background: "rgba(7,26,54,0.68)", border: "1px solid rgba(147,197,253,0.18)", overflowWrap: "anywhere" };
-const securityButton = { ...primaryButton, background: "linear-gradient(135deg,#4338ca,#2563eb)" };
+const accountEmailBox = { display: "grid", gap: 5, margin: "18px 0", padding: 14, borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, overflowWrap: "anywhere" };
+const securityButton = { ...primaryButton, background: brandRed };
 const availabilityControl = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 };
-const availabilityButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.2)", background: "#071a36", color: "#cbd5e1", cursor: "pointer", fontWeight: 700 };
+const availabilityButton = { padding: "10px 12px", borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", fontWeight: 700 };
 const availabilityOnlineActive = { ...availabilityButton, background: "rgba(5,150,105,0.24)", borderColor: "rgba(52,211,153,0.58)", color: "#6ee7b7" };
 const availabilityBusyActive = { ...availabilityButton, background: "rgba(194,65,12,0.24)", borderColor: "rgba(251,146,60,0.58)", color: "#fdba74" };
-const messagingLayout = { height: "calc(100vh - 142px)", minHeight: 560, display: "grid", gridTemplateColumns: "280px minmax(0,1fr)", overflow: "hidden", borderRadius: 8, border: "1px solid rgba(147,197,253,0.22)", background: "rgba(7,26,54,0.72)" };
-const conversationSidebar = { minWidth: 0, overflowY: "auto", padding: 12, borderRight: "1px solid rgba(147,197,253,0.18)", background: "rgba(5,20,43,0.88)" };
+const messagingLayout = { height: "calc(100vh - 142px)", minHeight: 560, display: "grid", gridTemplateColumns: "280px minmax(0,1fr)", overflow: "hidden", borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
+const conversationSidebar = { minWidth: 0, overflowY: "auto", padding: 12, borderRight: `1px solid ${brandRedBorder}`, background: "#ffffff" };
 const conversationHeading = { padding: "6px 8px 14px" };
-const contactSearchInput = { width: "100%", boxSizing: "border-box", marginBottom: 10, padding: "9px 10px", borderRadius: 7, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
-const conversationButton = { width: "100%", minHeight: 58, display: "flex", alignItems: "center", gap: 10, padding: 9, marginBottom: 6, borderRadius: 8, border: "1px solid transparent", background: "transparent", color: "#e0f2fe", textAlign: "left", cursor: "pointer", font: "inherit" };
-const conversationButtonActive = { ...conversationButton, background: "rgba(37,99,235,0.28)", borderColor: "rgba(125,211,252,0.36)" };
+const contactSearchInput = { width: "100%", boxSizing: "border-box", marginBottom: 10, padding: "9px 10px", borderRadius: 7, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const conversationButton = { width: "100%", minHeight: 58, display: "flex", alignItems: "center", gap: 10, padding: 9, marginBottom: 6, borderRadius: 8, border: "1px solid transparent", background: "transparent", color: brandRed, textAlign: "left", cursor: "pointer", font: "inherit" };
+const conversationButtonActive = { ...conversationButton, background: brandRedSoft, borderColor: brandRedBorder };
 const generalAvatar = { width: 38, height: 38, minWidth: 38, display: "grid", placeItems: "center", borderRadius: 8, background: "rgba(13,148,136,0.32)", color: "#5eead4", fontSize: 20, fontWeight: 900, border: "1px solid rgba(94,234,212,0.34)" };
 const contactCopy = { minWidth: 0, flex: 1, display: "grid", overflow: "hidden" };
 const contactRole = { display: "block", color: "#94a3b8", fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
 const lastMessagePreview = { display: "block", marginTop: 2, color: "#64748b", fontSize: 10, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
 const contactDivider = { margin: "14px 8px 8px", color: "#64748b", fontSize: 11, fontWeight: 800, textTransform: "uppercase" };
 const unreadBadge = { minWidth: 21, height: 21, display: "grid", placeItems: "center", padding: "0 5px", boxSizing: "border-box", borderRadius: 999, background: "#22d3ee", color: "#082f49", fontSize: 11, fontWeight: 900 };
-const chatPanel = { minWidth: 0, minHeight: 0, display: "grid", gridTemplateRows: "auto minmax(0,1fr) auto", background: "linear-gradient(145deg,rgba(16,40,79,0.7),rgba(2,16,39,0.76))" };
-const chatHeader = { display: "flex", alignItems: "center", gap: 11, padding: "13px 16px", borderBottom: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.74)" };
-const messageSearchInput = { width: "min(240px,35%)", marginLeft: "auto", padding: "8px 10px", boxSizing: "border-box", borderRadius: 7, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
+const chatPanel = { minWidth: 0, minHeight: 0, display: "grid", gridTemplateRows: "auto minmax(0,1fr) auto", background: "#ffffff" };
+const chatHeader = { display: "flex", alignItems: "center", gap: 11, padding: "13px 16px", borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff" };
+const messageSearchInput = { width: "min(240px,35%)", marginLeft: "auto", padding: "8px 10px", boxSizing: "border-box", borderRadius: 7, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
 const messageStream = { minHeight: 0, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 9 };
 const messageLine = { display: "flex", width: "100%" };
-const messageBubble = { maxWidth: "min(72%,680px)", padding: "9px 12px", borderRadius: "8px 8px 8px 2px", background: "#17355f", border: "1px solid rgba(147,197,253,0.18)" };
-const ownMessageBubble = { ...messageBubble, borderRadius: "8px 8px 2px 8px", background: "linear-gradient(135deg,#1d4ed8,#155e75)", borderColor: "rgba(125,211,252,0.3)" };
-const messageSender = { display: "block", marginBottom: 4, color: "#67e8f9", fontSize: 11 };
-const messageText = { color: "#f8fafc", lineHeight: 1.4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
-const messageTime = { color: "rgba(226,232,240,0.66)", fontSize: 10 };
+const messageBubble = { maxWidth: "min(72%,680px)", padding: "9px 12px", borderRadius: "8px 8px 8px 2px", background: brandRedSoft, border: `1px solid ${brandRedBorder}` };
+const ownMessageBubble = { ...messageBubble, borderRadius: "8px 8px 2px 8px", background: brandRed, borderColor: brandRed, color: "#ffffff" };
+const messageSender = { display: "block", marginBottom: 4, color: "inherit", opacity: 0.72, fontSize: 11 };
+const messageText = { color: "inherit", lineHeight: 1.4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
+const messageTime = { color: "inherit", opacity: 0.62, fontSize: 10 };
 const messageDateDivider = { display: "flex", alignItems: "center", justifyContent: "center", margin: "5px 0 12px", color: "#94a3b8", fontSize: 10 };
-const replyPreview = { display: "grid", gap: 2, marginBottom: 7, padding: "6px 8px", borderLeft: "3px solid #67e8f9", borderRadius: 4, background: "rgba(2,16,39,0.35)", color: "#cbd5e1", fontSize: 10, overflow: "hidden" };
+const replyPreview = { display: "grid", gap: 2, marginBottom: 7, padding: "6px 8px", borderLeft: `3px solid ${brandRed}`, borderRadius: 4, background: brandRedSoft, color: brandRed, fontSize: 10, overflow: "hidden" };
 const messageImage = { display: "block", width: "min(320px,100%)", maxHeight: 240, objectFit: "cover", marginTop: 8, borderRadius: 7, border: "1px solid rgba(186,230,253,0.28)" };
-const fileAttachment = { display: "block", marginTop: 8, padding: "8px 10px", borderRadius: 7, background: "rgba(2,16,39,0.42)", color: "#bae6fd", textDecoration: "none", overflowWrap: "anywhere" };
+const fileAttachment = { display: "block", marginTop: 8, padding: "8px 10px", borderRadius: 7, background: brandRedSoft, color: brandRed, textDecoration: "none", overflowWrap: "anywhere" };
 const messageMetaRow = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 5 };
 const messageActions = { display: "flex", alignItems: "center", gap: 3 };
-const messageActionButton = { width: 24, height: 24, display: "grid", placeItems: "center", padding: 0, borderRadius: 5, border: "1px solid rgba(147,197,253,0.15)", background: "rgba(2,16,39,0.28)", color: "#bfdbfe", cursor: "pointer", fontSize: 12 };
-const messageReceipt = { padding: "4px 8px", borderRadius: 999, background: "rgba(15,23,42,0.45)", color: "#cbd5e1", fontSize: 10, fontWeight: 700 };
-const messageComposer = { padding: 12, borderTop: "1px solid rgba(147,197,253,0.16)", background: "rgba(7,26,54,0.84)" };
+const messageActionButton = { width: 24, height: 24, display: "grid", placeItems: "center", padding: 0, borderRadius: 5, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer", fontSize: 12 };
+const messageReceipt = { padding: "4px 8px", borderRadius: 999, background: brandRedSoft, color: brandRed, fontSize: 10, fontWeight: 700 };
+const messageComposer = { padding: 12, borderTop: `1px solid ${brandRedBorder}`, background: "#ffffff" };
 const customerShareComposer = { display: "grid", gridTemplateColumns: "minmax(180px, 1fr) minmax(220px, 1.2fr) 132px", gap: 8, alignItems: "center", marginBottom: 9 };
-const customerShareSearch = { width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
-const customerShareSelect = { width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.2)", background: "#061834", color: "#e0f2fe" };
-const customerShareButton = { minHeight: 38, padding: "9px 10px", borderRadius: 8, border: "1px solid rgba(125,211,252,0.34)", background: "linear-gradient(135deg,#0891b2,#2563eb)", color: "white", cursor: "pointer", fontWeight: 800 };
+const customerShareSearch = { width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const customerShareSelect = { width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const customerShareButton = { minHeight: 38, padding: "9px 10px", borderRadius: 8, border: `1px solid ${brandRed}`, background: brandRed, color: "white", cursor: "pointer", fontWeight: 800 };
 const composerRow = { display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 48px", gap: 9, alignItems: "end" };
-const composerContext = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, borderLeft: "3px solid #67e8f9", background: "rgba(8,145,178,0.12)", color: "#cbd5e1", fontSize: 11, overflow: "hidden" };
+const composerContext = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, borderLeft: `3px solid ${brandRed}`, background: brandRedSoft, color: brandRed, fontSize: 11, overflow: "hidden" };
 const composerCloseButton = { width: 26, height: 26, flexShrink: 0, borderRadius: 5, border: 0, background: "rgba(148,163,184,0.16)", color: "#e2e8f0", cursor: "pointer" };
-const attachmentSelection = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, background: "rgba(37,99,235,0.13)", color: "#bfdbfe", fontSize: 11, overflowWrap: "anywhere" };
-const attachButton = { width: 42, height: 48, display: "grid", placeItems: "center", boxSizing: "border-box", borderRadius: 8, border: "1px solid rgba(125,211,252,0.35)", background: "#10284f", color: "#67e8f9", cursor: "pointer", fontSize: 23, fontWeight: 700 };
-const messageInput = { width: "100%", minHeight: 46, maxHeight: 110, resize: "vertical", boxSizing: "border-box", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(147,197,253,0.26)", background: "#061834", color: "#f8fafc" };
-const sendMessageButton = { width: 48, height: 48, alignSelf: "end", borderRadius: 8, border: "1px solid rgba(103,232,249,0.46)", background: "linear-gradient(135deg,#2563eb,#0891b2)", color: "white", cursor: "pointer", fontSize: 19 };
+const attachmentSelection = { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "7px 9px", borderRadius: 7, background: brandRedSoft, color: brandRed, fontSize: 11, overflowWrap: "anywhere" };
+const attachButton = { width: 42, height: 48, display: "grid", placeItems: "center", boxSizing: "border-box", borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer", fontSize: 23, fontWeight: 700 };
+const messageInput = { width: "100%", minHeight: 46, maxHeight: 110, resize: "vertical", boxSizing: "border-box", padding: "10px 12px", borderRadius: 8, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
+const sendMessageButton = { width: 48, height: 48, alignSelf: "end", borderRadius: 8, border: `1px solid ${brandRed}`, background: brandRed, color: "white", cursor: "pointer", fontSize: 19 };
 const emptyConversation = { margin: "auto", color: "#64748b", fontSize: 14 };
 const notesHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 18, flexWrap: "wrap", marginBottom: 18 };
-const notesEyebrow = { display: "inline-block", marginBottom: 6, fontSize: 12, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: "#7dd3fc" };
+const notesEyebrow = { display: "inline-block", marginBottom: 6, fontSize: 12, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: brandRed };
 const notesHeaderStats = { display: "flex", gap: 12, flexWrap: "wrap", alignItems: "stretch" };
-const notesStatCard = { minWidth: 150, padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(125,211,252,0.2)", background: "rgba(7,26,54,0.78)", display: "grid", gap: 3 };
-const notesStatCardSoft = { minWidth: 190, padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(251,191,36,0.22)", background: "rgba(10,29,63,0.9)", display: "grid", gap: 3 };
-const notesStatLabel = { fontSize: 12, color: "#cbd5e1" };
-const notesStatValue = { fontSize: 20, color: "#f8fafc", lineHeight: 1.1 };
+const notesStatCard = { minWidth: 150, padding: "12px 14px", borderRadius: 14, border: `1px solid ${brandRedBorder}`, background: "#ffffff", display: "grid", gap: 3 };
+const notesStatCardSoft = { minWidth: 190, padding: "12px 14px", borderRadius: 14, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, display: "grid", gap: 3 };
+const notesStatLabel = { fontSize: 12, color: mutedRedText };
+const notesStatValue = { fontSize: 20, color: brandRed, lineHeight: 1.1 };
 const notesStatSubValue = { color: "#94a3b8", fontSize: 12 };
-const notesComposer = { display: "grid", gap: 10, padding: 16, borderRadius: 16, border: "1px solid rgba(147,197,253,0.18)", background: "rgba(7,26,54,0.72)" };
+const notesComposer = { display: "grid", gap: 10, padding: 16, borderRadius: 16, border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
 const notesComposerHeader = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" };
 const notesComposerHint = { color: "#94a3b8", fontSize: 12 };
 const notesComposerActions = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" };
 const notesGrid = { display: "grid", gap: 16, marginTop: 18 };
-const notesEmptyState = { padding: 18, borderRadius: 14, border: "1px dashed rgba(147,197,253,0.24)", background: "rgba(7,26,54,0.48)" };
+const notesEmptyState = { padding: 18, borderRadius: 14, border: `1px dashed ${brandRedBorder}`, background: brandRedSoft };
 const notesSetupNotice = { display: "flex", alignItems: "flex-start", gap: 12, padding: 16, margin: "16px 0 18px", borderRadius: 14, background: "rgba(180,83,9,0.18)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a" };
 const notesSetupIcon = { width: 36, height: 36, flexShrink: 0, borderRadius: 10, display: "grid", placeItems: "center", background: "rgba(251,191,36,0.12)", color: "#fde68a", fontWeight: 900 };
 const notesSetupTitle = { display: "block", marginBottom: 4, fontSize: 16, color: "#fff7ed" };
 const notesSetupText = { margin: 0, color: "#fde68a", lineHeight: 1.55 };
 const notesSetupList = { margin: "10px 0 0", paddingLeft: 18, color: "#fffbeb", lineHeight: 1.6 };
 const notesDaySection = { display: "grid", gap: 10 };
-const notesDayHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", paddingBottom: 4, borderBottom: "1px solid rgba(147,197,253,0.12)" };
-const notesDayLabel = { display: "block", fontSize: 18, color: "#f8fafc" };
+const notesDayHeader = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", paddingBottom: 4, borderBottom: `1px solid ${brandRedBorder}` };
+const notesDayLabel = { display: "block", fontSize: 18, color: brandRed };
 const notesDayDate = { margin: "4px 0 0", color: "#94a3b8", fontSize: 13 };
-const notesDayCount = { padding: "7px 10px", borderRadius: 999, background: "rgba(56,189,248,0.12)", color: "#bae6fd", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" };
+const notesDayCount = { padding: "7px 10px", borderRadius: 999, background: brandRedSoft, color: brandRed, fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" };
 const notesDayList = { display: "grid", gap: 12 };
-const noteCard = { background: "#071a36", borderRadius: 14, padding: 16, border: "1px solid rgba(147,197,253,0.18)", boxShadow: "0 12px 24px rgba(0,0,0,0.12)" };
+const noteCard = { background: "#ffffff", color: brandRed, borderRadius: 14, padding: 16, border: `1px solid ${brandRedBorder}`, boxShadow: "0 12px 24px rgba(226,68,7,0.08)" };
 const noteCardTop = { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" };
 const noteMetaRow = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
-const noteBadge = { padding: "5px 9px", borderRadius: 999, background: "rgba(56,189,248,0.14)", color: "#bae6fd", fontSize: 12, fontWeight: 800 };
+const noteBadge = { padding: "5px 9px", borderRadius: 999, background: brandRedSoft, color: brandRed, fontSize: 12, fontWeight: 800 };
 const noteMetaChip = { padding: "5px 9px", borderRadius: 999, background: "rgba(148,163,184,0.12)", color: "#cbd5e1", fontSize: 12, fontWeight: 700 };
 const noteDeleteButton = { padding: "6px 10px", borderRadius: 8, border: "1px solid rgba(252,165,165,0.4)", background: "rgba(127,29,29,0.48)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
-const noteBody = { margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6, color: "#f8fafc" };
+const noteBody = { margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6, color: brandRed };
 const noteMeta = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 12 };
 const toastStyle = { position: "fixed", top: 18, left: "50%", transform: "translateX(-50%)", zIndex: 1201, padding: "12px 18px", borderRadius: 999, color: "white", fontWeight: 800, boxShadow: "0 18px 40px rgba(0,0,0,0.35)" };
 const toastSuccess = { background: "linear-gradient(135deg,rgba(37,99,235,0.96),rgba(8,145,178,0.92))", border: "1px solid rgba(125,211,252,0.35)" };

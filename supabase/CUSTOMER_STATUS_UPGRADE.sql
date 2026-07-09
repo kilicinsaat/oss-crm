@@ -1,5 +1,7 @@
 -- Run this file once in the Supabase SQL Editor if customer status values need to be widened.
 
+alter type public.customer_status add value if not exists 'using';
+
 do $$
 begin
   if exists (
@@ -27,6 +29,7 @@ alter table public.customers
     'meeting_done',
     'not_approved',
     'wrong_number',
+    'using',
     'approved',
     'paid'
   ));
