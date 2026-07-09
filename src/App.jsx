@@ -1269,7 +1269,7 @@ function App() {
       return;
     }
 
-    const assignedToSelf = profile.role === "employee";
+    const assignedToSelf = ["employee", "manager"].includes(profile.role);
     const payload = {
       first_name: form.first_name.trim(),
       last_name: form.last_name.trim(),
@@ -1840,7 +1840,7 @@ function App() {
   const managerCustomers = profileRole === "manager"
     ? customers.filter((customer) => customer.assigned_employee === profileId)
     : [];
-  const visibleCustomers = profileRole === "employee"
+  const visibleCustomers = ["employee", "manager"].includes(profileRole)
     ? customers.filter((customer) => customer.assigned_employee === profileId)
     : customers;
   const newIncomingCustomers = visibleCustomers.filter(isFreshAssignedCustomer);
@@ -1858,7 +1858,7 @@ function App() {
     })
     .filter((customer) => customerMatchesSearch(customer, searchTerm));
 
-  const followUps = customers.filter((customer) =>
+  const followUps = visibleCustomers.filter((customer) =>
     ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(customer.status)
   );
 
@@ -1870,7 +1870,7 @@ function App() {
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const overdueReminders = reminderCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
   const todayWorkItems = reminderCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
-  const reportCustomers = profileRole === "employee" ? visibleCustomers : customers;
+  const reportCustomers = ["employee", "manager"].includes(profileRole) ? visibleCustomers : customers;
   const repStats = users
     .filter((user) => user.role === "employee")
     .map((user) => ({ ...user, stats: getUserStats(customers, user.id) }))
@@ -2023,7 +2023,7 @@ function App() {
           <MenuButton icon="◉" title={`Müşterilerim (${managerCustomers.length})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
-        {profile.role !== "employee" && (
+        {profile.role === "boss" && (
           <>
             <MenuButton icon="+" title="Yeni Müşteri Havuzu" page="pool" tone="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="!" title={`Takip Gerekenler (${followUps.length})`} page="followups" tone="urgent" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -2034,7 +2034,7 @@ function App() {
         <MenuButton icon="▣" title="Takvim" page="calendar" tone="calendar" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="!" title="Numara Yanlış" page="wrong_number" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
-        {profile.role !== "employee" && (
+        {profile.role === "boss" && (
           <MenuButton icon="◎" title="Rep Takip Merkezi" page="employees" tone="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
@@ -2072,7 +2072,7 @@ function App() {
             <div style={statsGrid}>
               <ClickStat tone="total" title={profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={completeCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
               {profile.role === "employee" && <ClickStat tone="new" title="Yeni Gelenler" value={newIncomingCustomers.length} onClick={() => { setActivePage("rep_new"); }} />}
-              {profile.role !== "employee" && <ClickStat tone="new" title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
+              {profile.role === "boss" && <ClickStat tone="new" title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
               <ClickStat tone="assigned" title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
               <ClickStat tone="approved" title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
               <ClickStat tone="paid" title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
@@ -2082,8 +2082,8 @@ function App() {
               <div style={{ ...panelCard, ...pipelinePanel }}>
                 <h2>Operasyon Pipeline</h2>
                 <div style={pipelineList}>
-                  {profile.role !== "employee" && <PipelineRow label="Yeni Müşteriler" value={customers.filter((c) => c.status === "pool").length} color="#38bdf8" />}
-                  {profile.role !== "employee" && <PipelineRow label="Atandı" value={customers.filter((c) => c.status === "assigned").length} color="#818cf8" />}
+                  {profile.role === "boss" && <PipelineRow label="Yeni Müşteriler" value={customers.filter((c) => c.status === "pool").length} color="#38bdf8" />}
+                  {profile.role === "boss" && <PipelineRow label="Atandı" value={customers.filter((c) => c.status === "assigned").length} color="#818cf8" />}
                   <PipelineRow label="Ulaşılamadı" value={visibleCustomers.filter((c) => c.status === "no_answer").length} color="#94a3b8" />
                   <PipelineRow label="Randevu" value={visibleCustomers.filter((c) => c.status === "appointment").length} color="#fbbf24" />
                   <PipelineRow label="Yapmayacak" value={visibleCustomers.filter((c) => c.status === "not_approved").length} color="#f87171" />
@@ -2332,7 +2332,7 @@ function App() {
           />
         )}
 
-        {activePage === "pool" && (
+        {profile.role === "boss" && activePage === "pool" && (
           <CustomerTable
             title="Müşteri Havuzu"
             data={customers.filter((customer) => customer.status === "pool")}
@@ -2350,7 +2350,7 @@ function App() {
           />
         )}
 
-        {activePage === "followups" && (
+        {profile.role === "boss" && activePage === "followups" && (
           <CustomerTable
             title="Takip Gerekenler"
             data={followUps}
@@ -2412,7 +2412,7 @@ function App() {
           />
         )}
 
-        {activePage === "employees" && (
+        {profile.role === "boss" && activePage === "employees" && (
           <EmployeesView
             profile={profile}
             users={users}
@@ -2472,7 +2472,7 @@ function App() {
             beginEditMessage={beginEditMessage}
             deleteMessage={deleteMessage}
             sendingMessage={sendingMessage}
-            customers={customers}
+            customers={visibleCustomers}
             shareCustomerNote={shareCustomerNote}
           />
         )}
@@ -2488,7 +2488,7 @@ function App() {
             customerCallsLoading={customerCallsLoading}
             updateCustomer={updateCustomer}
             users={users}
-            customers={customers}
+            customers={visibleCustomers}
             profile={profile}
           />
         )}
@@ -3510,7 +3510,7 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
         </div>
       </section>
 
-      {profile.role !== "employee" && (
+      {profile.role === "boss" && (
         <section style={panelCard}>
           <h2 style={sectionTitle}>En İyi Rep Tablosu</h2>
           {repStats.length === 0 && <p style={mutedText}>Henüz rep bulunmuyor.</p>}
@@ -3525,7 +3525,7 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
         </section>
       )}
 
-      {profile.role !== "employee" && (
+      {profile.role === "boss" && (
         <section style={panelCard}>
           <h2 style={sectionTitle}>Data Kaynağı Performansı</h2>
           <p style={mutedText}>Hangi datanın daha çok randevu ve satış getirdiğini karşılaştır.</p>
