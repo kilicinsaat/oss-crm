@@ -777,7 +777,8 @@ function App() {
       .channel(`crm-call-events-${profile.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "call_sessions" }, (payload) => {
         const call = payload.new;
-        if (!call?.id || call.profile_id !== profile.id) return;
+        const canMonitorAllCalls = ["boss", "manager"].includes(profile.role);
+        if (!call?.id || (!canMonitorAllCalls && call.profile_id !== profile.id)) return;
         const customer = customersRef.current.find((item) =>
           item.id === call.customer_id
           || [item.phone, item.phone_2].some((phone) => normalizePhone(phone) === normalizePhone(call.phone))

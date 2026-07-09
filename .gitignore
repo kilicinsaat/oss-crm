@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+secret.txt
+call-bridge/**/secret.txt
 
 # Editor directories and files
 .vscode/*

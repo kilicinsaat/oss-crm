@@ -3,7 +3,22 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $endpoint = 'https://aeaetnpeyksfvlhiijil.supabase.co/functions/v1/call-event'
-$secret = '0HRuvQBfLmTbqyf07PwWAM1JDtKAazWibzKlXMwI60c'
+$secretPath = Join-Path $PSScriptRoot 'secret.txt'
+if (Test-Path -LiteralPath $secretPath) {
+  $secret = (Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8).Trim()
+} else {
+  $secureSecret = Read-Host "CALL_BRIDGE_SECRET" -AsSecureString
+  $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+  try {
+    $secret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+  } finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer)
+  }
+}
+
+if (-not $secret) {
+  throw "CALL_BRIDGE_SECRET bos olamaz."
+}
 
 $profilesPath = Join-Path $PSScriptRoot 'repler.csv'
 if (-not (Test-Path -LiteralPath $profilesPath)) {

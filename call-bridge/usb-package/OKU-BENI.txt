@@ -9,6 +9,11 @@ En basit anlatim:
 5) Kurulum bitince MicroSIP otomatik yeniden acilir.
 6) Bitti. Artik o bilgisayardaki yeni aramalar OSS Center'a duser.
 
+CALL_BRIDGE_SECRET:
+- Bu klasorde secret.txt varsa kurulum onu okur.
+- secret.txt yoksa kurulum CALL_BRIDGE_SECRET bilgisini gizli sekilde sorar.
+- secret.txt dosyasini GitHub'a veya ortak yere yukleme.
+
 Yeni kisi eklemek:
 - repler.csv dosyasini Excel veya Not Defteri ile ac.
 - En alta yeni satir ekle:
