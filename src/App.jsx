@@ -1465,7 +1465,7 @@ function App() {
   }
 
   async function assignCustomer(customerId, employeeId) {
-    if (!profile) return;
+    if (!profile) return false;
     const moveToPool = !employeeId;
 
     const { error } = await runWithRetry(() =>
@@ -1482,7 +1482,7 @@ function App() {
 
     if (error) {
       alert("Atama hatası: " + error.message);
-      return;
+      return false;
     }
 
     setCustomers((current) => current.map((customer) =>
@@ -1507,6 +1507,7 @@ function App() {
     }
 
     showSystemToast(moveToPool ? "Müşteri havuza alındı" : "Müşteri rep'e atandı");
+    return true;
   }
 
   async function bulkAssignCustomers(customerIdsOverride, employeeOverride, sourceEmployeeOverride) {
@@ -1518,10 +1519,10 @@ function App() {
 
     if (!targetEmployee || customerIdsToUpdate.length === 0 || !profile) {
       alert("Müşteri ve rep seç.");
-      return;
+      return false;
     }
 
-    if (moveToPool && !window.confirm(`${customerIdsToUpdate.length} müşteri havuza geri alınsın mı?`)) return;
+    if (moveToPool && !window.confirm(`${customerIdsToUpdate.length} müşteri havuza geri alınsın mı?`)) return false;
 
     const batchSize = 100;
     let processed = 0;
@@ -1548,7 +1549,7 @@ function App() {
     } catch (error) {
       alert(`Toplu işlem ${processed} müşteri sonrasında durdu: ${error.message || "Bağlantı hatası"}`);
       await loadCustomers();
-      return;
+      return false;
     }
 
     const idSet = new Set(customerIdsToUpdate);
@@ -1566,6 +1567,7 @@ function App() {
     setSelectedIds([]);
     setBulkEmployee("");
     showSystemToast(moveToPool ? `${processed} müşteri havuza alındı.` : `${processed} müşteri atandı.`);
+    return true;
   }
 
   async function shareCustomerNote({ customer, note, targetId }) {
@@ -2602,8 +2604,12 @@ function CustomerTable({
   const [genderFilter, setGenderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
+  const [hiddenAfterAssignIds, setHiddenAfterAssignIds] = useState([]);
   const pageSize = 100;
-  const searchedData = data.filter((customer) => customerMatchesSearch(customer, searchTerm));
+  const hiddenAfterAssignSet = useMemo(() => new Set(hiddenAfterAssignIds), [hiddenAfterAssignIds]);
+  const searchedData = data
+    .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
+    .filter((customer) => customerMatchesSearch(customer, searchTerm));
   const assigneeFilteredData = assigneeFilter === "all"
     ? searchedData
     : assigneeFilter === "pool"
@@ -2619,8 +2625,29 @@ function CustomerTable({
   const currentPage = Math.min(page, pageCount);
   const pageData = filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
+  function clearAssignmentHiding() {
+    setHiddenAfterAssignIds([]);
+  }
+
   function toggleSelected(id) {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  async function handleAssignCustomer(customer, employeeId) {
+    const assigned = await assignCustomer(customer.id, employeeId);
+    if (assigned && assigneeFilter === "all" && !customer.assigned_employee && employeeId) {
+      setHiddenAfterAssignIds((current) => current.includes(customer.id) ? current : [...current, customer.id]);
+    }
+  }
+
+  async function handleBulkAssignCustomers() {
+    const idsToHide = bulkEmployee && bulkEmployee !== "__pool__" && assigneeFilter === "all"
+      ? selectedIds
+      : [];
+    const assigned = await bulkAssignCustomers();
+    if (assigned && idsToHide.length > 0) {
+      setHiddenAfterAssignIds((current) => [...new Set([...current, ...idsToHide])]);
+    }
   }
 
   function renderPagination(position = "bottom") {
@@ -2658,12 +2685,13 @@ function CustomerTable({
           value={searchTerm}
           onChange={(event) => {
             setSearchTerm(event.target.value);
+            clearAssignmentHiding();
             setPage(1);
           }}
           style={{ ...searchInput, marginBottom: 0 }}
         />
         {canManage && (
-          <select value={assigneeFilter} onChange={(event) => { setAssigneeFilter(event.target.value); setPage(1); }} style={toolbarSelect}>
+          <select value={assigneeFilter} onChange={(event) => { setAssigneeFilter(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
             <option value="all">Tüm sorumlular</option>
             <option value="pool">Atanmamış müşteriler</option>
             {employees.map((employee) => (
@@ -2671,13 +2699,13 @@ function CustomerTable({
             ))}
           </select>
         )}
-        <select value={genderFilter} onChange={(event) => { setGenderFilter(event.target.value); setPage(1); }} style={toolbarSelect}>
+        <select value={genderFilter} onChange={(event) => { setGenderFilter(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
           <option value="all">Kadın / erkek: Tümü</option>
           <option value="female">Kadın (isim tahmini)</option>
           <option value="male">Erkek (isim tahmini)</option>
           <option value="unknown">Unisex isimler</option>
         </select>
-        <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }} style={toolbarSelect}>
+        <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
           <option value="all">Tüm durumlar</option>
           {[...CUSTOMER_STATUSES].map((status) => <option key={status} value={status}>{statusLabel(status)}</option>)}
         </select>
@@ -2726,7 +2754,7 @@ function CustomerTable({
               </option>
             ))}
           </select>
-          <button type="button" onClick={() => bulkAssignCustomers()} style={smallButton}>
+          <button type="button" onClick={handleBulkAssignCustomers} style={smallButton}>
             {bulkEmployee === "__pool__" ? "Seçilenleri Havuza Al" : "Seçilenleri Ata"}
           </button>
         </div>
@@ -2775,7 +2803,7 @@ function CustomerTable({
             <div>{formatDateTime(customer.appointment_date)}</div>
             <div>
               {canManage ? (
-                <select value={customer.assigned_employee || ""} onChange={(event) => assignCustomer(customer.id, event.target.value)} style={selectStyle}>
+                <select value={customer.assigned_employee || ""} onChange={(event) => handleAssignCustomer(customer, event.target.value)} style={selectStyle}>
                   <option value="">Havuzda</option>
                   {employees.map((employee) => (
                     <option key={employee.id} value={employee.id}>{employee.full_name || employee.email}</option>
