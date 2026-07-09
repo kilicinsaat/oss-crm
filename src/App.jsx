@@ -587,22 +587,6 @@ function App() {
           return;
         }
 
-        const restoredCustomers = [];
-        const pageSize = 1000;
-        for (let from = 0; ; from += pageSize) {
-          const { data, error } = await runWithRetry(() =>
-            supabase
-              .from("customers")
-              .select("*")
-              .order("created_at", { ascending: false })
-              .order("id", { ascending: false })
-              .range(from, from + pageSize - 1)
-          );
-          if (error) throw error;
-          restoredCustomers.push(...(data || []));
-          if (!data || data.length < pageSize) break;
-        }
-
         const { data: restoredUsers, error: usersError } = await runWithRetry(() =>
           supabase
             .from("profiles")
@@ -622,7 +606,6 @@ function App() {
           availability_status: userProfile.availability_status || "online",
         });
         setActivePage(userProfile.role === "employee" ? "today_work" : "dashboard");
-        setCustomers(restoredCustomers);
         setUsers(restoredUsers || []);
         await loadUserNotes({
           userId: userProfile.id,
@@ -630,6 +613,7 @@ function App() {
           setMyNotesLoading,
           setMyNotesError,
         });
+        loadCustomers();
       } catch (error) {
         if (mounted) console.error("Oturum geri yüklenemedi:", error);
       } finally {
@@ -843,6 +827,9 @@ function App() {
         }
 
         allCustomers.push(...(data || []));
+        if (from === 0 || allCustomers.length % 10000 === 0) {
+          setCustomers([...allCustomers]);
+        }
         if (!data || data.length < pageSize) break;
       }
 
@@ -906,13 +893,16 @@ function App() {
         availability_status: userProfile.availability_status || "online",
       });
       setActivePage(userProfile.role === "employee" ? "today_work" : "dashboard");
-      await loadUserNotes({
-        userId: userProfile.id,
-        setMyNotes,
-        setMyNotesLoading,
-        setMyNotesError,
-      });
-      await Promise.all([loadCustomers(), loadUsers()]);
+      await Promise.all([
+        loadUsers(),
+        loadUserNotes({
+          userId: userProfile.id,
+          setMyNotes,
+          setMyNotesLoading,
+          setMyNotesError,
+        }),
+      ]);
+      loadCustomers();
     } catch (error) {
       alert("Giriş sırasında bağlantı kurulamadı: " + (error.message || "Tekrar dene."));
     } finally {
@@ -2057,7 +2047,7 @@ function App() {
           </div>
         </header>
 
-        {dataLoading && <div style={syncNotice}>Veriler güncelleniyor, lütfen bekleyin.</div>}
+        {dataLoading && customers.length === 0 && <div style={syncNotice}>Müşteri listesi yükleniyor, lütfen bekleyin.</div>}
 
         {activePage === "dashboard" && (
           <>
