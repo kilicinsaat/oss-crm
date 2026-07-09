@@ -626,6 +626,8 @@ function App() {
     return () => {
       mounted = false;
     };
+  // Session restoration runs once on app boot; customer loading is intentionally kicked off after profile hydration.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -808,58 +810,60 @@ function App() {
 
   async function loadCustomers() {
     const pageSize = 1000;
-    const concurrency = 6;
+    const initialPages = 2;
     setDataLoading(true);
-    setCustomerLoadProgress({ loaded: 0, total: 0 });
+    setCustomerLoadProgress({ loaded: 0, total: null, done: false });
 
     try {
-      const { count, error: countError } = await runWithRetry(() =>
-        supabase
-          .from("customers")
-          .select("id", { count: "exact", head: true })
+      const pageResults = [];
+      let loaded = 0;
+
+      async function fetchCustomerPage(pageIndex) {
+        const from = pageIndex * pageSize;
+        const { data, error } = await runWithRetry(() =>
+          supabase
+            .from("customers")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .range(from, from + pageSize - 1)
+        );
+        if (error) throw error;
+        return data || [];
+      }
+
+      const firstPages = await Promise.all(
+        Array.from({ length: initialPages }, (_, pageIndex) => fetchCustomerPage(pageIndex))
       );
 
-      if (countError) {
-        alert("Müşteri sayısı alınamadı: " + countError.message);
+      firstPages.forEach((rows, pageIndex) => {
+        pageResults[pageIndex] = rows;
+        loaded += rows.length;
+      });
+      setCustomers(pageResults.flat());
+      setCustomerLoadProgress({ loaded, total: null, done: firstPages.some((rows) => rows.length < pageSize) });
+
+      if (firstPages.some((rows) => rows.length < pageSize)) {
         return;
       }
 
-      const total = count || 0;
-      const pageCount = Math.ceil(total / pageSize);
-      const pages = Array.from({ length: pageCount }, (_, index) => index);
-      const pageResults = new Array(pageCount);
-      let loaded = 0;
-      setCustomerLoadProgress({ loaded: 0, total });
-
-      for (let start = 0; start < pages.length; start += concurrency) {
-        const batch = pages.slice(start, start + concurrency);
-        const results = await Promise.all(batch.map(async (pageIndex) => {
-          const from = pageIndex * pageSize;
-          const { data, error } = await runWithRetry(() =>
-            supabase
-              .from("customers")
-              .select("*")
-              .order("created_at", { ascending: false })
-              .order("id", { ascending: false })
-              .range(from, from + pageSize - 1)
-          );
-          if (error) throw error;
-          return { pageIndex, rows: data || [] };
-        }));
-
-        results.forEach(({ pageIndex, rows }) => {
-          pageResults[pageIndex] = rows;
-          loaded += rows.length;
-        });
-        setCustomerLoadProgress({ loaded, total });
+      for (let pageIndex = initialPages; ; pageIndex += 1) {
+        const rows = await fetchCustomerPage(pageIndex);
+        pageResults[pageIndex] = rows;
+        loaded += rows.length;
+        if ((pageIndex + 1) % 5 === 0 || rows.length < pageSize) {
+          setCustomers(pageResults.flat());
+        }
+        setCustomerLoadProgress({ loaded, total: null, done: rows.length < pageSize });
+        await wait(0);
+        if (rows.length < pageSize) break;
       }
-
       setCustomers(pageResults.flat());
-    } catch (error) {
-      alert("Müşteriler yüklenemedi: " + (error.message || "Bağlantı hatası"));
+    } catch {
+      showSystemToast("Müşteri listesi arka planda kısmen yüklendi. Yenileme tekrar denenebilir.", "warning");
     } finally {
       setDataLoading(false);
-      setCustomerLoadProgress(null);
+      setCustomerLoadProgress((current) => current ? { ...current, done: true } : null);
     }
   }
 
@@ -2073,8 +2077,7 @@ function App() {
 
         {dataLoading && customerLoadProgress && (
           <div style={syncNotice}>
-            Müşteri listesi yükleniyor: {customerLoadProgress.loaded.toLocaleString("tr-TR")}
-            {customerLoadProgress.total ? ` / ${customerLoadProgress.total.toLocaleString("tr-TR")}` : ""} kayıt
+            Müşteri listesi arka planda yükleniyor: {customerLoadProgress.loaded.toLocaleString("tr-TR")} kayıt hazır
           </div>
         )}
 
