@@ -59,6 +59,9 @@ const brandRedSoft = "#fff1eb";
 const brandRedBorder = "rgba(226,68,7,0.24)";
 const appTextColor = brandRed;
 const mutedRedText = "#8a2a08";
+const IMPORTANT_CUSTOMER_STATUSES = ["assigned", "appointment", "contract_appointment", "callback"];
+const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"];
+const REMOTE_CUSTOMER_COUNT_MODE = "estimated";
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -514,6 +517,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
   const [customerLoadProgress, setCustomerLoadProgress] = useState(null);
+  const [customerDataVersion, setCustomerDataVersion] = useState(0);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
 
@@ -637,6 +641,50 @@ function App() {
   useEffect(() => {
     customersRef.current = customers;
   }, [customers]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
+
+    const isBoss = profile.role === "boss";
+    const channel = supabase.channel(`crm-customers-${profile.id}`);
+
+    function handleCustomerChange(payload) {
+      if (payload.eventType === "DELETE") {
+        removeCustomerRows(payload.old?.id);
+        setCustomerDataVersion((version) => version + 1);
+        return;
+      }
+
+      const customer = payload.new;
+      if (!customer?.id) return;
+
+      if (isBoss || customer.assigned_employee === profile.id) {
+        upsertCustomerRows(customer);
+        setCustomerDataVersion((version) => version + 1);
+        if (!isBoss && customer.assigned_employee === profile.id && customer.last_action_by !== profile.id) {
+          showSystemToast("Yeni mÃ¼ÅŸteri atandÄ±");
+        }
+      } else {
+        removeCustomerRows(customer.id);
+      }
+    }
+
+    if (isBoss) {
+      channel
+        .on("postgres_changes", { event: "UPDATE", schema: "public", table: "customers" }, handleCustomerChange)
+        .on("postgres_changes", { event: "DELETE", schema: "public", table: "customers" }, handleCustomerChange);
+    } else {
+      channel
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "customers", filter: `assigned_employee=eq.${profile.id}` }, handleCustomerChange)
+        .on("postgres_changes", { event: "UPDATE", schema: "public", table: "customers", filter: `assigned_employee=eq.${profile.id}` }, handleCustomerChange);
+    }
+
+    channel.subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [profile]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -798,6 +846,24 @@ function App() {
     toastTimerRef.current = setTimeout(() => setSystemToast(null), 2500);
   }
 
+  function upsertCustomerRows(rows) {
+    const cleanRows = (Array.isArray(rows) ? rows : [rows]).filter(Boolean);
+    if (cleanRows.length === 0) return;
+    setCustomers((current) => {
+      const customerMap = new Map(current.map((customer) => [String(customer.id), customer]));
+      cleanRows.forEach((customer) => customerMap.set(String(customer.id), customer));
+      return Array.from(customerMap.values()).sort((first, second) =>
+        new Date(second.created_at || 0) - new Date(first.created_at || 0)
+      );
+    });
+  }
+
+  function removeCustomerRows(ids) {
+    const idSet = new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean).map(String));
+    if (idSet.size === 0) return;
+    setCustomers((current) => current.filter((customer) => !idSet.has(String(customer.id))));
+  }
+
   async function enableMessageNotifications() {
     if (typeof Notification === "undefined") {
       showSystemToast("Bu tarayıcı masaüstü bildirimlerini desteklemiyor.", "warning");
@@ -811,8 +877,8 @@ function App() {
   async function loadCustomers() {
     const pageSize = 1000;
     const initialPages = 2;
-    const backgroundConcurrency = 6;
-    const priorityStatuses = ["appointment", "contract_appointment", "callback"];
+    const backgroundConcurrency = 2;
+    const priorityStatuses = IMPORTANT_CUSTOMER_STATUSES;
     const shouldPreloadFollowUps = ["employee", "manager"].includes(profile?.role);
     setDataLoading(true);
     setCustomerLoadProgress({ loaded: 0, total: null, done: false });
@@ -852,7 +918,7 @@ function App() {
               .from("customers")
               .select("*")
               .in("status", priorityStatuses)
-              .not("appointment_date", "is", null)
+              .order("assigned_at", { ascending: false })
               .order("appointment_date", { ascending: true })
               .order("created_at", { ascending: false })
               .range(from, from + pageSize - 1)
@@ -885,6 +951,10 @@ function App() {
       setCustomerLoadProgress({ loaded: initialCustomers.length, total: null, done: firstPages.some((rows) => rows.length < pageSize) });
 
       if (firstPages.some((rows) => rows.length < pageSize)) {
+        return;
+      }
+
+      if (profile?.role === "boss") {
         return;
       }
 
@@ -1161,6 +1231,7 @@ function App() {
     if (logError) {
       showSystemToast("Müşteri kaydedildi, ancak geçmiş yazılamadı.", "warning");
     }
+    setCustomerDataVersion((version) => version + 1);
     return true;
   }
 
@@ -1298,6 +1369,8 @@ function App() {
         await wait(25);
       }
 
+      setCustomerDataVersion((version) => version + 1);
+
       showSystemToast("Excel yüklendi");
       await loadCustomers();
     } catch (error) {
@@ -1369,7 +1442,8 @@ function App() {
       batch_page: "",
     });
 
-    if (data) setCustomers((current) => [data, ...current]);
+    upsertCustomerRows(data);
+    setCustomerDataVersion((version) => version + 1);
     showSystemToast("Müşteri eklendi");
   }
 
@@ -1533,17 +1607,26 @@ function App() {
   async function assignCustomer(customerId, employeeId) {
     if (!profile) return false;
     const moveToPool = !employeeId;
+    const assignedAt = moveToPool ? null : new Date().toISOString();
+    const currentCustomer = customersRef.current.find((customer) => String(customer.id) === String(customerId));
+    const nextStatus = moveToPool
+      ? "pool"
+      : currentCustomer?.status && currentCustomer.status !== "pool"
+        ? currentCustomer.status
+        : "assigned";
 
-    const { error } = await runWithRetry(() =>
+    const { data, error } = await runWithRetry(() =>
       supabase
         .from("customers")
         .update({
           assigned_employee: moveToPool ? null : employeeId,
-          status: moveToPool ? "pool" : "assigned",
-          assigned_at: moveToPool ? null : new Date().toISOString(),
+          status: nextStatus,
+          assigned_at: assignedAt,
           last_action_by: profile.id,
         })
         .eq("id", customerId)
+        .select("*")
+        .single()
     );
 
     if (error) {
@@ -1551,37 +1634,56 @@ function App() {
       return false;
     }
 
-    setCustomers((current) => current.map((customer) =>
-      customer.id === customerId
-        ? {
-            ...customer,
-            assigned_employee: moveToPool ? null : employeeId,
-            status: moveToPool ? "pool" : "assigned",
-            assigned_at: moveToPool ? null : new Date().toISOString(),
-            last_action_by: profile.id,
-          }
-        : customer
-    ));
+    upsertCustomerRows(data);
     if (selectedCustomer?.id === customerId) {
       setSelectedCustomer((current) => current ? {
         ...current,
-        assigned_employee: moveToPool ? null : employeeId,
-        status: moveToPool ? "pool" : "assigned",
-        assigned_at: moveToPool ? null : new Date().toISOString(),
-        last_action_by: profile.id,
+        ...data,
       } : current);
     }
 
     showSystemToast(moveToPool ? "Müşteri havuza alındı" : "Müşteri rep'e atandı");
+    setCustomerDataVersion((version) => version + 1);
     return true;
   }
 
+  async function fetchCustomerIdsByAssignee(employeeId) {
+    const pageSize = 1000;
+    const ids = [];
+
+    for (let pageIndex = 0; ; pageIndex += 1) {
+      const from = pageIndex * pageSize;
+      const { data, error } = await runWithRetry(() =>
+        supabase
+          .from("customers")
+          .select("id")
+          .eq("assigned_employee", employeeId)
+          .range(from, from + pageSize - 1)
+      );
+      if (error) throw error;
+
+      const rows = data || [];
+      ids.push(...rows.map((row) => row.id));
+      if (rows.length < pageSize) break;
+      await wait(0);
+    }
+
+    return ids;
+  }
+
   async function bulkAssignCustomers(customerIdsOverride, employeeOverride, sourceEmployeeOverride) {
-    const customerIdsToUpdate = sourceEmployeeOverride
-      ? customers.filter((customer) => customer.assigned_employee === sourceEmployeeOverride).map((customer) => customer.id)
-      : Array.isArray(customerIdsOverride) ? customerIdsOverride : selectedIds;
     const targetEmployee = typeof employeeOverride === "string" ? employeeOverride : bulkEmployee;
     const moveToPool = targetEmployee === "__pool__";
+    let customerIdsToUpdate = Array.isArray(customerIdsOverride) ? customerIdsOverride : selectedIds;
+
+    if (sourceEmployeeOverride) {
+      try {
+        customerIdsToUpdate = await fetchCustomerIdsByAssignee(sourceEmployeeOverride);
+      } catch (error) {
+        alert("Rep mÃ¼ÅŸterileri okunamadÄ±: " + (error.message || "BaÄŸlantÄ± hatasÄ±"));
+        return false;
+      }
+    }
 
     if (!targetEmployee || customerIdsToUpdate.length === 0 || !profile) {
       alert("Müşteri ve rep seç.");
@@ -1614,13 +1716,14 @@ function App() {
       }
     } catch (error) {
       alert(`Toplu işlem ${processed} müşteri sonrasında durdu: ${error.message || "Bağlantı hatası"}`);
+      setCustomerDataVersion((version) => version + 1);
       await loadCustomers();
       return false;
     }
 
-    const idSet = new Set(customerIdsToUpdate);
+    const idSet = new Set(customerIdsToUpdate.map(String));
     setCustomers((current) => current.map((customer) =>
-      idSet.has(customer.id)
+      idSet.has(String(customer.id))
         ? {
             ...customer,
             assigned_employee: moveToPool ? null : targetEmployee,
@@ -1632,6 +1735,7 @@ function App() {
     ));
     setSelectedIds([]);
     setBulkEmployee("");
+    setCustomerDataVersion((version) => version + 1);
     showSystemToast(moveToPool ? `${processed} müşteri havuza alındı.` : `${processed} müşteri atandı.`);
     return true;
   }
@@ -1947,6 +2051,13 @@ function App() {
   ];
   const dataStats = getDataStats(reportCustomers);
   const manualDuplicate = findDuplicateCustomer(customers, form.phone);
+  const ownCustomerRemoteScope = ["employee", "manager"].includes(profileRole) ? { fixedAssignee: profileId } : {};
+  const customerListRemoteScope = {
+    ...ownCustomerRemoteScope,
+    assignmentScope: customerFilter === "pool" ? "pool" : customerFilter === "assigned" ? "assigned" : "all",
+    approvedOnly: customerFilter === "approved",
+    paidOnly: customerFilter === "paid",
+  };
   const unreadMessageCount = profileId
     ? messages.filter((message) => message.recipient_id === profileId && !message.read_at).length
     : 0;
@@ -2228,6 +2339,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={customerListRemoteScope}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2246,6 +2359,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, orderByAssigned: true }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2264,6 +2379,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["assigned"], orderByAssigned: true }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2282,6 +2399,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["no_answer"] }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2300,6 +2419,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["appointment"], orderByAppointment: true }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2318,6 +2439,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["not_approved"] }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2336,6 +2459,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["wrong_number"] }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2356,6 +2481,8 @@ function App() {
             bulkAssignCustomers={bulkAssignCustomers}
             exportLabel="Excel'e Aktar"
             onExport={exportContractAppointments}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["contract_appointment"], orderByAppointment: true }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2374,6 +2501,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["callback"], orderByAppointment: true }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2392,6 +2521,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["paid"] }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2410,6 +2541,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ assignmentScope: "pool", fixedStatuses: ["pool"] }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2428,6 +2561,8 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
+            remoteScope={{ fixedStatuses: FOLLOW_UP_CUSTOMER_STATUSES, orderByAppointment: true }}
+            dataVersion={customerDataVersion}
           />
         )}
 
@@ -2668,6 +2803,8 @@ function CustomerTable({
   bulkAssignCustomers,
   exportLabel,
   onExport,
+  remoteScope,
+  dataVersion,
 }) {
   const canManage = profile.role === "boss" || profile.role === "manager";
   const canViewTc = profile.role !== "employee";
@@ -2676,8 +2813,100 @@ function CustomerTable({
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [hiddenAfterAssignIds, setHiddenAfterAssignIds] = useState([]);
+  const [remoteRows, setRemoteRows] = useState([]);
+  const [remoteTotal, setRemoteTotal] = useState(0);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState("");
   const pageSize = 100;
+  const isRemote = Boolean(remoteScope);
+  const remoteScopeKey = JSON.stringify(remoteScope || {});
+  const remoteScopeConfig = useMemo(() => JSON.parse(remoteScopeKey), [remoteScopeKey]);
   const hiddenAfterAssignSet = useMemo(() => new Set(hiddenAfterAssignIds), [hiddenAfterAssignIds]);
+
+  useEffect(() => {
+    if (!isRemote) return undefined;
+    let cancelled = false;
+
+    async function loadRemotePage() {
+      setRemoteLoading(true);
+      setRemoteError("");
+
+      let query = supabase
+        .from("customers")
+        .select("*", { count: REMOTE_CUSTOMER_COUNT_MODE });
+
+      if (remoteScopeConfig.fixedAssignee) query = query.eq("assigned_employee", remoteScopeConfig.fixedAssignee);
+      if (remoteScopeConfig.assignmentScope === "pool") query = query.is("assigned_employee", null);
+      if (remoteScopeConfig.assignmentScope === "assigned") query = query.not("assigned_employee", "is", null);
+      if (remoteScopeConfig.approvedOnly) query = query.eq("approved", true);
+      if (remoteScopeConfig.paidOnly) query = query.eq("payment_received", true);
+
+      if (Array.isArray(remoteScopeConfig.fixedStatuses) && remoteScopeConfig.fixedStatuses.length > 0) {
+        query = remoteScopeConfig.fixedStatuses.length === 1
+          ? query.eq("status", remoteScopeConfig.fixedStatuses[0])
+          : query.in("status", remoteScopeConfig.fixedStatuses);
+      }
+
+      if (canManage && !remoteScopeConfig.fixedAssignee) {
+        if (assigneeFilter === "pool") query = query.is("assigned_employee", null);
+        if (!["all", "pool"].includes(assigneeFilter)) query = query.eq("assigned_employee", assigneeFilter);
+      }
+
+      if (statusFilter !== "all") query = query.eq("status", statusFilter);
+
+      const cleanSearch = searchTerm.trim().replace(/[(),]/g, " ").slice(0, 80);
+      if (cleanSearch) {
+        const searchPattern = `%${cleanSearch}%`;
+        query = query.or([
+          `first_name.ilike.${searchPattern}`,
+          `last_name.ilike.${searchPattern}`,
+          `phone.ilike.${searchPattern}`,
+          `phone_2.ilike.${searchPattern}`,
+          `tc_no.ilike.${searchPattern}`,
+          `batch_name.ilike.${searchPattern}`,
+        ].join(","));
+      }
+
+      if (remoteScopeConfig.orderByAppointment) {
+        query = query
+          .order("appointment_date", { ascending: true, nullsFirst: false })
+          .order("created_at", { ascending: false });
+      } else if (remoteScopeConfig.orderByAssigned) {
+        query = query
+          .order("assigned_at", { ascending: false, nullsFirst: false })
+          .order("created_at", { ascending: false });
+      } else {
+        query = query
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false });
+      }
+
+      const from = (page - 1) * pageSize;
+      const { data: rows, error, count } = await runWithRetry(() => query.range(from, from + pageSize - 1), 2);
+
+      if (cancelled) return;
+      setRemoteLoading(false);
+
+      if (error) {
+        setRemoteRows([]);
+        setRemoteTotal(0);
+        setRemoteError(error.message || "MÃ¼ÅŸteriler yÃ¼klenemedi.");
+        return;
+      }
+
+      const visibleRows = genderFilter === "all"
+        ? rows || []
+        : (rows || []).filter((customer) => inferCustomerGender(customer) === genderFilter);
+      setRemoteRows(visibleRows);
+      setRemoteTotal(Number.isFinite(count) ? count : from + visibleRows.length);
+    }
+
+    loadRemotePage();
+    return () => {
+      cancelled = true;
+    };
+  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, searchTerm, dataVersion, canManage]);
+
   const searchedData = data
     .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
     .filter((customer) => customerMatchesSearch(customer, searchTerm));
@@ -2692,9 +2921,15 @@ function CustomerTable({
   const filteredData = statusFilter === "all"
     ? genderFilteredData
     : genderFilteredData.filter((customer) => customer.status === statusFilter);
-  const pageCount = Math.max(Math.ceil(filteredData.length / pageSize), 1);
+  const remoteVisibleRows = remoteRows.filter((customer) => !hiddenAfterAssignSet.has(customer.id));
+  const displayedTotal = isRemote ? remoteTotal : filteredData.length;
+  const pageCount = Math.max(Math.ceil(displayedTotal / pageSize), 1);
   const currentPage = Math.min(page, pageCount);
-  const pageData = filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const pageData = isRemote
+    ? remoteVisibleRows
+    : filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const exportRows = isRemote ? pageData : filteredData;
+  const hasDisplayedRows = pageData.length > 0;
 
   function clearAssignmentHiding() {
     setHiddenAfterAssignIds([]);
@@ -2741,9 +2976,9 @@ function CustomerTable({
         {onExport && (
           <button
             type="button"
-            disabled={filteredData.length === 0}
-            onClick={() => onExport(filteredData)}
-            style={{ ...exportExcelButton, opacity: filteredData.length === 0 ? 0.6 : 1 }}
+            disabled={exportRows.length === 0}
+            onClick={() => onExport(exportRows)}
+            style={{ ...exportExcelButton, opacity: exportRows.length === 0 ? 0.6 : 1 }}
           >
             {exportLabel || "Excel'e Aktar"}
           </button>
@@ -2783,13 +3018,16 @@ function CustomerTable({
       </div>
 
       <div style={tableSummary}>
-        <span>{filteredData.length.toLocaleString("tr-TR")} müşteri</span>
+        <span>{displayedTotal.toLocaleString("tr-TR")} müşteri</span>
         <span>{currentPage}. sayfa / {pageCount}</span>
       </div>
 
+      {remoteLoading && <div style={syncNotice}>Müşteriler yükleniyor...</div>}
+      {remoteError && <div style={duplicateWarning}>{remoteError}</div>}
+
       {renderPagination("top")}
 
-      {canManage && !["all", "pool"].includes(assigneeFilter) && filteredData.length > 0 && (
+      {canManage && !["all", "pool"].includes(assigneeFilter) && displayedTotal > 0 && (
         <div style={releaseRepBar}>
           <span>Seçili Rep'in üzerindeki bütün müşterileri havuza geri alabilirsin.</span>
           <button
@@ -2884,6 +3122,10 @@ function CustomerTable({
             </div>
           </div>
         ))}
+
+        {!hasDisplayedRows && !remoteLoading && (
+          <div style={emptyTableState}>Bu filtrede müşteri yok.</div>
+        )}
       </div>
 
       {renderPagination("bottom")}
@@ -4109,6 +4351,7 @@ const cleanupButtons = { display: "flex", flexWrap: "wrap", gap: 8 };
 const cleanInvalidButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(251,191,36,0.55)", background: "rgba(180,83,9,0.38)", color: "#fde68a", cursor: "pointer", fontWeight: 700 };
 const deleteAllButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(252,165,165,0.6)", background: "rgba(127,29,29,0.56)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
 const tableWrapper = { width: "100%", overflowX: "auto", background: "#ffffff", borderRadius: 14, border: `1px solid ${brandRedBorder}` };
+const emptyTableState = { minWidth: 850, padding: 18, color: mutedRedText, background: "#ffffff", borderTop: `1px solid ${brandRedBorder}`, fontWeight: 700 };
 const tableHeader = {
   display: "grid",
   gridTemplateColumns: "52px minmax(180px, 1.4fr) 78px minmax(110px, 0.9fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(130px, 1fr) minmax(135px, 1fr) minmax(130px, 1fr)",
