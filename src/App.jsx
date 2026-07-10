@@ -1206,12 +1206,16 @@ function App() {
 
   async function updateCustomer(customerId, updates) {
     if (!profile) return false;
-    const targetCustomer = selectedCustomer?.id === customerId
+    const targetCustomer = selectedCustomer && String(selectedCustomer.id) === String(customerId)
       ? selectedCustomer
       : customers.find((customer) => String(customer.id) === String(customerId));
-    const customerIdsToUpdate = updates.status
+    const customerIdsToUpdate = [...new Set((updates.status
       ? getRelatedCustomerIds(targetCustomer || customerId)
-      : [customerId];
+      : [customerId]).filter(Boolean))];
+    if (customerIdsToUpdate.length === 0) {
+      alert("Musteri guncellenemedi: secili musteri id bulunamadi.");
+      return false;
+    }
     const updateIdSet = new Set(customerIdsToUpdate.map(String));
     const beforeStatus = targetCustomer?.status || null;
     const becamePaid = updates.status === "paid" && beforeStatus !== "paid";
@@ -1314,21 +1318,35 @@ function App() {
     const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
     const customer = typeof customerOrId === "object"
       ? customerOrId
-      : customers.find((item) => item.id === customerId);
+      : customers.find((item) => String(item.id) === String(customerId));
 
-    if (!customer) return customerId ? [customerId] : [];
+    const relatedIds = [];
+    const seenIds = new Set();
+    function addRelatedId(id) {
+      if (id === null || id === undefined || id === "") return;
+      const key = String(id);
+      if (seenIds.has(key)) return;
+      seenIds.add(key);
+      relatedIds.push(id);
+    }
+
+    addRelatedId(customerId);
+    if (!customer) return relatedIds;
 
     const phones = [customer.phone, customer.phone_2].map(normalizePhone).filter(Boolean);
-    const relatedIds = customers
-      .filter((item) => {
-        if (item.id === customer.id) return true;
-        const itemPhones = [item.phone, item.phone_2].map(normalizePhone).filter(Boolean);
-        return phones.some((phone) => itemPhones.includes(phone));
-      })
-      .map((item) => item.id);
+    customers.forEach((item) => {
+      if (!item?.id) return;
+      if (String(item.id) === String(customer.id)) {
+        addRelatedId(item.id);
+        return;
+      }
+      const itemPhones = [item.phone, item.phone_2].map(normalizePhone).filter(Boolean);
+      if (phones.some((phone) => itemPhones.includes(phone))) addRelatedId(item.id);
+    });
 
-    return [...new Set(relatedIds)];
+    return relatedIds;
   }
+
   async function loadCustomerLogs(customerOrId) {
     const requestId = customerLogsRequestRef.current + 1;
     customerLogsRequestRef.current = requestId;
