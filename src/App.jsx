@@ -1155,19 +1155,20 @@ function App() {
     if (!profile) return false;
     const targetCustomer = selectedCustomer?.id === customerId
       ? selectedCustomer
-      : customers.find((customer) => customer.id === customerId);
+      : customers.find((customer) => String(customer.id) === String(customerId));
     const customerIdsToUpdate = updates.status
       ? getRelatedCustomerIds(targetCustomer || customerId)
       : [customerId];
-    const updateIdSet = new Set(customerIdsToUpdate);
+    const updateIdSet = new Set(customerIdsToUpdate.map(String));
     const beforeStatus = targetCustomer?.status || null;
     const becamePaid = updates.status === "paid" && beforeStatus !== "paid";
 
-    const { error } = await runWithRetry(() =>
+    const { data: updatedCustomers, error } = await runWithRetry(() =>
       supabase
         .from("customers")
         .update({ ...updates, last_action_by: profile.id })
         .in("id", customerIdsToUpdate)
+        .select("*")
     );
 
     if (error) {
@@ -1180,14 +1181,19 @@ function App() {
       return false;
     }
 
+    if (!updatedCustomers?.length) {
+      alert("Müşteri güncellenemedi: kayıt bulunamadı veya bu işlem için yetki yok.");
+      return false;
+    }
+
     let logError;
     const logRows = customerIdsToUpdate.map((id) => {
-      const beforeCustomer = customers.find((customer) => customer.id === id) || (targetCustomer?.id === id ? targetCustomer : null);
+      const beforeCustomer = customers.find((customer) => String(customer.id) === String(id)) || (String(targetCustomer?.id) === String(id) ? targetCustomer : null);
       return {
         customer_id: id,
         user_id: profile.id,
         old_status: beforeCustomer?.status || null,
-        new_status: updates.status || null,
+        new_status: updates.status || beforeCustomer?.status || null,
         note: updates.info_note || "",
       };
     });
@@ -1200,15 +1206,14 @@ function App() {
       logError = requestError;
     }
 
+    const updatedCustomerMap = new Map(updatedCustomers.map((customer) => [String(customer.id), customer]));
     setCustomers((current) => current.map((customer) =>
-      updateIdSet.has(customer.id)
-        ? { ...customer, ...updates, last_action_by: profile.id }
-        : customer
+      updatedCustomerMap.get(String(customer.id)) || customer
     ));
-    setSelectedIds((current) => current.filter((id) => !updateIdSet.has(id)));
+    setSelectedIds((current) => current.filter((id) => !updateIdSet.has(String(id))));
     setSelectedCustomer((current) => {
-      if (!current || !updateIdSet.has(current.id)) return current;
-      return { ...current, ...updates, last_action_by: profile.id };
+      if (!current || !updateIdSet.has(String(current.id))) return current;
+      return updatedCustomerMap.get(String(current.id)) || { ...current, ...updates, last_action_by: profile.id };
     });
 
     if (!logError) {
