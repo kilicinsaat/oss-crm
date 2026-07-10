@@ -812,12 +812,22 @@ function App() {
     const pageSize = 1000;
     const initialPages = 2;
     const backgroundConcurrency = 6;
+    const priorityStatuses = ["appointment", "contract_appointment", "callback"];
+    const shouldPreloadFollowUps = ["employee", "manager"].includes(profile?.role);
     setDataLoading(true);
     setCustomerLoadProgress({ loaded: 0, total: null, done: false });
 
     try {
       const pageResults = [];
-      let loaded = 0;
+      let priorityCustomers = [];
+
+      function mergeCustomerRows(rowGroups) {
+        const customerMap = new Map();
+        rowGroups.flat().forEach((customer) => {
+          if (customer?.id) customerMap.set(String(customer.id), customer);
+        });
+        return Array.from(customerMap.values());
+      }
 
       async function fetchCustomerPage(pageIndex) {
         const from = pageIndex * pageSize;
@@ -833,16 +843,46 @@ function App() {
         return data || [];
       }
 
+      async function fetchPriorityFollowUps() {
+        const priorityRows = [];
+        for (let pageIndex = 0; ; pageIndex += 1) {
+          const from = pageIndex * pageSize;
+          const { data, error } = await runWithRetry(() =>
+            supabase
+              .from("customers")
+              .select("*")
+              .in("status", priorityStatuses)
+              .not("appointment_date", "is", null)
+              .order("appointment_date", { ascending: true })
+              .order("created_at", { ascending: false })
+              .range(from, from + pageSize - 1)
+          );
+          if (error) throw error;
+          const rows = data || [];
+          priorityRows.push(...rows);
+          if (rows.length < pageSize) break;
+        }
+        return priorityRows;
+      }
+
+      if (shouldPreloadFollowUps) {
+        priorityCustomers = await fetchPriorityFollowUps();
+        if (priorityCustomers.length) {
+          setCustomers(priorityCustomers);
+          setCustomerLoadProgress({ loaded: priorityCustomers.length, total: null, done: false });
+        }
+      }
+
       const firstPages = await Promise.all(
         Array.from({ length: initialPages }, (_, pageIndex) => fetchCustomerPage(pageIndex))
       );
 
       firstPages.forEach((rows, pageIndex) => {
         pageResults[pageIndex] = rows;
-        loaded += rows.length;
       });
-      setCustomers(pageResults.flat());
-      setCustomerLoadProgress({ loaded, total: null, done: firstPages.some((rows) => rows.length < pageSize) });
+      const initialCustomers = mergeCustomerRows([priorityCustomers, pageResults.flat()]);
+      setCustomers(initialCustomers);
+      setCustomerLoadProgress({ loaded: initialCustomers.length, total: null, done: firstPages.some((rows) => rows.length < pageSize) });
 
       if (firstPages.some((rows) => rows.length < pageSize)) {
         return;
@@ -858,15 +898,15 @@ function App() {
         let reachedEnd = false;
         results.forEach(({ pageIndex: resultPageIndex, rows }) => {
           pageResults[resultPageIndex] = rows;
-          loaded += rows.length;
           if (rows.length < pageSize) reachedEnd = true;
         });
-        setCustomers(pageResults.flat());
-        setCustomerLoadProgress({ loaded, total: null, done: reachedEnd });
+        const mergedCustomers = mergeCustomerRows([priorityCustomers, pageResults.flat()]);
+        setCustomers(mergedCustomers);
+        setCustomerLoadProgress({ loaded: mergedCustomers.length, total: null, done: reachedEnd });
         await wait(0);
         if (reachedEnd) break;
       }
-      setCustomers(pageResults.flat());
+      setCustomers(mergeCustomerRows([priorityCustomers, pageResults.flat()]));
     } catch {
       showSystemToast("Müşteri listesi arka planda kısmen yüklendi. Yenileme tekrar denenebilir.", "warning");
     } finally {
