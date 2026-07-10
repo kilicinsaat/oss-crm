@@ -62,6 +62,8 @@ const mutedRedText = "#8a2a08";
 const IMPORTANT_CUSTOMER_STATUSES = ["assigned", "appointment", "contract_appointment", "callback"];
 const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"];
 const REMOTE_CUSTOMER_COUNT_MODE = "estimated";
+const APP_VERSION_CHECK_INTERVAL = 60_000;
+const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -566,6 +568,57 @@ function App() {
   const usersRef = useRef([]);
   const customersRef = useRef([]);
   const [saleCelebration, setSaleCelebration] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let currentVersion = "";
+
+    try {
+      currentVersion = window.sessionStorage.getItem(APP_VERSION_STORAGE_KEY) || "";
+    } catch {
+      currentVersion = "";
+    }
+
+    async function checkAppVersion() {
+      try {
+        const response = await fetch(`/app-version.json?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+
+        const data = await response.json();
+        const nextVersion = data?.version || data?.commit;
+        if (cancelled || !nextVersion) return;
+
+        if (!currentVersion) {
+          currentVersion = nextVersion;
+          window.sessionStorage.setItem(APP_VERSION_STORAGE_KEY, nextVersion);
+          return;
+        }
+
+        if (currentVersion !== nextVersion) {
+          window.sessionStorage.setItem(APP_VERSION_STORAGE_KEY, nextVersion);
+          window.location.reload();
+        }
+      } catch {
+        // Version checks are best effort; the CRM should keep working if the file is unavailable.
+      }
+    }
+
+    function checkWhenVisible() {
+      if (document.visibilityState === "visible") checkAppVersion();
+    }
+
+    checkAppVersion();
+    const timer = window.setInterval(checkAppVersion, APP_VERSION_CHECK_INTERVAL);
+    window.addEventListener("focus", checkAppVersion);
+    document.addEventListener("visibilitychange", checkWhenVisible);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkAppVersion);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
