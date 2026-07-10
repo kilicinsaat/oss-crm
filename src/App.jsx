@@ -1216,12 +1216,11 @@ function App() {
     const beforeStatus = targetCustomer?.status || null;
     const becamePaid = updates.status === "paid" && beforeStatus !== "paid";
 
-    const { data: updatedCustomers, error } = await runWithRetry(() =>
+    const { count: updatedCount, error } = await runWithRetry(() =>
       supabase
         .from("customers")
-        .update({ ...updates, last_action_by: profile.id })
+        .update({ ...updates, last_action_by: profile.id }, { count: "exact" })
         .in("id", customerIdsToUpdate)
-        .select("*")
     );
 
     if (error) {
@@ -1229,15 +1228,43 @@ function App() {
         || error.message?.includes("invalid input value for enum")
         || error.message?.includes("customers_status_check");
       alert(statusRuleError
-        ? "Supabase müşteri durumlarınız güncel değil. SQL Editor'da CUSTOMER_STATUS_UPGRADE.sql dosyasını bir kez çalıştır."
-        : "Müşteri güncellenemedi: " + error.message);
+        ? "Supabase musteri durumlari guncel degil. SQL Editor'da CUSTOMER_STATUS_UPGRADE.sql dosyasini bir kez calistir."
+        : "Musteri guncellenemedi: " + error.message);
       return false;
     }
 
-    if (!updatedCustomers?.length) {
-      alert("Müşteri güncellenemedi: kayıt bulunamadı veya bu işlem için yetki yok.");
+    if (updatedCount === 0) {
+      alert("Musteri guncellenemedi: kayit bulunamadi veya bu islem icin yetki yok.");
       return false;
     }
+
+    const { data: updatedCustomers } = await runWithRetry(() =>
+      supabase
+        .from("customers")
+        .select("*")
+        .in("id", customerIdsToUpdate)
+    );
+
+    const refreshedCustomers = updatedCustomers?.length
+      ? updatedCustomers
+      : customerIdsToUpdate.map((id) => {
+          const currentCustomer = customers.find((customer) => String(customer.id) === String(id))
+            || (String(targetCustomer?.id) === String(id) ? targetCustomer : null);
+          return currentCustomer
+            ? { ...currentCustomer, ...updates, last_action_by: profile.id }
+            : null;
+        }).filter(Boolean);
+
+    const updatedCustomerMap = new Map(refreshedCustomers.map((customer) => [String(customer.id), customer]));
+
+    setCustomers((current) => current.map((customer) =>
+      updatedCustomerMap.get(String(customer.id)) || customer
+    ));
+    setSelectedIds((current) => current.filter((id) => !updateIdSet.has(String(id))));
+    setSelectedCustomer((current) => {
+      if (!current || !updateIdSet.has(String(current.id))) return current;
+      return updatedCustomerMap.get(String(current.id)) || { ...current, ...updates, last_action_by: profile.id };
+    });
 
     let logError;
     const logRows = customerIdsToUpdate.map((id) => {
@@ -1259,16 +1286,6 @@ function App() {
       logError = requestError;
     }
 
-    const updatedCustomerMap = new Map(updatedCustomers.map((customer) => [String(customer.id), customer]));
-    setCustomers((current) => current.map((customer) =>
-      updatedCustomerMap.get(String(customer.id)) || customer
-    ));
-    setSelectedIds((current) => current.filter((id) => !updateIdSet.has(String(id))));
-    setSelectedCustomer((current) => {
-      if (!current || !updateIdSet.has(String(current.id))) return current;
-      return updatedCustomerMap.get(String(current.id)) || { ...current, ...updates, last_action_by: profile.id };
-    });
-
     if (!logError) {
       const createdAt = new Date().toISOString();
       const visibleLogRows = logRows.map((row, index) => ({
@@ -1281,13 +1298,13 @@ function App() {
 
     if (becamePaid) {
       setSaleCelebration({
-        name: `${selectedCustomer?.first_name || ""} ${selectedCustomer?.last_name || ""}`.trim() || "Müşteri",
+        name: `${selectedCustomer?.first_name || ""} ${selectedCustomer?.last_name || ""}`.trim() || "Musteri",
       });
     }
 
     showSystemToast("Kaydedildi");
     if (logError) {
-      showSystemToast("Müşteri kaydedildi, ancak geçmiş yazılamadı.", "warning");
+      showSystemToast("Musteri kaydedildi, ancak gecmis yazilamadi.", "warning");
     }
     setCustomerDataVersion((version) => version + 1);
     return true;
@@ -1312,7 +1329,6 @@ function App() {
 
     return [...new Set(relatedIds)];
   }
-
   async function loadCustomerLogs(customerOrId) {
     const requestId = customerLogsRequestRef.current + 1;
     customerLogsRequestRef.current = requestId;
