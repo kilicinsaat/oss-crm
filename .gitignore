@@ -13,6 +13,7 @@ dist-ssr
 *.local
 secret.txt
 call-bridge/**/secret.txt
+.codex-remote-attachments/
 
 # Editor directories and files
 .vscode/*

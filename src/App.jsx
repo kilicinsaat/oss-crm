@@ -64,8 +64,68 @@ const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contra
 const REMOTE_CUSTOMER_COUNT_MODE = "estimated";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
 const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
+const SESSION_STARTED_AT_KEY = "oss-crm-session-started-at";
+const SESSION_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+const SESSION_CHECK_INTERVAL = 60_000;
+const CUSTOMER_PRELOAD_PAGE_SIZE = 1000;
+const INITIAL_CUSTOMER_PAGES = 1;
+const MAX_PRIORITY_PRELOAD_PAGES = 1;
+const SEARCH_DEBOUNCE_MS = 300;
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function readSessionStartedAt() {
+  try {
+    const value = window.sessionStorage.getItem(SESSION_STARTED_AT_KEY);
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  } catch {
+    return null;
+  }
+}
+
+function markSessionStarted() {
+  try {
+    window.sessionStorage.setItem(SESSION_STARTED_AT_KEY, String(Date.now()));
+  } catch {
+    // Session duration tracking is best effort when storage is blocked.
+  }
+}
+
+function clearSessionStarted() {
+  try {
+    window.sessionStorage.removeItem(SESSION_STARTED_AT_KEY);
+  } catch {
+    // Best effort cleanup.
+  }
+}
+
+function clearLegacyLocalAuthStorage() {
+  try {
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith("sb-") && key.includes("auth-token"))
+      .forEach((key) => window.localStorage.removeItem(key));
+  } catch {
+    // Old persistent auth cleanup is best effort.
+  }
+}
+
+function isSessionTooOld() {
+  const startedAt = readSessionStartedAt();
+  if (!startedAt) return true;
+  return Date.now() - startedAt > SESSION_MAX_AGE_MS;
+}
+
+function useDebouncedValue(value, delay) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedValue(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [value, delay]);
+
+  return debouncedValue;
+}
 
 async function runWithRetry(operation, attempts = 3) {
   let lastError;
@@ -630,10 +690,18 @@ function App() {
       }
 
       try {
+        clearLegacyLocalAuthStorage();
         const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) throw sessionError;
 
-        const sessionUser = sessionData.session?.user;
+        const session = sessionData.session;
+        if (session && isSessionTooOld()) {
+          await supabase.auth.signOut();
+          clearSessionStarted();
+          return;
+        }
+
+        const sessionUser = session?.user;
         if (!sessionUser) return;
 
         const { data: userProfile, error: profileError } = await runWithRetry(() =>
@@ -642,6 +710,7 @@ function App() {
 
         if (profileError || !userProfile || userProfile.is_active === false) {
           await supabase.auth.signOut();
+          clearSessionStarted();
           return;
         }
 
@@ -671,7 +740,7 @@ function App() {
           setMyNotesLoading,
           setMyNotesError,
         });
-        loadCustomers();
+        loadCustomers(userProfile);
       } catch (error) {
         if (mounted) console.error("Oturum geri yüklenemedi:", error);
       } finally {
@@ -686,6 +755,32 @@ function App() {
   // Session restoration runs once on app boot; customer loading is intentionally kicked off after profile hydration.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!profile || supabaseConfigMissing) return undefined;
+    let cancelled = false;
+
+    async function enforceSessionAge() {
+      if (!isSessionTooOld()) return;
+      await supabase.auth.signOut();
+      clearSessionStarted();
+      clearLegacyLocalAuthStorage();
+      if (cancelled) return;
+      resetAuthenticatedState();
+      showSystemToast("Oturum suresi doldu. Lutfen tekrar giris yap.", "warning");
+    }
+
+    const timer = window.setInterval(enforceSessionAge, SESSION_CHECK_INTERVAL);
+    window.addEventListener("focus", enforceSessionAge);
+    document.addEventListener("visibilitychange", enforceSessionAge);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", enforceSessionAge);
+      document.removeEventListener("visibilitychange", enforceSessionAge);
+    };
+  }, [profile]);
 
   useEffect(() => {
     usersRef.current = users;
@@ -899,6 +994,26 @@ function App() {
     toastTimerRef.current = setTimeout(() => setSystemToast(null), 2500);
   }
 
+  function resetAuthenticatedState() {
+    setProfile(null);
+    setCustomers([]);
+    setUsers([]);
+    setCustomerLogs([]);
+    setCustomerLogsLoading(false);
+    setCustomerCalls([]);
+    setCustomerCallsLoading(false);
+    setSelectedCustomer(null);
+    setSelectedIds([]);
+    setBulkEmployee("");
+    setMessages([]);
+    setMessageNotices([]);
+    setMyNotes([]);
+    setActivePage("dashboard");
+    setCustomerFilter("all");
+    setDataLoading(false);
+    setCustomerLoadProgress(null);
+  }
+
   function upsertCustomerRows(rows) {
     const cleanRows = (Array.isArray(rows) ? rows : [rows]).filter(Boolean);
     if (cleanRows.length === 0) return;
@@ -927,12 +1042,11 @@ function App() {
     showSystemToast(permission === "granted" ? "Mesaj bildirimleri açıldı" : "Bildirim izni verilmedi", permission === "granted" ? "success" : "warning");
   }
 
-  async function loadCustomers() {
-    const pageSize = 1000;
-    const initialPages = 2;
-    const backgroundConcurrency = 2;
+  async function loadCustomers(activeProfile = profile) {
+    const pageSize = CUSTOMER_PRELOAD_PAGE_SIZE;
+    const initialPages = INITIAL_CUSTOMER_PAGES;
     const priorityStatuses = IMPORTANT_CUSTOMER_STATUSES;
-    const shouldPreloadFollowUps = ["employee", "manager"].includes(profile?.role);
+    const shouldPreloadFollowUps = ["employee", "manager"].includes(activeProfile?.role);
     setDataLoading(true);
     setCustomerLoadProgress({ loaded: 0, total: null, done: false });
 
@@ -964,7 +1078,7 @@ function App() {
 
       async function fetchPriorityFollowUps() {
         const priorityRows = [];
-        for (let pageIndex = 0; ; pageIndex += 1) {
+        for (let pageIndex = 0; pageIndex < MAX_PRIORITY_PRELOAD_PAGES; pageIndex += 1) {
           const from = pageIndex * pageSize;
           const { data, error } = await runWithRetry(() =>
             supabase
@@ -1003,33 +1117,6 @@ function App() {
       setCustomers(initialCustomers);
       setCustomerLoadProgress({ loaded: initialCustomers.length, total: null, done: firstPages.some((rows) => rows.length < pageSize) });
 
-      if (firstPages.some((rows) => rows.length < pageSize)) {
-        return;
-      }
-
-      if (profile?.role === "boss") {
-        return;
-      }
-
-      for (let pageIndex = initialPages; ; pageIndex += backgroundConcurrency) {
-        const pageIndexes = Array.from({ length: backgroundConcurrency }, (_, offset) => pageIndex + offset);
-        const results = await Promise.all(pageIndexes.map(async (targetPageIndex) => ({
-          pageIndex: targetPageIndex,
-          rows: await fetchCustomerPage(targetPageIndex),
-        })));
-
-        let reachedEnd = false;
-        results.forEach(({ pageIndex: resultPageIndex, rows }) => {
-          pageResults[resultPageIndex] = rows;
-          if (rows.length < pageSize) reachedEnd = true;
-        });
-        const mergedCustomers = mergeCustomerRows([priorityCustomers, pageResults.flat()]);
-        setCustomers(mergedCustomers);
-        setCustomerLoadProgress({ loaded: mergedCustomers.length, total: null, done: reachedEnd });
-        await wait(0);
-        if (reachedEnd) break;
-      }
-      setCustomers(mergeCustomerRows([priorityCustomers, pageResults.flat()]));
     } catch {
       showSystemToast("Müşteri listesi arka planda kısmen yüklendi. Yenileme tekrar denenebilir.", "warning");
     } finally {
@@ -1080,10 +1167,13 @@ function App() {
 
       if (profileError || !userProfile || userProfile.is_active === false) {
         await supabase.auth.signOut();
+        clearSessionStarted();
         alert(userProfile?.is_active === false ? "Bu kullanıcı hesabı pasif durumda." : "Profil bulunamadı.");
         return;
       }
 
+      markSessionStarted();
+      clearLegacyLocalAuthStorage();
       setProfile(userProfile);
       setProfileForm({
         full_name: userProfile.full_name || "",
@@ -1101,7 +1191,7 @@ function App() {
           setMyNotesError,
         }),
       ]);
-      loadCustomers();
+      loadCustomers(userProfile);
     } catch (error) {
       alert("Giriş sırasında bağlantı kurulamadı: " + (error.message || "Tekrar dene."));
     } finally {
@@ -1115,15 +1205,9 @@ function App() {
       alert("Çıkış yapılamadı: " + error.message);
       return;
     }
-    setProfile(null);
-    setCustomers([]);
-    setUsers([]);
-    setCustomerLogs([]);
-    setCustomerLogsLoading(false);
-    setSelectedIds([]);
-    setMessages([]);
-    setMyNotes([]);
-    setActivePage("dashboard");
+    clearSessionStarted();
+    clearLegacyLocalAuthStorage();
+    resetAuthenticatedState();
   }
 
   async function saveOwnProfile(event) {
@@ -2914,6 +2998,7 @@ function CustomerTable({
   const remoteScopeKey = JSON.stringify(remoteScope || {});
   const remoteScopeConfig = useMemo(() => JSON.parse(remoteScopeKey), [remoteScopeKey]);
   const hiddenAfterAssignSet = useMemo(() => new Set(hiddenAfterAssignIds), [hiddenAfterAssignIds]);
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, SEARCH_DEBOUNCE_MS);
 
   useEffect(() => {
     if (!isRemote) return undefined;
@@ -2946,7 +3031,7 @@ function CustomerTable({
 
       if (statusFilter !== "all") query = query.eq("status", statusFilter);
 
-      const cleanSearch = searchTerm.trim().replace(/[(),]/g, " ").slice(0, 80);
+      const cleanSearch = debouncedSearchTerm.trim().replace(/[(),]/g, " ").slice(0, 80);
       if (cleanSearch) {
         const searchPattern = `%${cleanSearch}%`;
         query = query.or([
@@ -2997,7 +3082,7 @@ function CustomerTable({
     return () => {
       cancelled = true;
     };
-  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, searchTerm, dataVersion, canManage]);
+  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, debouncedSearchTerm, dataVersion, canManage]);
 
   const searchedData = data
     .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
