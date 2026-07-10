@@ -811,6 +811,7 @@ function App() {
   async function loadCustomers() {
     const pageSize = 1000;
     const initialPages = 2;
+    const backgroundConcurrency = 6;
     setDataLoading(true);
     setCustomerLoadProgress({ loaded: 0, total: null, done: false });
 
@@ -847,16 +848,23 @@ function App() {
         return;
       }
 
-      for (let pageIndex = initialPages; ; pageIndex += 1) {
-        const rows = await fetchCustomerPage(pageIndex);
-        pageResults[pageIndex] = rows;
-        loaded += rows.length;
-        if ((pageIndex + 1) % 5 === 0 || rows.length < pageSize) {
-          setCustomers(pageResults.flat());
-        }
-        setCustomerLoadProgress({ loaded, total: null, done: rows.length < pageSize });
+      for (let pageIndex = initialPages; ; pageIndex += backgroundConcurrency) {
+        const pageIndexes = Array.from({ length: backgroundConcurrency }, (_, offset) => pageIndex + offset);
+        const results = await Promise.all(pageIndexes.map(async (targetPageIndex) => ({
+          pageIndex: targetPageIndex,
+          rows: await fetchCustomerPage(targetPageIndex),
+        })));
+
+        let reachedEnd = false;
+        results.forEach(({ pageIndex: resultPageIndex, rows }) => {
+          pageResults[resultPageIndex] = rows;
+          loaded += rows.length;
+          if (rows.length < pageSize) reachedEnd = true;
+        });
+        setCustomers(pageResults.flat());
+        setCustomerLoadProgress({ loaded, total: null, done: reachedEnd });
         await wait(0);
-        if (rows.length < pageSize) break;
+        if (reachedEnd) break;
       }
       setCustomers(pageResults.flat());
     } catch {
@@ -1846,6 +1854,7 @@ function App() {
   const profileId = profile?.id || "";
   const profileFullName = profile?.full_name || "";
   const profileEmail = profile?.email || "";
+  const customersStillLoading = dataLoading && !customerLoadProgress?.done;
   const employees = users.filter((user) => ["employee", "manager"].includes(user.role));
   const managerCustomers = profileRole === "manager"
     ? customers.filter((customer) => customer.assigned_employee === profileId)
@@ -2077,17 +2086,17 @@ function App() {
 
         {dataLoading && customerLoadProgress && (
           <div style={syncNotice}>
-            Müşteri listesi arka planda yükleniyor: {customerLoadProgress.loaded.toLocaleString("tr-TR")} kayıt hazır
+            Müşteri listesi arka planda yükleniyor: {customerLoadProgress.loaded.toLocaleString("tr-TR")} kayıt hazır. Rakamlar yüklenen kayıtlar üzerinden hesaplanıyor.
           </div>
         )}
 
         {activePage === "dashboard" && (
           <>
             <div style={statsGrid}>
-              <ClickStat tone="total" title={profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={completeCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
+              <ClickStat tone="total" title={customersStillLoading ? "Yüklenen Müşteri" : profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={completeCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
               {profile.role === "employee" && <ClickStat tone="new" title="Yeni Gelenler" value={newIncomingCustomers.length} onClick={() => { setActivePage("rep_new"); }} />}
               {profile.role === "boss" && <ClickStat tone="new" title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
-              <ClickStat tone="assigned" title="Atanmış" value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
+              <ClickStat tone="assigned" title={customersStillLoading ? "Yüklenen Atanmış" : "Atanmış"} value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
               <ClickStat tone="approved" title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
               <ClickStat tone="paid" title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
             </div>
