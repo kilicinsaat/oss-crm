@@ -61,7 +61,8 @@ const appTextColor = brandRed;
 const mutedRedText = "#8a2a08";
 const IMPORTANT_CUSTOMER_STATUSES = ["assigned", "appointment", "contract_appointment", "callback"];
 const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"];
-const REMOTE_CUSTOMER_COUNT_MODE = "estimated";
+const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
+const REMOTE_CUSTOMER_COUNT_MODE = "exact";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
 const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
 const SESSION_STARTED_AT_KEY = "oss-crm-session-started-at";
@@ -177,6 +178,17 @@ async function loadUserNotes({
 function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
   return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+
+function normalizeCustomerSearch(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return "";
+  if (/^[\d\s()+-]+$/.test(rawValue)) return normalizePhone(rawValue);
+  return rawValue
+    .toLocaleLowerCase("tr-TR")
+    .replace(/[%_,]/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 80);
 }
 
 function isTurkishMobile(value) {
@@ -577,8 +589,7 @@ function App() {
   const [customerFilter, setCustomerFilter] = useState("all");
   const [activePage, setActivePage] = useState("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const [dataLoading, setDataLoading] = useState(false);
-  const [customerLoadProgress, setCustomerLoadProgress] = useState(null);
+  const [customerSummary, setCustomerSummary] = useState(null);
   const [customerDataVersion, setCustomerDataVersion] = useState(0);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
@@ -628,6 +639,7 @@ function App() {
   const usersRef = useRef([]);
   const customersRef = useRef([]);
   const [saleCelebration, setSaleCelebration] = useState(null);
+  const summaryProfileId = profile?.id || "";
 
   useEffect(() => {
     let cancelled = false;
@@ -789,6 +801,28 @@ function App() {
   useEffect(() => {
     customersRef.current = customers;
   }, [customers]);
+
+  useEffect(() => {
+    if (!summaryProfileId) return undefined;
+
+    let cancelled = false;
+
+    async function refreshCustomerSummary() {
+      const { data, error } = await runWithRetry(() => supabase.rpc("crm_customer_summary"), 2);
+      if (cancelled) return;
+      if (error) {
+        console.error("Musteri ozeti okunamadi:", error);
+        return;
+      }
+      setCustomerSummary(data || {});
+    }
+
+    const timer = window.setTimeout(refreshCustomerSummary, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [summaryProfileId, customerDataVersion]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -1010,8 +1044,7 @@ function App() {
     setMyNotes([]);
     setActivePage("dashboard");
     setCustomerFilter("all");
-    setDataLoading(false);
-    setCustomerLoadProgress(null);
+    setCustomerSummary(null);
   }
 
   function upsertCustomerRows(rows) {
@@ -1047,8 +1080,6 @@ function App() {
     const initialPages = INITIAL_CUSTOMER_PAGES;
     const priorityStatuses = IMPORTANT_CUSTOMER_STATUSES;
     const shouldPreloadFollowUps = ["employee", "manager"].includes(activeProfile?.role);
-    setDataLoading(true);
-    setCustomerLoadProgress({ loaded: 0, total: null, done: false });
 
     try {
       const pageResults = [];
@@ -1067,7 +1098,7 @@ function App() {
         const { data, error } = await runWithRetry(() =>
           supabase
             .from("customers")
-            .select("*")
+            .select(CUSTOMER_SELECT_COLUMNS)
             .order("created_at", { ascending: false })
             .order("id", { ascending: false })
             .range(from, from + pageSize - 1)
@@ -1083,7 +1114,7 @@ function App() {
           const { data, error } = await runWithRetry(() =>
             supabase
               .from("customers")
-              .select("*")
+              .select(CUSTOMER_SELECT_COLUMNS)
               .in("status", priorityStatuses)
               .order("assigned_at", { ascending: false })
               .order("appointment_date", { ascending: true })
@@ -1102,7 +1133,6 @@ function App() {
         priorityCustomers = await fetchPriorityFollowUps();
         if (priorityCustomers.length) {
           setCustomers(priorityCustomers);
-          setCustomerLoadProgress({ loaded: priorityCustomers.length, total: null, done: false });
         }
       }
 
@@ -1115,13 +1145,9 @@ function App() {
       });
       const initialCustomers = mergeCustomerRows([priorityCustomers, pageResults.flat()]);
       setCustomers(initialCustomers);
-      setCustomerLoadProgress({ loaded: initialCustomers.length, total: null, done: firstPages.some((rows) => rows.length < pageSize) });
 
     } catch {
       showSystemToast("Müşteri listesi arka planda kısmen yüklendi. Yenileme tekrar denenebilir.", "warning");
-    } finally {
-      setDataLoading(false);
-      setCustomerLoadProgress((current) => current ? { ...current, done: true } : null);
     }
   }
 
@@ -1293,9 +1319,16 @@ function App() {
     const targetCustomer = selectedCustomer && String(selectedCustomer.id) === String(customerId)
       ? selectedCustomer
       : customers.find((customer) => String(customer.id) === String(customerId));
-    const customerIdsToUpdate = [...new Set((updates.status
-      ? getRelatedCustomerIds(targetCustomer || customerId)
-      : [customerId]).filter(Boolean))];
+    let customerIdsToUpdate = [customerId];
+    if (updates.status) {
+      try {
+        customerIdsToUpdate = await fetchRelatedCustomerIds(targetCustomer || customerId);
+      } catch (relatedError) {
+        alert("Musteri guncellenemedi: " + relatedError.message);
+        return false;
+      }
+    }
+    customerIdsToUpdate = [...new Set(customerIdsToUpdate.filter(Boolean))];
     if (customerIdsToUpdate.length === 0) {
       alert("Musteri guncellenemedi: secili musteri id bulunamadi.");
       return false;
@@ -1329,7 +1362,7 @@ function App() {
     const { data: updatedCustomers } = await runWithRetry(() =>
       supabase
         .from("customers")
-        .select("*")
+        .select(CUSTOMER_SELECT_COLUMNS)
         .in("id", customerIdsToUpdate)
     );
 
@@ -1431,14 +1464,37 @@ function App() {
     return relatedIds;
   }
 
+  async function fetchRelatedCustomerIds(customerOrId) {
+    const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
+    if (!customerId) return [];
+
+    const { data, error } = await runWithRetry(
+      () => supabase.rpc("crm_related_customer_ids", { p_customer_id: customerId }),
+      2
+    );
+
+    if (error) {
+      const setupMissing = error.code === "PGRST202" || error.message?.includes("crm_related_customer_ids");
+      throw new Error(setupMissing
+        ? "Supabase SQL Editor'da CUSTOMER_CRM_OPTIMIZATION.sql dosyasini bir kez calistir."
+        : (error.message || "Iliskili musteri kartlari okunamadi."));
+    }
+
+    const relatedIds = (data || []).map((row) => row?.customer_id || row).filter(Boolean);
+    return relatedIds.length > 0 ? relatedIds : [customerId];
+  }
+
   async function loadCustomerLogs(customerOrId) {
     const requestId = customerLogsRequestRef.current + 1;
     customerLogsRequestRef.current = requestId;
     setCustomerLogsLoading(true);
 
-    const relatedCustomerIds = getRelatedCustomerIds(customerOrId)
-      .map((id) => typeof id === "string" && /^\d+$/.test(id) ? Number(id) : id)
-      .filter(Boolean);
+    let relatedCustomerIds;
+    try {
+      relatedCustomerIds = await fetchRelatedCustomerIds(customerOrId);
+    } catch {
+      relatedCustomerIds = getRelatedCustomerIds(customerOrId);
+    }
 
     if (relatedCustomerIds.length === 0) {
       setCustomerLogs([]);
@@ -1563,12 +1619,27 @@ function App() {
     if (!profile) return;
 
     const normalizedPhone = normalizePhone(form.phone);
-    if (!normalizedPhone) {
+    if (!/^5\d{9}$/.test(normalizedPhone)) {
       alert("Gecerli bir telefon numarasi gir.");
       return;
     }
 
-    const duplicate = findDuplicateCustomer(customers, form.phone);
+    let duplicate = findDuplicateCustomer(customers, form.phone);
+    if (!duplicate) {
+      const { data: duplicateRows, error: duplicateError } = await runWithRetry(
+        () => supabase
+          .from("customers")
+          .select("id,first_name,last_name")
+          .eq("phone_key", normalizedPhone)
+          .limit(1),
+        2
+      );
+      if (duplicateError) {
+        alert("Musteri kontrol edilemedi: " + duplicateError.message);
+        return;
+      }
+      duplicate = duplicateRows?.[0] || null;
+    }
     if (duplicate) {
       alert(`Bu telefon zaten ${duplicate.first_name || ""} ${duplicate.last_name || ""} adına kayıtlı.`);
       return;
@@ -1596,7 +1667,7 @@ function App() {
     };
 
     const { data, error } = await runWithRetry(() =>
-      supabase.from("customers").insert(payload).select("*").single()
+      supabase.from("customers").insert(payload).select(CUSTOMER_SELECT_COLUMNS).single()
     );
 
     if (error) {
@@ -1780,85 +1851,90 @@ function App() {
     showSystemToast(`${Number(affectedCount) || 0} karışmış kayıt düzeltildi veya güvenle silindi.`);
   }
 
-  async function assignCustomer(customerId, employeeId) {
-    if (!profile) return false;
+  async function assignCustomer(customerOrId, employeeId) {
+    if (!profile || profile.role !== "boss") return false;
+    const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
+    const currentCustomer = typeof customerOrId === "object"
+      ? customerOrId
+      : customersRef.current.find((customer) => String(customer.id) === String(customerId));
+    if (!customerId) return false;
     const moveToPool = !employeeId;
     const assignedAt = moveToPool ? null : new Date().toISOString();
-    const currentCustomer = customersRef.current.find((customer) => String(customer.id) === String(customerId));
     const nextStatus = moveToPool
       ? "pool"
       : currentCustomer?.status && currentCustomer.status !== "pool"
         ? currentCustomer.status
         : "assigned";
 
-    const { data, error } = await runWithRetry(() =>
-      supabase
-        .from("customers")
-        .update({
-          assigned_employee: moveToPool ? null : employeeId,
-          status: nextStatus,
-          assigned_at: assignedAt,
-          last_action_by: profile.id,
-        })
-        .eq("id", customerId)
-        .select("*")
-        .single()
+    const { data: affectedCount, error } = await runWithRetry(() =>
+      supabase.rpc("crm_assign_customers", {
+        p_customer_ids: [customerId],
+        p_employee_id: moveToPool ? null : employeeId,
+      })
     );
 
     if (error) {
-      alert("Atama hatası: " + error.message);
+      const setupMissing = error.code === "PGRST202" || error.message?.includes("crm_assign_customers");
+      alert(setupMissing
+        ? "Atama sistemi eksik. Supabase SQL Editor'da CUSTOMER_CRM_OPTIMIZATION.sql dosyasını çalıştır."
+        : "Atama hatası: " + error.message);
       return false;
     }
 
-    upsertCustomerRows(data);
-    if (selectedCustomer?.id === customerId) {
+    const optimisticCustomer = currentCustomer ? {
+      ...currentCustomer,
+      assigned_employee: moveToPool ? null : employeeId,
+      status: nextStatus,
+      assigned_at: assignedAt,
+      last_action_by: profile.id,
+    } : null;
+    if (optimisticCustomer) upsertCustomerRows(optimisticCustomer);
+    if (String(selectedCustomer?.id) === String(customerId)) {
       setSelectedCustomer((current) => current ? {
         ...current,
-        ...data,
+        ...optimisticCustomer,
       } : current);
     }
 
-    showSystemToast(moveToPool ? "Müşteri havuza alındı" : "Müşteri rep'e atandı");
+    const affected = Number(affectedCount) || 1;
+    showSystemToast(moveToPool
+      ? `${affected} müşteri kartı havuza alındı`
+      : `${affected} müşteri kartı rep'e atandı`);
     setCustomerDataVersion((version) => version + 1);
     return true;
-  }
-
-  async function fetchCustomerIdsByAssignee(employeeId) {
-    const pageSize = 1000;
-    const ids = [];
-
-    for (let pageIndex = 0; ; pageIndex += 1) {
-      const from = pageIndex * pageSize;
-      const { data, error } = await runWithRetry(() =>
-        supabase
-          .from("customers")
-          .select("id")
-          .eq("assigned_employee", employeeId)
-          .range(from, from + pageSize - 1)
-      );
-      if (error) throw error;
-
-      const rows = data || [];
-      ids.push(...rows.map((row) => row.id));
-      if (rows.length < pageSize) break;
-      await wait(0);
-    }
-
-    return ids;
   }
 
   async function bulkAssignCustomers(customerIdsOverride, employeeOverride, sourceEmployeeOverride) {
     const targetEmployee = typeof employeeOverride === "string" ? employeeOverride : bulkEmployee;
     const moveToPool = targetEmployee === "__pool__";
-    let customerIdsToUpdate = Array.isArray(customerIdsOverride) ? customerIdsOverride : selectedIds;
+    const customerIdsToUpdate = Array.isArray(customerIdsOverride) ? customerIdsOverride : selectedIds;
 
     if (sourceEmployeeOverride) {
-      try {
-        customerIdsToUpdate = await fetchCustomerIdsByAssignee(sourceEmployeeOverride);
-      } catch (error) {
-        alert("Rep mÃ¼ÅŸterileri okunamadÄ±: " + (error.message || "BaÄŸlantÄ± hatasÄ±"));
+      if (!profile || profile.role !== "boss") return false;
+      if (!window.confirm("Repteki tüm müşteriler havuza geri alınsın mı?")) return false;
+
+      const { data: releasedCount, error: releaseError } = await runWithRetry(() =>
+        supabase.rpc("crm_release_employee_customers", { p_employee_id: sourceEmployeeOverride })
+      );
+      if (releaseError) {
+        const setupMissing = releaseError.code === "PGRST202" || releaseError.message?.includes("crm_release_employee_customers");
+        alert(setupMissing
+          ? "Atama sistemi eksik. Supabase SQL Editor'da CUSTOMER_CRM_OPTIMIZATION.sql dosyasını çalıştır."
+          : "Rep müşterileri havuza alınamadı: " + releaseError.message);
         return false;
       }
+
+      const released = Number(releasedCount) || 0;
+      setCustomers((current) => current.map((customer) =>
+        customer.assigned_employee === sourceEmployeeOverride
+          ? { ...customer, assigned_employee: null, assigned_at: null, status: "pool", last_action_by: profile.id }
+          : customer
+      ));
+      setSelectedIds([]);
+      setBulkEmployee("");
+      setCustomerDataVersion((version) => version + 1);
+      showSystemToast(`${released} müşteri havuza alındı.`);
+      return true;
     }
 
     if (!targetEmployee || customerIdsToUpdate.length === 0 || !profile) {
@@ -1868,43 +1944,31 @@ function App() {
 
     if (moveToPool && !window.confirm(`${customerIdsToUpdate.length} müşteri havuza geri alınsın mı?`)) return false;
 
-    const batchSize = 100;
-    let processed = 0;
-
-    try {
-      for (let index = 0; index < customerIdsToUpdate.length; index += batchSize) {
-        const customerIds = customerIdsToUpdate.slice(index, index + batchSize);
-        const { error } = await runWithRetry(() =>
-          supabase
-            .from("customers")
-            .update({
-              assigned_employee: moveToPool ? null : targetEmployee,
-              status: moveToPool ? "pool" : "assigned",
-              assigned_at: moveToPool ? null : new Date().toISOString(),
-              last_action_by: profile.id,
-            })
-            .in("id", customerIds)
-        );
-
-        if (error) throw error;
-        processed += customerIds.length;
-        await wait(0);
-      }
-    } catch (error) {
-      alert(`Toplu işlem ${processed} müşteri sonrasında durdu: ${error.message || "Bağlantı hatası"}`);
-      setCustomerDataVersion((version) => version + 1);
-      await loadCustomers();
+    const { data: affectedCount, error } = await runWithRetry(() =>
+      supabase.rpc("crm_assign_customers", {
+        p_customer_ids: customerIdsToUpdate,
+        p_employee_id: moveToPool ? null : targetEmployee,
+      })
+    );
+    if (error) {
+      const setupMissing = error.code === "PGRST202" || error.message?.includes("crm_assign_customers");
+      alert(setupMissing
+        ? "Atama sistemi eksik. Supabase SQL Editor'da CUSTOMER_CRM_OPTIMIZATION.sql dosyasını çalıştır."
+        : "Toplu atama tamamlanamadı: " + (error.message || "Bağlantı hatası"));
       return false;
     }
 
+    const processed = Number(affectedCount) || customerIdsToUpdate.length;
+
     const idSet = new Set(customerIdsToUpdate.map(String));
+    const assignedAt = moveToPool ? null : new Date().toISOString();
     setCustomers((current) => current.map((customer) =>
       idSet.has(String(customer.id))
         ? {
             ...customer,
             assigned_employee: moveToPool ? null : targetEmployee,
-            status: moveToPool ? "pool" : "assigned",
-            assigned_at: moveToPool ? null : new Date().toISOString(),
+            status: moveToPool ? "pool" : customer.status === "pool" ? "assigned" : customer.status,
+            assigned_at: assignedAt,
             last_action_by: profile.id,
           }
         : customer
@@ -2174,7 +2238,11 @@ function App() {
   const profileId = profile?.id || "";
   const profileFullName = profile?.full_name || "";
   const profileEmail = profile?.email || "";
-  const customersStillLoading = dataLoading && !customerLoadProgress?.done;
+  const customersStillLoading = customerSummary === null;
+  const customerMetric = (key, fallback = 0) => {
+    const value = customerSummary?.[key];
+    return value === null || value === undefined ? fallback : Number(value) || 0;
+  };
   const employees = users.filter((user) => ["employee", "manager"].includes(user.role));
   const managerCustomers = profileRole === "manager"
     ? customers.filter((customer) => customer.assigned_employee === profileId)
@@ -2226,6 +2294,14 @@ function App() {
     { key: "paid", title: "Satış", value: reportCustomers.filter((customer) => customer.status === "paid").length },
   ];
   const dataStats = getDataStats(reportCustomers);
+  const totalCustomerCount = customerMetric("total", completeCustomers.length);
+  const freshCustomerCount = customerMetric("fresh_assigned", newIncomingCustomers.length);
+  const assignedCustomerCount = customerMetric("assigned_total", visibleCustomers.filter((customer) => customer.assigned_employee).length);
+  const poolCustomerCount = customerMetric("pool", visibleCustomers.filter((customer) => customer.status === "pool").length);
+  const approvedCustomerCount = customerMetric("approved", visibleCustomers.filter((customer) => customer.approved).length);
+  const paidCustomerCount = customerMetric("paid", visibleCustomers.filter((customer) => customer.payment_received).length);
+  const followUpCustomerCount = customerMetric("followups", followUps.length);
+  const todayWorkCount = customerMetric("today_work", todayWorkItems.length);
   const manualDuplicate = findDuplicateCustomer(customers, form.phone);
   const ownCustomerRemoteScope = ["employee", "manager"].includes(profileRole) ? { fixedAssignee: profileId } : {};
   const customerListRemoteScope = {
@@ -2233,6 +2309,13 @@ function App() {
     assignmentScope: customerFilter === "pool" ? "pool" : customerFilter === "assigned" ? "assigned" : "all",
     approvedOnly: customerFilter === "approved",
     paidOnly: customerFilter === "paid",
+  };
+  const tomorrowStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  const todayWorkRemoteScope = {
+    ...ownCustomerRemoteScope,
+    fixedStatuses: ["callback", "appointment", "contract_appointment"],
+    appointmentBefore: tomorrowStart.toISOString(),
+    orderByAppointment: true,
   };
   const unreadMessageCount = profileId
     ? messages.filter((message) => message.recipient_id === profileId && !message.read_at).length
@@ -2355,7 +2438,7 @@ function App() {
 
         {profile.role === "employee" && (
           <>
-            <MenuButton icon="✦" title={`Yeni Gelenler (${newIncomingCustomers.length})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="✦" title={`Yeni Gelenler (${freshCustomerCount})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="…" title="Ulaşılamadı" page="rep_no_answer" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="◷" title="Randevu" page="rep_appointment" tone="appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="▤" title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -2366,17 +2449,17 @@ function App() {
         )}
 
         {profile.role === "manager" && (
-          <MenuButton icon="◉" title={`Müşterilerim (${managerCustomers.length})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+          <MenuButton icon="◉" title={`Müşterilerim (${totalCustomerCount})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
         {profile.role === "boss" && (
           <>
             <MenuButton icon="+" title="Yeni Müşteri Havuzu" page="pool" tone="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="!" title={`Takip Gerekenler (${followUps.length})`} page="followups" tone="urgent" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="!" title={`Takip Gerekenler (${followUpCustomerCount})`} page="followups" tone="urgent" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
           </>
         )}
 
-        <MenuButton icon="◷" title={`Bugünkü İşler (${todayWorkItems.length})`} page="today_work" tone="today" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="◷" title={`Bugünkü İşler (${todayWorkCount})`} page="today_work" tone="today" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="▣" title="Takvim" page="calendar" tone="calendar" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="!" title="Numara Yanlış" page="wrong_number" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
@@ -2411,35 +2494,29 @@ function App() {
           </div>
         </header>
 
-        {dataLoading && customerLoadProgress && (
-          <div style={syncNotice}>
-            Müşteri listesi arka planda yükleniyor: {customerLoadProgress.loaded.toLocaleString("tr-TR")} kayıt hazır. Rakamlar yüklenen kayıtlar üzerinden hesaplanıyor.
-          </div>
-        )}
-
         {activePage === "dashboard" && (
           <>
             <div style={statsGrid}>
-              <ClickStat tone="total" title={customersStillLoading ? "Yüklenen Müşteri" : profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={completeCustomers.length} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
-              {profile.role === "employee" && <ClickStat tone="new" title="Yeni Gelenler" value={newIncomingCustomers.length} onClick={() => { setActivePage("rep_new"); }} />}
-              {profile.role === "boss" && <ClickStat tone="new" title="Yeni Müşteriler" value={visibleCustomers.filter((c) => c.status === "pool").length} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
-              <ClickStat tone="assigned" title={customersStillLoading ? "Yüklenen Atanmış" : "Atanmış"} value={visibleCustomers.filter((c) => c.assigned_employee).length} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
-              <ClickStat tone="approved" title="Onaylandı" value={visibleCustomers.filter((c) => c.approved).length} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
-              <ClickStat tone="paid" title="Para Alındı" value={visibleCustomers.filter((c) => c.payment_received).length} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
+              <ClickStat tone="total" title={customersStillLoading ? "Müşteriler hazırlanıyor" : profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={totalCustomerCount} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
+              {profile.role === "employee" && <ClickStat tone="new" title="Yeni Gelenler" value={freshCustomerCount} onClick={() => { setActivePage("rep_new"); }} />}
+              {profile.role === "boss" && <ClickStat tone="new" title="Yeni Müşteriler" value={poolCustomerCount} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
+              <ClickStat tone="assigned" title="Atanmış" value={assignedCustomerCount} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
+              <ClickStat tone="approved" title="Onaylandı" value={approvedCustomerCount} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
+              <ClickStat tone="paid" title="Para Alındı" value={paidCustomerCount} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
             </div>
 
             <div style={dashboardGrid}>
               <div style={{ ...panelCard, ...pipelinePanel }}>
                 <h2>Operasyon Pipeline</h2>
                 <div style={pipelineList}>
-                  {profile.role === "boss" && <PipelineRow label="Yeni Müşteriler" value={customers.filter((c) => c.status === "pool").length} color="#38bdf8" />}
-                  {profile.role === "boss" && <PipelineRow label="Atandı" value={customers.filter((c) => c.status === "assigned").length} color="#818cf8" />}
-                  <PipelineRow label="Ulaşılamadı" value={visibleCustomers.filter((c) => c.status === "no_answer").length} color="#94a3b8" />
-                  <PipelineRow label="Randevu" value={visibleCustomers.filter((c) => c.status === "appointment").length} color="#fbbf24" />
-                  <PipelineRow label="Yapmayacak" value={visibleCustomers.filter((c) => c.status === "not_approved").length} color="#f87171" />
-                  <PipelineRow label="Kullanıyor" value={visibleCustomers.filter((c) => c.status === "using").length} color="#2dd4bf" />
-                  <PipelineRow label="Onaylandı" value={visibleCustomers.filter((c) => c.status === "approved").length} color="#4ade80" />
-                  <PipelineRow label="Para Alındı" value={visibleCustomers.filter((c) => c.status === "paid").length} color="#34d399" />
+                  {profile.role === "boss" && <PipelineRow label="Yeni Müşteriler" value={poolCustomerCount} color="#38bdf8" />}
+                  {profile.role === "boss" && <PipelineRow label="Atandı" value={customerMetric("assigned", customers.filter((customer) => customer.status === "assigned").length)} color="#818cf8" />}
+                  <PipelineRow label="Ulaşılamadı" value={customerMetric("no_answer", visibleCustomers.filter((customer) => customer.status === "no_answer").length)} color="#94a3b8" />
+                  <PipelineRow label="Randevu" value={customerMetric("appointment", visibleCustomers.filter((customer) => customer.status === "appointment").length)} color="#fbbf24" />
+                  <PipelineRow label="Yapmayacak" value={customerMetric("not_approved", visibleCustomers.filter((customer) => customer.status === "not_approved").length)} color="#f87171" />
+                  <PipelineRow label="Kullanıyor" value={customerMetric("using", visibleCustomers.filter((customer) => customer.status === "using").length)} color="#2dd4bf" />
+                  <PipelineRow label="Onaylandı" value={approvedCustomerCount} color="#4ade80" />
+                  <PipelineRow label="Para Alındı" value={paidCustomerCount} color="#34d399" />
                 </div>
               </div>
 
@@ -2762,6 +2839,8 @@ function App() {
               bulkEmployee={bulkEmployee}
               setBulkEmployee={setBulkEmployee}
               bulkAssignCustomers={bulkAssignCustomers}
+              remoteScope={todayWorkRemoteScope}
+              dataVersion={customerDataVersion}
             />
           </>
         )}
@@ -2982,7 +3061,7 @@ function CustomerTable({
   remoteScope,
   dataVersion,
 }) {
-  const canManage = profile.role === "boss" || profile.role === "manager";
+  const canManage = profile.role === "boss";
   const canViewTc = profile.role !== "employee";
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [genderFilter, setGenderFilter] = useState("all");
@@ -3001,22 +3080,41 @@ function CustomerTable({
   const debouncedSearchTerm = useDebouncedValue(searchTerm, SEARCH_DEBOUNCE_MS);
 
   useEffect(() => {
+    const resetTimer = window.setTimeout(() => {
+      setSelectedIds([]);
+      setBulkEmployee("");
+      setHiddenAfterAssignIds([]);
+    }, 0);
+    return () => window.clearTimeout(resetTimer);
+  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, remoteScopeKey, page, setSelectedIds, setBulkEmployee]);
+
+  useEffect(() => {
     if (!isRemote) return undefined;
     let cancelled = false;
 
     async function loadRemotePage() {
       setRemoteLoading(true);
       setRemoteError("");
+      const cleanSearch = normalizeCustomerSearch(debouncedSearchTerm);
+
+      if (cleanSearch && cleanSearch.length < 3) {
+        setRemoteRows([]);
+        setRemoteTotal(0);
+        setRemoteLoading(false);
+        setRemoteError("Arama için en az 3 karakter gir.");
+        return;
+      }
 
       let query = supabase
         .from("customers")
-        .select("*", { count: REMOTE_CUSTOMER_COUNT_MODE });
+        .select(CUSTOMER_SELECT_COLUMNS, { count: REMOTE_CUSTOMER_COUNT_MODE });
 
       if (remoteScopeConfig.fixedAssignee) query = query.eq("assigned_employee", remoteScopeConfig.fixedAssignee);
       if (remoteScopeConfig.assignmentScope === "pool") query = query.is("assigned_employee", null);
       if (remoteScopeConfig.assignmentScope === "assigned") query = query.not("assigned_employee", "is", null);
       if (remoteScopeConfig.approvedOnly) query = query.eq("approved", true);
       if (remoteScopeConfig.paidOnly) query = query.eq("payment_received", true);
+      if (remoteScopeConfig.appointmentBefore) query = query.lt("appointment_date", remoteScopeConfig.appointmentBefore);
 
       if (Array.isArray(remoteScopeConfig.fixedStatuses) && remoteScopeConfig.fixedStatuses.length > 0) {
         query = remoteScopeConfig.fixedStatuses.length === 1
@@ -3031,17 +3129,8 @@ function CustomerTable({
 
       if (statusFilter !== "all") query = query.eq("status", statusFilter);
 
-      const cleanSearch = debouncedSearchTerm.trim().replace(/[(),]/g, " ").slice(0, 80);
       if (cleanSearch) {
-        const searchPattern = `%${cleanSearch}%`;
-        query = query.or([
-          `first_name.ilike.${searchPattern}`,
-          `last_name.ilike.${searchPattern}`,
-          `phone.ilike.${searchPattern}`,
-          `phone_2.ilike.${searchPattern}`,
-          `tc_no.ilike.${searchPattern}`,
-          `batch_name.ilike.${searchPattern}`,
-        ].join(","));
+        query = query.ilike("search_text", `%${cleanSearch}%`);
       }
 
       if (remoteScopeConfig.orderByAppointment) {
@@ -3067,7 +3156,10 @@ function CustomerTable({
       if (error) {
         setRemoteRows([]);
         setRemoteTotal(0);
-        setRemoteError(error.message || "MÃ¼ÅŸteriler yÃ¼klenemedi.");
+        const timedOut = error.message?.includes("statement timeout") || error.message?.includes("canceling statement");
+        setRemoteError(timedOut
+          ? "Arama zaman aşımına uğradı. Lütfen daha ayrıntılı bir arama yap."
+          : (error.message || "Müşteriler yüklenemedi."));
         return;
       }
 
@@ -3078,9 +3170,10 @@ function CustomerTable({
       setRemoteTotal(Number.isFinite(count) ? count : from + visibleRows.length);
     }
 
-    loadRemotePage();
+    const refreshTimer = window.setTimeout(loadRemotePage, 120);
     return () => {
       cancelled = true;
+      window.clearTimeout(refreshTimer);
     };
   }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, debouncedSearchTerm, dataVersion, canManage]);
 
@@ -3117,7 +3210,7 @@ function CustomerTable({
   }
 
   async function handleAssignCustomer(customer, employeeId) {
-    const assigned = await assignCustomer(customer.id, employeeId);
+    const assigned = await assignCustomer(customer, employeeId);
     if (assigned && assigneeFilter === "all" && !customer.assigned_employee && employeeId) {
       setHiddenAfterAssignIds((current) => current.includes(customer.id) ? current : [...current, customer.id]);
     }
