@@ -1,6 +1,8 @@
 -- Run once in Supabase SQL Editor.
 -- Keeps processed customers out of the new pool and makes imports idempotent.
 
+begin;
+
 create or replace function public.crm_import_customers(p_rows jsonb)
 returns jsonb
 language plpgsql
@@ -268,8 +270,192 @@ from latest_action
 where customer.id = latest_action.customer_id
   and customer.status = 'pool';
 
+-- Merge existing cards sharing a primary or secondary phone number. The card
+-- with activity/status/ownership wins; history and calls are moved before the
+-- duplicate card is deleted.
+drop table if exists pg_temp.crm_contact_owner;
+drop table if exists pg_temp.crm_duplicate_map;
+
+create temporary table crm_contact_owner as
+with activity as (
+  select customer_id, count(*) as log_count, max(created_at) as last_log_at
+  from public.customer_logs
+  group by customer_id
+), contacts as (
+  select id as customer_id, phone_key as contact_key from public.customers where phone_key is not null
+  union
+  select id as customer_id, phone_2_key as contact_key from public.customers where phone_2_key is not null
+)
+select distinct on (contacts.contact_key)
+  contacts.contact_key,
+  customer.id as keeper_id
+from contacts
+join public.customers customer on customer.id = contacts.customer_id
+left join activity on activity.customer_id = customer.id
+order by
+  contacts.contact_key,
+  (coalesce(activity.log_count, 0) > 0) desc,
+  (customer.status not in ('pool', 'assigned')) desc,
+  (customer.assigned_employee is not null) desc,
+  customer.payment_received desc,
+  customer.approved desc,
+  activity.last_log_at desc nulls last,
+  customer.updated_at desc nulls last,
+  customer.created_at desc,
+  customer.id;
+
+create unique index crm_contact_owner_key_idx on crm_contact_owner(contact_key);
+
+create temporary table crm_duplicate_map as
+with contacts as (
+  select id as customer_id, phone_key as contact_key from public.customers where phone_key is not null
+  union
+  select id as customer_id, phone_2_key as contact_key from public.customers where phone_2_key is not null
+), candidates as (
+  select
+    contacts.customer_id as duplicate_id,
+    owner.keeper_id,
+    row_number() over (
+      partition by contacts.customer_id
+      order by
+        (coalesce(activity.log_count, 0) > 0) desc,
+        (keeper.status not in ('pool', 'assigned')) desc,
+        (keeper.assigned_employee is not null) desc,
+        keeper.payment_received desc,
+        keeper.approved desc,
+        activity.last_log_at desc nulls last,
+        keeper.updated_at desc nulls last,
+        keeper.created_at desc,
+        keeper.id
+    ) as candidate_rank
+  from contacts
+  join crm_contact_owner owner on owner.contact_key = contacts.contact_key
+  join public.customers keeper on keeper.id = owner.keeper_id
+  left join (
+    select customer_id, count(*) as log_count, max(created_at) as last_log_at
+    from public.customer_logs
+    group by customer_id
+  ) activity on activity.customer_id = keeper.id
+)
+select duplicate_id, keeper_id
+from candidates
+where candidate_rank = 1
+  and duplicate_id <> keeper_id;
+
+create unique index crm_duplicate_map_duplicate_idx on crm_duplicate_map(duplicate_id);
+
+-- Resolve chained phone links to one final keeper.
+do $merge_roots$
+declare
+  changed_rows integer;
+begin
+  loop
+    update crm_duplicate_map child
+    set keeper_id = parent.keeper_id
+    from crm_duplicate_map parent
+    where child.keeper_id = parent.duplicate_id
+      and child.keeper_id <> parent.keeper_id;
+    get diagnostics changed_rows = row_count;
+    exit when changed_rows = 0;
+  end loop;
+end
+$merge_roots$;
+
+-- Preserve ownership and business flags from every duplicate in the group.
+with group_values as (
+  select
+    mapping.keeper_id,
+    (array_agg(customer.assigned_employee order by customer.assigned_at desc nulls last)
+      filter (where customer.assigned_employee is not null))[1] as assigned_employee,
+    max(customer.assigned_at) as assigned_at,
+    bool_or(customer.approved) as approved,
+    bool_or(customer.payment_received) as payment_received
+  from crm_duplicate_map mapping
+  join public.customers customer on customer.id = mapping.duplicate_id
+  group by mapping.keeper_id
+)
+update public.customers keeper
+set assigned_employee = coalesce(keeper.assigned_employee, group_values.assigned_employee),
+    assigned_at = coalesce(keeper.assigned_at, group_values.assigned_at),
+    approved = keeper.approved or group_values.approved,
+    payment_received = keeper.payment_received or group_values.payment_received
+from group_values
+where keeper.id = group_values.keeper_id;
+
+update public.customer_logs log
+set customer_id = mapping.keeper_id
+from crm_duplicate_map mapping
+where log.customer_id = mapping.duplicate_id;
+
+do $move_calls$
+begin
+  if to_regclass('public.call_sessions') is not null then
+    execute $sql$
+      update public.call_sessions call
+      set customer_id = mapping.keeper_id
+      from crm_duplicate_map mapping
+      where call.customer_id = mapping.duplicate_id
+    $sql$;
+  end if;
+end
+$move_calls$;
+
+delete from public.customers customer
+using crm_duplicate_map mapping
+where customer.id = mapping.duplicate_id;
+
+drop table crm_duplicate_map;
+drop table crm_contact_owner;
+
+create or replace function public.crm_prevent_duplicate_customer_contact()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $function$
+declare
+  new_phone_key text := public.crm_phone_key(new.phone);
+  new_phone_2_key text := public.crm_phone_key(new.phone_2);
+begin
+  if new_phone_key is null and new_phone_2_key is null then
+    return new;
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(lock_key, 0))
+  from (
+    select distinct unnest(array[new_phone_key, new_phone_2_key]) as lock_key
+  ) locks
+  where lock_key is not null
+  order by lock_key;
+
+  if exists (
+    select 1
+    from public.customers customer
+    where customer.id is distinct from new.id
+      and (
+        customer.phone_key in (new_phone_key, new_phone_2_key)
+        or customer.phone_2_key in (new_phone_key, new_phone_2_key)
+      )
+  ) then
+    raise exception 'A customer card with this phone already exists'
+      using errcode = '23505';
+  end if;
+
+  return new;
+end;
+$function$;
+
+drop trigger if exists customers_prevent_duplicate_contact on public.customers;
+create trigger customers_prevent_duplicate_contact
+  before insert or update of phone, phone_2 on public.customers
+  for each row execute function public.crm_prevent_duplicate_customer_contact();
+
+revoke all on function public.crm_prevent_duplicate_customer_contact() from public;
+
 create index if not exists customers_tc_digits_idx
   on public.customers ((regexp_replace(coalesce(tc_no, ''), '[^0-9]', '', 'g')))
   where nullif(regexp_replace(coalesce(tc_no, ''), '[^0-9]', '', 'g'), '') is not null;
 
 analyze public.customers;
+
+commit;
