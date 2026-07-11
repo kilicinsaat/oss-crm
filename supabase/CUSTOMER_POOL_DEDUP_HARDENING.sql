@@ -270,6 +270,15 @@ from latest_action
 where customer.id = latest_action.customer_id
   and customer.status = 'pool';
 
+-- Any remaining pool card with history is processed even when an old log did
+-- not record a usable status value. Keep it outside the new-customer pool.
+update public.customers customer
+set status = 'assigned'::public.customer_status
+where customer.status = 'pool'
+  and exists (
+    select 1 from public.customer_logs log where log.customer_id = customer.id
+  );
+
 -- Merge existing cards sharing a primary or secondary phone number. The card
 -- with activity/status/ownership wins; history and calls are moved before the
 -- duplicate card is deleted.
