@@ -306,7 +306,11 @@ begin
   set assigned_employee = p_employee_id,
       assigned_at = case when p_employee_id is null then null else now() end,
       status = case
-        when p_employee_id is null then 'pool'::public.customer_status
+        when p_employee_id is null and customer.status = 'pool' then 'pool'::public.customer_status
+        when p_employee_id is null and customer.status = 'assigned' and not exists (
+          select 1 from public.customer_logs log where log.customer_id = customer.id
+        ) then 'pool'::public.customer_status
+        when p_employee_id is null then customer.status
         when customer.status = 'pool' then 'assigned'::public.customer_status
         else customer.status
       end,
@@ -336,12 +340,18 @@ begin
     raise exception 'Only an active boss can release employee customers' using errcode = '42501';
   end if;
 
-  update public.customers
+  update public.customers customer
   set assigned_employee = null,
       assigned_at = null,
-      status = 'pool'::public.customer_status,
+      status = case
+        when customer.status = 'pool' then 'pool'::public.customer_status
+        when customer.status = 'assigned' and not exists (
+          select 1 from public.customer_logs log where log.customer_id = customer.id
+        ) then 'pool'::public.customer_status
+        else customer.status
+      end,
       last_action_by = auth.uid()
-  where assigned_employee = p_employee_id;
+  where customer.assigned_employee = p_employee_id;
 
   get diagnostics affected_count = row_count;
   return affected_count;

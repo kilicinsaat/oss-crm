@@ -1560,7 +1560,7 @@ function App() {
       const parsed = await parseExcelInWorker(buffer, file.name, (current, total) => {
         setImportProgress({ phase: "Satırlar arka planda kontrol ediliyor", current, total });
       });
-      const { sheetName, rejectedRows } = parsed;
+      const { sheetName, rejectedRows, duplicateRows = 0 } = parsed;
       const preparedRows = parsed.rows.map((row) => ({
         ...row,
         created_by: profile.id,
@@ -1573,37 +1573,41 @@ function App() {
 
       const confirmed = window.confirm(
         `'${sheetName}' sayfası kontrol edildi.\n\n`
-        + `${preparedRows.length} geçerli kayıt yüklenecek.\n`
+        + `${preparedRows.length} benzersiz geçerli kayıt kontrol edilecek.\n`
         + `${rejectedRows} eksik ad/telefon satırı yüklenmeyecek.\n`
-        + "Aynı telefon numarasına sahip satırlar da ayrı müşteri olarak yüklenecek.\n\nDevam edilsin mi?"
+        + `${duplicateRows} dosya içi mükerrer satır atlandı.\n`
+        + "Sistemde mevcut telefon veya TC numaraları yeniden eklenmeyecek.\n\nDevam edilsin mi?"
       );
       if (!confirmed) return;
 
       let imported = 0;
+      let skipped = duplicateRows;
       const batchSize = 200;
 
       for (let i = 0; i < preparedRows.length; i += batchSize) {
         const chunk = preparedRows.slice(i, i + batchSize);
         setImportProgress({ phase: "Supabase'e kaydediliyor", current: i, total: preparedRows.length });
-        const { error } = await runWithRetry(() =>
-          supabase
-            .from("customers")
-            .insert(chunk)
+        const { data: importResult, error } = await runWithRetry(() =>
+          supabase.rpc("crm_import_customers", { p_rows: chunk })
         );
 
         if (error) {
-          alert(`Yükleme ${imported} müşteri sonrasında durdu: ${error.message}`);
+          const setupMissing = error.code === "PGRST202" || error.message?.includes("crm_import_customers");
+          alert(setupMissing
+            ? "Mükerrer engelleme kurulumu eksik. Supabase SQL Editor'da CUSTOMER_POOL_DEDUP_HARDENING.sql dosyasını bir kez çalıştır."
+            : `Yükleme ${imported} müşteri sonrasında durdu: ${error.message}`);
           return;
         }
 
-        imported += chunk.length;
-        setImportProgress({ phase: "Supabase'e kaydediliyor", current: imported, total: preparedRows.length });
+        imported += Number(importResult?.inserted) || 0;
+        skipped += Number(importResult?.skipped) || 0;
+        setImportProgress({ phase: "Supabase'e kaydediliyor", current: Math.min(i + chunk.length, preparedRows.length), total: preparedRows.length });
         await wait(25);
       }
 
       setCustomerDataVersion((version) => version + 1);
 
-      showSystemToast("Excel yüklendi");
+      showSystemToast(`Excel yüklendi: ${imported} yeni, ${skipped} mükerrer/atlanan kayıt`);
       await loadCustomers();
     } catch (error) {
       alert("Excel okunamadı: " + error.message);
@@ -1861,7 +1865,7 @@ function App() {
     const moveToPool = !employeeId;
     const assignedAt = moveToPool ? null : new Date().toISOString();
     const nextStatus = moveToPool
-      ? "pool"
+      ? currentCustomer?.status || "pool"
       : currentCustomer?.status && currentCustomer.status !== "pool"
         ? currentCustomer.status
         : "assigned";
@@ -1927,7 +1931,7 @@ function App() {
       const released = Number(releasedCount) || 0;
       setCustomers((current) => current.map((customer) =>
         customer.assigned_employee === sourceEmployeeOverride
-          ? { ...customer, assigned_employee: null, assigned_at: null, status: "pool", last_action_by: profile.id }
+          ? { ...customer, assigned_employee: null, assigned_at: null, status: customer.status, last_action_by: profile.id }
           : customer
       ));
       setSelectedIds([]);
@@ -1967,7 +1971,9 @@ function App() {
         ? {
             ...customer,
             assigned_employee: moveToPool ? null : targetEmployee,
-            status: moveToPool ? "pool" : customer.status === "pool" ? "assigned" : customer.status,
+            status: moveToPool
+              ? customer.status
+              : customer.status === "pool" ? "assigned" : customer.status,
             assigned_at: assignedAt,
             last_action_by: profile.id,
           }

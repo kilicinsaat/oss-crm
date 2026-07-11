@@ -61,8 +61,11 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
   try {
     const workbook = XLSX.read(buffer, { type: "array" });
     const preparedRows = [];
+    const importedContactKeys = new Set();
+    const importedTcKeys = new Set();
     const processedSheets = [];
     let rejectedRows = 0;
+    let duplicateRows = 0;
     let processedRowCount = 0;
 
     const sheets = workbook.SheetNames.map((sheetName) => {
@@ -85,12 +88,22 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
         return;
       }
       const secondPhone = uniquePhones.slice(1)[0] || null;
+      const tcNo = validTurkishTc(tcValue);
+      const contactKeys = [primaryPhone, secondPhone].filter(Boolean);
+      const isDuplicate = contactKeys.some((phone) => importedContactKeys.has(phone))
+        || (tcNo && importedTcKeys.has(tcNo));
+      if (isDuplicate) {
+        duplicateRows += 1;
+        return;
+      }
+      contactKeys.forEach((phone) => importedContactKeys.add(phone));
+      if (tcNo) importedTcKeys.add(tcNo);
       const names = splitName(fullName);
       preparedRows.push({
         ...names,
         phone: primaryPhone,
         phone_2: secondPhone,
-        tc_no: validTurkishTc(tcValue),
+        tc_no: tcNo,
         email: "",
         batch_name: fileName,
         batch_page: rowNumber,
@@ -158,6 +171,7 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
         rows: preparedRows,
         sheetName: processedSheets.join(", ") || workbook.SheetNames[0],
         rejectedRows,
+        duplicateRows,
       },
     });
   } catch (error) {

@@ -48,12 +48,18 @@ begin
     raise exception 'Active Rep profile not found' using errcode = 'P0002';
   end if;
 
-  update public.customers
+  update public.customers customer
   set assigned_employee = null,
-      status = 'pool',
+      status = case
+        when customer.status = 'pool' then 'pool'
+        when customer.status = 'assigned' and not exists (
+          select 1 from public.customer_logs log where log.customer_id = customer.id
+        ) then 'pool'
+        else customer.status
+      end,
       assigned_at = null,
       last_action_by = auth.uid()
-  where assigned_employee = target_rep_id;
+  where customer.assigned_employee = target_rep_id;
 
   get diagnostics released_count = row_count;
 
