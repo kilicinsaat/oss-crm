@@ -16,9 +16,14 @@ CALL_BRIDGE_SECRET:
 
 Yeni kisi eklemek:
 - repler.csv dosyasini Excel veya Not Defteri ile ac.
-- En alta yeni satir ekle:
-  Ad Soyad,email,profile_id
+- Ilk baslik satirini (Name,Email,ProfileId) degistirme.
+- En alta su sirayla yeni satir ekle:
+  Ad Soyad,email,profile UUID
+- Ornek:
+  Ayse Hanim,ayse@rep.com,11111111-2222-3333-4444-555555555555
 - ProfileId bilmiyorsan bos birakabilirsin.
+- Bos birakma ornegi (sondaki iki virgul onemli):
+  Ayse Hanim,,
 - Kurulumda o kisiyi secince senden ID'yi elle ister.
 
 Dikkat:

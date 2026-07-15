@@ -20,3 +20,19 @@ MicroSIP çağrı olaylarını OSS Center'a gönderir. SIP hesabını veya Jette
 MicroSIP portable kullanılıyorsa `-MicroSipIni "C:\...\microsip.ini"` parametresini de verin. Kurulumdan sonra MicroSIP'i tamamen kapatıp yeniden açın.
 
 Başarısız gönderimler `%LOCALAPPDATA%\OSSCallBridge\queue` altında bekler ve sonraki çağrı olayında yeniden denenir. Günlük hata kaydı `bridge.log` dosyasındadır.
+
+## Rep listesine kişi ekleme
+
+`usb-package/repler.csv` dosyasını Excel veya bir metin düzenleyiciyle açın. `Name,Email,ProfileId` başlık satırını değiştirmeden dosyanın sonuna yeni kişiyi ekleyin:
+
+```csv
+Ayşe Hanım,ayse@rep.com,11111111-2222-3333-4444-555555555555
+```
+
+Profile UUID henüz bilinmiyorsa alan boş bırakılabilir:
+
+```csv
+Ayşe Hanım,,
+```
+
+Kurulumda bu kişi seçildiğinde CRM/Supabase `profiles.id` değeri sorulur. İsim ve e-posta yalnızca seçim ekranı içindir; çağrının doğru rep hesabına yazılmasını sağlayan asıl değer `ProfileId` UUID'sidir.

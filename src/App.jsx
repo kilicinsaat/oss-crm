@@ -69,6 +69,8 @@ const SESSION_STARTED_AT_KEY = "oss-crm-session-started-at";
 const SESSION_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 const SESSION_CHECK_INTERVAL = 60_000;
 const CUSTOMER_PRELOAD_PAGE_SIZE = 1000;
+const REP_MONITOR_PAGE_SIZE = 1000;
+const REP_MONITOR_RECONCILE_INTERVAL = 30_000;
 const INITIAL_CUSTOMER_PAGES = 1;
 const MAX_PRIORITY_PRELOAD_PAGES = 1;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -590,6 +592,8 @@ function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [customerSummary, setCustomerSummary] = useState(null);
+  const [bossLiveReport, setBossLiveReport] = useState(null);
+  const [bossLiveReportError, setBossLiveReportError] = useState("");
   const [customerDataVersion, setCustomerDataVersion] = useState(0);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
@@ -636,6 +640,8 @@ function App() {
   );
   const toastTimerRef = useRef(null);
   const customerLogsRequestRef = useRef(0);
+  const customerCallsRequestRef = useRef(0);
+  const selectedCustomerRelatedIdsRef = useRef(new Set());
   const usersRef = useRef([]);
   const customersRef = useRef([]);
   const [saleCelebration, setSaleCelebration] = useState(null);
@@ -818,11 +824,49 @@ function App() {
     }
 
     const timer = window.setTimeout(refreshCustomerSummary, 250);
+    const reconcileTimer = window.setInterval(refreshCustomerSummary, REP_MONITOR_RECONCILE_INTERVAL);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      window.clearInterval(reconcileTimer);
     };
   }, [summaryProfileId, customerDataVersion]);
+
+  useEffect(() => {
+    if (profile?.role !== "boss") return undefined;
+
+    let cancelled = false;
+    async function refreshBossLiveReport() {
+      const { data, error } = await runWithRetry(() => supabase.rpc("crm_live_reporting"), 2);
+      if (cancelled) return;
+      if (error) {
+        const setupMissing = error.code === "PGRST202" || error.message?.includes("crm_live_reporting");
+        setBossLiveReportError(setupMissing
+          ? "Eksiksiz canlı rapor için Supabase SQL Editor'da LIVE_REPORTING.sql dosyasını bir kez çalıştır."
+          : "Canlı rapor özeti okunamadı: " + error.message);
+        return;
+      }
+      setBossLiveReport(data || null);
+      setBossLiveReportError("");
+    }
+
+    const timer = window.setTimeout(refreshBossLiveReport, 300);
+    const reconcileTimer = window.setInterval(refreshBossLiveReport, REP_MONITOR_RECONCILE_INTERVAL);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.clearInterval(reconcileTimer);
+    };
+  }, [profile, customerDataVersion]);
+
+  useEffect(() => {
+    if (profile?.role !== "boss") return undefined;
+    const profileChannel = supabase
+      .channel(`crm-profiles-${profile.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => loadUsers())
+      .subscribe();
+    return () => supabase.removeChannel(profileChannel);
+  }, [profile]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -853,6 +897,7 @@ function App() {
 
     if (isBoss) {
       channel
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "customers" }, handleCustomerChange)
         .on("postgres_changes", { event: "UPDATE", schema: "public", table: "customers" }, handleCustomerChange)
         .on("postgres_changes", { event: "DELETE", schema: "public", table: "customers" }, handleCustomerChange);
     } else {
@@ -987,16 +1032,21 @@ function App() {
     const callChannel = supabase
       .channel(`crm-call-events-${profile.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "call_sessions" }, (payload) => {
-        const call = payload.new;
+        const call = payload.new?.id ? payload.new : payload.old;
         const canMonitorAllCalls = ["boss", "manager"].includes(profile.role);
         if (!call?.id || (!canMonitorAllCalls && call.profile_id !== profile.id)) return;
         const customer = customersRef.current.find((item) =>
           item.id === call.customer_id
           || [item.phone, item.phone_2].some((phone) => normalizePhone(phone) === normalizePhone(call.phone))
         );
+        const selectedCustomerMatches = selectedCustomer && (
+          String(selectedCustomer.id) === String(call.customer_id)
+          || [selectedCustomer.phone, selectedCustomer.phone_2]
+            .some((phone) => normalizePhone(phone) && normalizePhone(phone) === normalizePhone(call.phone))
+        );
 
-        if (selectedCustomer && customer?.id === selectedCustomer.id) {
-          loadCustomerCalls(customer);
+        if (selectedCustomerMatches || (payload.eventType === "DELETE" && selectedCustomer)) {
+          loadCustomerCalls(selectedCustomer);
         }
         if (payload.eventType === "INSERT" && call.direction === "incoming" && call.status === "ringing") {
           showSystemToast(customer
@@ -1015,6 +1065,21 @@ function App() {
       supabase.removeChannel(callChannel);
     };
   // The loaders intentionally use the latest customer refs; resubscribing on every render would duplicate channels.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, selectedCustomer]);
+
+  useEffect(() => {
+    if (!profile || !selectedCustomer) return undefined;
+    const logChannel = supabase
+      .channel(`crm-customer-detail-logs-${profile.id}-${selectedCustomer.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "customer_logs" }, (payload) => {
+        const log = payload.new?.id ? payload.new : payload.old;
+        if (!log?.customer_id || !selectedCustomerRelatedIdsRef.current.has(String(log.customer_id))) return;
+        loadCustomerLogs(selectedCustomer);
+      })
+      .subscribe();
+    return () => supabase.removeChannel(logChannel);
+  // The selected customer's related IDs are hydrated by loadCustomerLogs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, selectedCustomer]);
 
@@ -1045,6 +1110,8 @@ function App() {
     setActivePage("dashboard");
     setCustomerFilter("all");
     setCustomerSummary(null);
+    setBossLiveReport(null);
+    setBossLiveReportError("");
   }
 
   function upsertCustomerRows(rows) {
@@ -1497,53 +1564,85 @@ function App() {
     }
 
     if (relatedCustomerIds.length === 0) {
+      selectedCustomerRelatedIdsRef.current = new Set();
       setCustomerLogs([]);
       setCustomerLogsLoading(false);
       return;
     }
+    selectedCustomerRelatedIdsRef.current = new Set(relatedCustomerIds.map(String));
 
-    const { data, error } = await runWithRetry(() =>
-      supabase
+    const allLogs = [];
+    let beforeId = null;
+    let loadError = null;
+    while (customerLogsRequestRef.current === requestId) {
+      let query = supabase
         .from("customer_logs")
         .select("*")
         .in("customer_id", relatedCustomerIds)
-        .order("created_at", { ascending: false })
-    );
+        .order("id", { ascending: false })
+        .limit(REP_MONITOR_PAGE_SIZE);
+      if (beforeId !== null) query = query.lt("id", beforeId);
+      const { data, error } = await runWithRetry(() => query, 3);
+      if (error) {
+        loadError = error;
+        break;
+      }
+      const page = data || [];
+      allLogs.push(...page);
+      if (page.length < REP_MONITOR_PAGE_SIZE) break;
+      beforeId = page[page.length - 1].id;
+    }
 
     if (customerLogsRequestRef.current !== requestId) return;
     setCustomerLogsLoading(false);
 
-    if (error) {
+    if (loadError) {
       setCustomerLogs([]);
       showSystemToast("Geçmiş okunamadı, kart yine de açıldı.", "warning");
       return;
     }
 
-    setCustomerLogs(data || []);
+    setCustomerLogs(allLogs);
   }
 
   async function loadCustomerCalls(customerOrId) {
+    const requestId = customerCallsRequestRef.current + 1;
+    customerCallsRequestRef.current = requestId;
     const customer = typeof customerOrId === "object"
       ? customerOrId
       : customersRef.current.find((item) => item.id === customerOrId);
     const phones = [customer?.phone, customer?.phone_2].map(normalizePhone).filter(Boolean);
     if (phones.length === 0) {
       setCustomerCalls([]);
+      setCustomerCallsLoading(false);
       return;
     }
 
     setCustomerCallsLoading(true);
-    const { data, error } = await runWithRetry(() =>
-      supabase
+    const allCalls = [];
+    let loadError = null;
+    for (let from = 0; customerCallsRequestRef.current === requestId; from += REP_MONITOR_PAGE_SIZE) {
+      const { data, error } = await runWithRetry(() => supabase
         .from("call_sessions")
         .select("*")
         .in("phone", [...new Set(phones)])
         .order("created_at", { ascending: false })
-        .limit(100)
-    );
+        .order("id", { ascending: false })
+        .range(from, from + REP_MONITOR_PAGE_SIZE - 1), 3);
+      if (error) {
+        loadError = error;
+        break;
+      }
+      const page = data || [];
+      allCalls.push(...page);
+      if (page.length < REP_MONITOR_PAGE_SIZE) break;
+    }
+    if (customerCallsRequestRef.current !== requestId) return;
     setCustomerCallsLoading(false);
-    setCustomerCalls(error ? [] : (data || []));
-    if (error && error.code !== "42P01") {
+    setCustomerCalls(loadError ? [] : Array.from(
+      new Map(allCalls.map((call) => [String(call.id), call])).values()
+    ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
+    if (loadError && loadError.code !== "42P01") {
       showSystemToast("Arama geçmişi okunamadı.", "warning");
     }
   }
@@ -2233,6 +2332,8 @@ function App() {
 
   function closeCustomerModal() {
     customerLogsRequestRef.current += 1;
+    customerCallsRequestRef.current += 1;
+    selectedCustomerRelatedIdsRef.current = new Set();
     setCustomerLogsLoading(false);
     setCustomerLogs([]);
     setCustomerCallsLoading(false);
@@ -2284,22 +2385,46 @@ function App() {
   const overdueReminders = reminderCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
   const todayWorkItems = reminderCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
   const reportCustomers = ["employee", "manager"].includes(profileRole) ? visibleCustomers : customers;
+  const bossReportSummary = profileRole === "boss" ? bossLiveReport?.summary : null;
+  const liveRepStatsById = new Map((bossLiveReport?.rep_stats || []).map((item) => [item.id, item]));
   const repStats = users
     .filter((user) => user.role === "employee")
-    .map((user) => ({ ...user, stats: getUserStats(customers, user.id) }))
+    .map((user) => {
+      const liveStats = liveRepStatsById.get(user.id);
+      return {
+        ...user,
+        stats: liveStats ? {
+          total: Number(liveStats.total) || 0,
+          called: Number(liveStats.called) || 0,
+          appointment: Number(liveStats.appointment) || 0,
+          approved: Number(liveStats.approved) || 0,
+          paid: Number(liveStats.paid) || 0,
+          untouched: Number(liveStats.untouched) || 0,
+          delayed: Number(liveStats.delayed) || 0,
+        } : getUserStats(customers, user.id),
+      };
+    })
     .sort((a, b) => b.stats.paid - a.stats.paid || b.stats.appointment - a.stats.appointment);
   const reportStats = [
-    { key: "pool", title: "Havuz", value: reportCustomers.filter((customer) => customer.status === "pool").length },
-    { key: "no_answer", title: "Ulaşılamadı", value: reportCustomers.filter((customer) => customer.status === "no_answer").length },
-    { key: "callback", title: "Tekrar Aranacak", value: reportCustomers.filter((customer) => customer.status === "callback").length },
-    { key: "appointment", title: "Randevu", value: reportCustomers.filter((customer) => customer.status === "appointment").length },
-    { key: "contract_appointment", title: "Sözleşmeli Randevu", value: reportCustomers.filter((customer) => customer.status === "contract_appointment").length },
-    { key: "not_approved", title: "Yapmayacak", value: reportCustomers.filter((customer) => customer.status === "not_approved").length },
-    { key: "wrong_number", title: "Numara yanlış", value: reportCustomers.filter((customer) => customer.status === "wrong_number").length },
-    { key: "using", title: "Kullanıyor", value: reportCustomers.filter((customer) => customer.status === "using").length },
-    { key: "paid", title: "Satış", value: reportCustomers.filter((customer) => customer.status === "paid").length },
+    { key: "pool", title: "Havuz", value: bossReportSummary ? Number(bossReportSummary.pool) || 0 : reportCustomers.filter((customer) => customer.status === "pool").length },
+    { key: "no_answer", title: "Ulaşılamadı", value: bossReportSummary ? Number(bossReportSummary.no_answer) || 0 : reportCustomers.filter((customer) => customer.status === "no_answer").length },
+    { key: "callback", title: "Tekrar Aranacak", value: bossReportSummary ? Number(bossReportSummary.callback) || 0 : reportCustomers.filter((customer) => customer.status === "callback").length },
+    { key: "appointment", title: "Randevu", value: bossReportSummary ? Number(bossReportSummary.appointment) || 0 : reportCustomers.filter((customer) => customer.status === "appointment").length },
+    { key: "contract_appointment", title: "Sözleşmeli Randevu", value: bossReportSummary ? Number(bossReportSummary.contract_appointment) || 0 : reportCustomers.filter((customer) => customer.status === "contract_appointment").length },
+    { key: "not_approved", title: "Yapmayacak", value: bossReportSummary ? Number(bossReportSummary.not_approved) || 0 : reportCustomers.filter((customer) => customer.status === "not_approved").length },
+    { key: "wrong_number", title: "Numara yanlış", value: bossReportSummary ? Number(bossReportSummary.wrong_number) || 0 : reportCustomers.filter((customer) => customer.status === "wrong_number").length },
+    { key: "using", title: "Kullanıyor", value: bossReportSummary ? Number(bossReportSummary.using) || 0 : reportCustomers.filter((customer) => customer.status === "using").length },
+    { key: "paid", title: "Satış", value: bossReportSummary ? Number(bossReportSummary.paid) || 0 : reportCustomers.filter((customer) => customer.status === "paid").length },
   ];
-  const dataStats = getDataStats(reportCustomers);
+  const dataStats = profileRole === "boss" && bossLiveReport?.data_stats
+    ? bossLiveReport.data_stats.map((item) => ({
+        ...item,
+        total: Number(item.total) || 0,
+        appointment: Number(item.appointment) || 0,
+        paid: Number(item.paid) || 0,
+        wrongNumber: Number(item.wrongNumber) || 0,
+      }))
+    : getDataStats(reportCustomers);
   const totalCustomerCount = customerMetric("total", completeCustomers.length);
   const freshCustomerCount = customerMetric("fresh_assigned", newIncomingCustomers.length);
   const assignedCustomerCount = customerMetric("assigned_total", visibleCustomers.filter((customer) => customer.assigned_employee).length);
@@ -2528,10 +2653,7 @@ function App() {
 
               <div style={panelCard}>
                 <h2>Top Rep</h2>
-                {users
-                  .filter((user) => user.role === "employee")
-                  .map((user) => ({ ...user, stats: getUserStats(customers, user.id) }))
-                  .sort((a, b) => b.stats.paid - a.stats.paid)
+                {repStats
                   .slice(0, 5)
                   .map((user, index) => (
                     <div key={user.id} style={topRepRow}>
@@ -2638,7 +2760,7 @@ function App() {
             bulkEmployee={bulkEmployee}
             setBulkEmployee={setBulkEmployee}
             bulkAssignCustomers={bulkAssignCustomers}
-            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["assigned"], orderByAssigned: true }}
+            remoteScope={{ ...ownCustomerRemoteScope, fixedStatuses: ["assigned"], freshAssignedFor: profileId, orderByAssigned: true }}
             dataVersion={customerDataVersion}
           />
         )}
@@ -2876,6 +2998,9 @@ function App() {
             profile={profile}
             users={users}
             customers={customers}
+            customerSummary={customerSummary}
+            liveReport={bossLiveReport}
+            liveReportError={bossLiveReportError}
             onlineUserIds={onlineUserIds}
             staffForm={staffForm}
             setStaffForm={setStaffForm}
@@ -2891,6 +3016,9 @@ function App() {
             reportStats={reportStats}
             repStats={repStats}
             dataStats={dataStats}
+            totalCustomers={customerMetric("total", reportCustomers.length)}
+            liveReportError={bossLiveReportError}
+            generatedAt={bossLiveReport?.generated_at}
           />
         )}
 
@@ -3121,6 +3249,9 @@ function CustomerTable({
       if (remoteScopeConfig.approvedOnly) query = query.eq("approved", true);
       if (remoteScopeConfig.paidOnly) query = query.eq("payment_received", true);
       if (remoteScopeConfig.appointmentBefore) query = query.lt("appointment_date", remoteScopeConfig.appointmentBefore);
+      if (remoteScopeConfig.freshAssignedFor) {
+        query = query.or(`last_action_by.is.null,last_action_by.neq.${remoteScopeConfig.freshAssignedFor}`);
+      }
 
       if (Array.isArray(remoteScopeConfig.fixedStatuses) && remoteScopeConfig.fixedStatuses.length > 0) {
         query = remoteScopeConfig.fixedStatuses.length === 1
@@ -4085,7 +4216,7 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
   );
 }
 
-function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
+function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers, liveReportError, generatedAt }) {
   const maxValue = Math.max(...reportStats.map((item) => item.value), 1);
   return (
     <div style={reportsLayout}>
@@ -4094,9 +4225,11 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
           <div>
             <h2 style={sectionTitle}>Rapor Merkezi</h2>
             <p style={mutedText}>{profile.role === "employee" ? "Kendi müşteri performansın" : "Genel operasyon özeti"}</p>
-            <p style={mutedText}>Toplam görünür müşteri: {customers.length.toLocaleString("tr-TR")}</p>
+            <p style={mutedText}>Toplam görünür müşteri: {totalCustomers.toLocaleString("tr-TR")}</p>
+            {generatedAt && <p style={mutedText}>Canlı özet: {formatDateTime(generatedAt)}</p>}
           </div>
         </div>
+        {liveReportError && profile.role === "boss" && <div style={messageSetupNotice}>{liveReportError}</div>}
 
         <div style={chartList}>
           {reportStats.map((item) => {
@@ -4124,9 +4257,9 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
           {repStats.map((rep, index) => (
             <div key={rep.id} style={leaderRow}>
               <strong>#{index + 1} {rep.full_name || rep.email}</strong>
-              <span style={leaderFigure}><b>◉</b> {rep.stats.total}</span>
-              <span style={leaderFigure}><b>◦</b> {rep.stats.appointment}</span>
-              <span style={{ ...leaderFigure, color: "#6ee7b7" }}><b>₺</b> {rep.stats.paid}</span>
+              <span style={leaderFigure}><b>◉</b> {rep.stats.total.toLocaleString("tr-TR")}</span>
+              <span style={leaderFigure}><b>◦</b> {rep.stats.appointment.toLocaleString("tr-TR")}</span>
+              <span style={{ ...leaderFigure, color: "#6ee7b7" }}><b>₺</b> {rep.stats.paid.toLocaleString("tr-TR")}</span>
             </div>
           ))}
         </section>
@@ -4137,13 +4270,13 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
           <h2 style={sectionTitle}>Data Kaynağı Performansı</h2>
           <p style={mutedText}>Hangi datanın daha çok randevu ve satış getirdiğini karşılaştır.</p>
           {dataStats.length === 0 && <p style={{ ...mutedText, marginTop: 14 }}>Henüz data kaynağı bulunmuyor.</p>}
-          {dataStats.slice(0, 8).map((data) => (
+          {dataStats.map((data) => (
             <div key={data.name} style={dataSourceRow}>
               <strong>{data.name}</strong>
-              <span style={{ ...dataMetric, color: "#93c5fd" }}>◉ {data.total}</span>
-              <span style={{ ...dataMetric, color: "#fde68a" }}>◦ {data.appointment}</span>
-              <span style={{ ...dataMetric, color: "#6ee7b7" }}>₺ {data.paid}</span>
-              <span style={{ ...dataMetric, color: "#fca5a5" }}>! {data.wrongNumber}</span>
+              <span style={{ ...dataMetric, color: "#93c5fd" }}>◉ {data.total.toLocaleString("tr-TR")}</span>
+              <span style={{ ...dataMetric, color: "#fde68a" }}>◦ {data.appointment.toLocaleString("tr-TR")}</span>
+              <span style={{ ...dataMetric, color: "#6ee7b7" }}>₺ {data.paid.toLocaleString("tr-TR")}</span>
+              <span style={{ ...dataMetric, color: "#fca5a5" }}>! {data.wrongNumber.toLocaleString("tr-TR")}</span>
             </div>
           ))}
         </section>
@@ -4152,20 +4285,102 @@ function ReportsView({ profile, customers, reportStats, repStats, dataStats }) {
   );
 }
 
-function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff }) {
+function EmployeesView({ profile, users, customers, customerSummary, liveReport, liveReportError, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff }) {
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedRep, setSelectedRep] = useState("all");
   const [datePreset, setDatePreset] = useState("today");
   const [activityLogs, setActivityLogs] = useState([]);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState("");
-  const [clockNow] = useState(() => Date.now());
+  const [repCustomers, setRepCustomers] = useState(() => customers.filter((customer) => customer.assigned_employee));
+  const [availableCustomerCount, setAvailableCustomerCount] = useState(null);
+  const [repCustomersLoading, setRepCustomersLoading] = useState(true);
+  const [repCustomersError, setRepCustomersError] = useState("");
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const reps = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
-  const customerMap = useMemo(() => new Map(customers.map((customer) => [String(customer.id), customer])), [customers]);
+  const liveRepStats = useMemo(() => new Map((liveReport?.rep_stats || []).map((item) => [item.id, item])), [liveReport]);
+  const customerMap = useMemo(() => new Map([...customers, ...repCustomers].map((customer) => [String(customer.id), customer])), [customers, repCustomers]);
   const userMap = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
+
+    function applyCustomerChange(payload) {
+      const customerId = payload.eventType === "DELETE" ? payload.old?.id : payload.new?.id;
+      if (!customerId) return;
+      setRepCustomers((current) => {
+        if (payload.eventType === "DELETE" || !payload.new?.assigned_employee) {
+          return current.filter((customer) => String(customer.id) !== String(customerId));
+        }
+        const next = payload.new;
+        const existingIndex = current.findIndex((customer) => String(customer.id) === String(customerId));
+        if (existingIndex === -1) return [next, ...current];
+        const updated = [...current];
+        updated[existingIndex] = next;
+        return updated;
+      });
+    }
+
+    async function loadAllRepCustomers(showLoading = false) {
+      if (showLoading) setRepCustomersLoading(true);
+      setRepCustomersError("");
+      const rows = [];
+
+      try {
+        for (let from = 0; ; from += REP_MONITOR_PAGE_SIZE) {
+          const { data, error } = await runWithRetry(() => supabase
+            .from("customers")
+            .select(CUSTOMER_SELECT_COLUMNS)
+            .not("assigned_employee", "is", null)
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .range(from, from + REP_MONITOR_PAGE_SIZE - 1), 3);
+          if (error) throw error;
+          const page = data || [];
+          rows.push(...page);
+          if (page.length < REP_MONITOR_PAGE_SIZE) break;
+        }
+
+        const { count: availableCount, error: availableCountError } = await runWithRetry(() => supabase
+          .from("customers")
+          .select("id", { count: "exact", head: true })
+          .or("status.eq.pool,assigned_employee.is.null"), 3);
+        if (availableCountError) throw availableCountError;
+
+        if (!cancelled) {
+          const uniqueRows = Array.from(new Map(rows.map((customer) => [String(customer.id), customer])).values());
+          setRepCustomers(uniqueRows);
+          setAvailableCustomerCount(Number(availableCount) || 0);
+        }
+      } catch (error) {
+        if (!cancelled) setRepCustomersError("Rep müşteri yükleri eksiksiz okunamadı: " + (error.message || "Bağlantı hatası"));
+      } finally {
+        if (!cancelled) setRepCustomersLoading(false);
+      }
+    }
+
+    const customerChannel = supabase
+      .channel(`rep-customer-monitor-${profile.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, applyCustomerChange)
+      .subscribe();
+    loadAllRepCustomers(true);
+    const reconcileTimer = window.setInterval(() => loadAllRepCustomers(false), REP_MONITOR_RECONCILE_INTERVAL);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(reconcileTimer);
+      supabase.removeChannel(customerChannel);
+    };
+  }, [profile.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const liveLogs = [];
     const now = new Date();
     let start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     if (datePreset === "yesterday") start.setDate(start.getDate() - 1);
@@ -4176,24 +4391,40 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
     async function loadRepActivity() {
       setActivityLoading(true);
       setActivityError("");
-      let query = supabase
-        .from("customer_logs")
-        .select("id, customer_id, user_id, old_status, new_status, note, created_at")
-        .gte("created_at", start.toISOString())
-        .order("created_at", { ascending: false })
-        .limit(5000);
-      if (datePreset === "yesterday") {
-        query = query.lt("created_at", end.toISOString());
+      const allLogs = [];
+      let beforeId = null;
+      let loadError = null;
+
+      while (!cancelled) {
+        let query = supabase
+          .from("customer_logs")
+          .select("id, customer_id, user_id, old_status, new_status, note, created_at")
+          .gte("created_at", start.toISOString())
+          .order("id", { ascending: false })
+          .limit(REP_MONITOR_PAGE_SIZE);
+        if (datePreset === "yesterday") query = query.lt("created_at", end.toISOString());
+        if (beforeId !== null) query = query.lt("id", beforeId);
+        const { data, error } = await runWithRetry(() => query, 3);
+        if (error) {
+          loadError = error;
+          break;
+        }
+        const page = data || [];
+        allLogs.push(...page);
+        if (page.length < REP_MONITOR_PAGE_SIZE) break;
+        beforeId = page[page.length - 1].id;
       }
-      const { data, error } = await query;
+
       if (cancelled) return;
       setActivityLoading(false);
-      if (error) {
-        setActivityError("Rep işlem kayıtları okunamadı: " + error.message);
+      if (loadError) {
+        setActivityError("Rep işlem kayıtları eksiksiz okunamadı: " + loadError.message);
         setActivityLogs([]);
         return;
       }
-      setActivityLogs(data || []);
+      setActivityLogs(Array.from(
+        new Map([...liveLogs, ...allLogs].map((log) => [String(log.id), log])).values()
+      ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
     }
 
     loadRepActivity();
@@ -4202,7 +4433,8 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "customer_logs" }, (payload) => {
         const logTime = new Date(payload.new.created_at);
         if (logTime < start || (end && logTime >= end)) return;
-        setActivityLogs((current) => [payload.new, ...current.filter((log) => log.id !== payload.new.id)].slice(0, 5000));
+        liveLogs.push(payload.new);
+        setActivityLogs((current) => [payload.new, ...current.filter((log) => log.id !== payload.new.id)]);
       })
       .subscribe();
     return () => {
@@ -4217,7 +4449,8 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
 
   const repRows = useMemo(() => reps.map((rep) => {
     const logs = activityLogs.filter((log) => log.user_id === rep.id);
-    const assigned = customers.filter((customer) => customer.assigned_employee === rep.id);
+    const assigned = repCustomers.filter((customer) => customer.assigned_employee === rep.id);
+    const exactStats = liveRepStats.get(rep.id);
     const callActions = logs.filter((log) => ["no_answer", "busy", "callback"].includes(log.new_status)).length;
     const appointments = logs.filter((log) => ["appointment", "contract_appointment"].includes(log.new_status)).length;
     const sales = logs.filter((log) => log.new_status === "paid").length;
@@ -4226,18 +4459,17 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
     return {
       rep,
       logs,
-      assigned: assigned.length,
-      uniqueCustomers: new Set(logs.map((log) => String(log.customer_id))).size,
+      assigned: exactStats ? Number(exactStats.total) || 0 : assigned.length,
       callActions,
       appointments,
       sales,
-      untouched,
+      untouched: exactStats ? Number(exactStats.untouched) || 0 : untouched,
       conversion: callActions ? Math.round((appointments / callActions) * 100) : 0,
       lastAction: lastLog?.created_at || null,
     };
-  }).sort((a, b) => b.logs.length - a.logs.length), [reps, activityLogs, customers]);
+  }).sort((a, b) => b.logs.length - a.logs.length), [reps, activityLogs, repCustomers, liveRepStats]);
 
-  const delayedCustomers = useMemo(() => customers
+  const delayedCustomers = useMemo(() => repCustomers
     .filter((customer) => selectedRep === "all" || customer.assigned_employee === selectedRep)
     .filter((customer) => {
       if (!customer.assigned_employee) return false;
@@ -4248,12 +4480,17 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
       const untouchedLate = isFreshAssignedCustomer(customer) && assignedAt && clockNow - assignedAt.getTime() > 24 * 60 * 60 * 1000;
       return reminderLate || untouchedLate;
     })
-    .sort((a, b) => new Date(a.appointment_date || a.assigned_at) - new Date(b.appointment_date || b.assigned_at)), [customers, selectedRep, clockNow]);
+    .sort((a, b) => new Date(a.appointment_date || a.assigned_at) - new Date(b.appointment_date || b.assigned_at)), [repCustomers, selectedRep, clockNow]);
 
   const totalActions = repRows.reduce((sum, row) => sum + row.logs.length, 0);
   const totalAppointments = repRows.reduce((sum, row) => sum + row.appointments, 0);
   const totalSales = repRows.reduce((sum, row) => sum + row.sales, 0);
   const totalUntouched = repRows.reduce((sum, row) => sum + row.untouched, 0);
+  const totalDelayed = liveRepStats.size
+    ? selectedRep === "all"
+      ? Array.from(liveRepStats.values()).reduce((sum, stats) => sum + (Number(stats.delayed) || 0), 0)
+      : Number(liveRepStats.get(selectedRep)?.delayed) || 0
+    : delayedCustomers.length;
 
   return (
     <div style={repCenterLayout}>
@@ -4279,13 +4516,16 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
         </div>
 
         <div style={repCenterTabs}>
-          {[["overview", "Genel Bakış"], ["stream", "Canlı İşlem Akışı"], ["delayed", `Geciken İşler (${delayedCustomers.length})`], ["staff", "Çalışan Yönetimi"]].map(([key, label]) => (
+          {[["overview", "Genel Bakış"], ["stream", "Canlı İşlem Akışı"], ["delayed", `Geciken İşler (${totalDelayed.toLocaleString("tr-TR")})`], ["staff", "Çalışan Yönetimi"]].map(([key, label]) => (
             <button key={key} type="button" onClick={() => setActiveTab(key)} style={activeTab === key ? repTabActive : repTabButton}>{label}</button>
           ))}
         </div>
 
         {activityError && <div style={messageSetupNotice}>{activityError}</div>}
+        {repCustomersError && <div style={messageSetupNotice}>{repCustomersError}</div>}
+        {liveReportError && <div style={messageSetupNotice}>{liveReportError}</div>}
         {activityLoading && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
+        {repCustomersLoading && <div style={syncNotice}>Tüm rep müşteri yükleri eksiksiz sayılıyor...</div>}
 
         {activeTab === "overview" && (
           <>
@@ -4297,23 +4537,22 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
             </div>
             <div style={repComparisonTable}>
               <div style={repComparisonHeader}>
-                <span>Çalışan</span><span>İşlem</span><span>Müşteri</span><span>Arama</span><span>Randevu</span><span>Satış</span><span>Dönüşüm</span><span>Bekleyen</span><span>Son işlem</span>
+                <span>Çalışan</span><span>İşlem</span><span>Üzerindeki</span><span>Arama</span><span>Randevu</span><span>Satış</span><span>Dönüşüm</span><span>Bekleyen</span><span>Son işlem</span>
               </div>
               {repRows.filter((row) => selectedRep === "all" || row.rep.id === selectedRep).map((row) => (
                 <button key={row.rep.id} type="button" style={repComparisonRow} onClick={() => { setSelectedRep(row.rep.id); setActiveTab("stream"); }}>
                   <span style={repTableIdentity}><ProfileAvatar user={row.rep} size={34} /><span><strong>{row.rep.full_name || row.rep.email}</strong><PresenceBadge user={row.rep} onlineUserIds={onlineUserIds} compact /></span></span>
-                  <strong>{row.logs.length}</strong><span>{row.uniqueCustomers}</span><span>{row.callActions}</span><span>{row.appointments}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched}</span><small>{formatDateTime(row.lastAction)}</small>
+                  <strong>{row.logs.length}</strong><span>{row.assigned.toLocaleString("tr-TR")}</span><span>{row.callActions}</span><span>{row.appointments}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched}</span><small>{formatDateTime(row.lastAction)}</small>
                 </button>
               ))}
             </div>
-            {activityLogs.length >= 5000 && <p style={repLimitNotice}>Bu tarih aralığında 5.000’den fazla işlem var. Ekran en güncel 5.000 işlemi gösteriyor.</p>}
           </>
         )}
 
         {activeTab === "stream" && (
           <div style={activityStream}>
             {visibleLogs.length === 0 && !activityLoading && <p style={mutedText}>Seçilen aralıkta işlem kaydı yok.</p>}
-            {visibleLogs.slice(0, 500).map((log) => {
+            {visibleLogs.map((log) => {
               const customer = customerMap.get(String(log.customer_id));
               const rep = userMap.get(log.user_id);
               return (
@@ -4332,7 +4571,7 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
         {activeTab === "delayed" && (
           <div style={activityStream}>
             {delayedCustomers.length === 0 && <p style={mutedText}>Geciken veya 24 saattir işlem yapılmayan müşteri yok.</p>}
-            {delayedCustomers.slice(0, 500).map((customer) => {
+            {delayedCustomers.map((customer) => {
               const rep = userMap.get(customer.assigned_employee);
               const isReminder = customer.appointment_date && new Date(customer.appointment_date).getTime() < clockNow;
               return (
@@ -4368,7 +4607,7 @@ function EmployeesView({ profile, users, customers, onlineUserIds, staffForm, se
                 <div style={staffActions}><span style={roleBadge}>{roleName(user.role)}</span>{profile.role === "boss" && user.role === "employee" && <button type="button" onClick={() => deleteStaff(user)} style={deleteStaffButton}>Rep Sil</button>}</div>
               </div>
             ))}
-            <AssignmentOverview employees={reps} customers={customers} />
+            <AssignmentOverview employees={reps} customers={repCustomers} exactPoolCount={liveReport?.summary?.available ?? availableCustomerCount ?? customerSummary?.pool} exactRepStats={liveRepStats} />
           </>
         )}
       </section>
@@ -4468,9 +4707,13 @@ function SaleCelebration({ customerName, onClose }) {
   );
 }
 
-function AssignmentOverview({ employees, customers }) {
-  const poolCount = customers.filter((customer) => customer.status === "pool" || !customer.assigned_employee).length;
-  const assignedCount = customers.filter((customer) => customer.assigned_employee).length;
+function AssignmentOverview({ employees, customers, exactPoolCount, exactRepStats }) {
+  const poolCount = exactPoolCount === null || exactPoolCount === undefined
+    ? customers.filter((customer) => customer.status === "pool" || !customer.assigned_employee).length
+    : Number(exactPoolCount) || 0;
+  const assignedCount = exactRepStats?.size
+    ? Array.from(exactRepStats.values()).reduce((sum, stats) => sum + (Number(stats.total) || 0), 0)
+    : customers.filter((customer) => customer.assigned_employee).length;
   const suggestedLoad = employees.length ? Math.ceil((assignedCount + poolCount) / employees.length) : 0;
 
   return (
@@ -4478,16 +4721,19 @@ function AssignmentOverview({ employees, customers }) {
       <div style={sectionHeader}>
         <div>
           <h3 style={{ ...sectionTitle, fontSize: 18 }}>Dengeli Dağıtım</h3>
-          <p style={mutedText}>Havuz: {poolCount} müşteri | Hedef yük: rep başına yaklaşık {suggestedLoad}</p>
+          <p style={mutedText}>Havuz: {poolCount.toLocaleString("tr-TR")} müşteri | Hedef yük: rep başına yaklaşık {suggestedLoad.toLocaleString("tr-TR")}</p>
         </div>
       </div>
       {employees.map((employee) => {
-        const load = customers.filter((customer) => customer.assigned_employee === employee.id).length;
+        const exactStats = exactRepStats?.get(employee.id);
+        const load = exactStats
+          ? Number(exactStats.total) || 0
+          : customers.filter((customer) => customer.assigned_employee === employee.id).length;
         const isLight = load < suggestedLoad;
         return (
           <div key={employee.id} style={workloadRow}>
             <strong>{employee.full_name || employee.email}</strong>
-            <span style={isLight ? workloadAvailable : workloadBusy}>{load} müşteri {isLight ? "- uygun" : "- yoğun"}</span>
+            <span style={isLight ? workloadAvailable : workloadBusy}>{load.toLocaleString("tr-TR")} müşteri {isLight ? "- uygun" : "- yoğun"}</span>
           </div>
         );
       })}
@@ -4682,7 +4928,6 @@ const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: `1px s
 const repComparisonHeader = { minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 11, fontWeight: 800 };
 const repComparisonRow = { width: "100%", minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", textAlign: "left" };
 const repTableIdentity = { display: "flex", alignItems: "center", gap: 9, minWidth: 0 };
-const repLimitNotice = { margin: "12px 0 0", color: "#fde68a", fontSize: 12 };
 const activityStream = { display: "grid", gap: 8, maxHeight: "68vh", overflowY: "auto", paddingRight: 4 };
 const activityStreamRow = { display: "grid", gridTemplateColumns: "145px minmax(140px,.8fr) minmax(180px,1fr) 150px minmax(180px,1.2fr)", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, border: `1px solid ${brandRedBorder}`, borderLeft: "4px solid", background: "#ffffff", minWidth: 830 };
 const activityTime = { color: mutedRedText, fontSize: 11 };
