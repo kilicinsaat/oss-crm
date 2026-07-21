@@ -74,6 +74,7 @@ const REP_MONITOR_RECONCILE_INTERVAL = 30_000;
 const INITIAL_CUSTOMER_PAGES = 1;
 const MAX_PRIORITY_PRELOAD_PAGES = 1;
 const SEARCH_DEBOUNCE_MS = 300;
+const CUSTOMER_SEARCH_MIN_LENGTH = 3;
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -191,6 +192,15 @@ function normalizeCustomerSearch(value) {
     .replace(/[%_,]/g, " ")
     .replace(/\s+/g, " ")
     .slice(0, 80);
+}
+
+function digitsOnly(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function isNumericCustomerSearch(value) {
+  const rawValue = String(value || "").trim();
+  return Boolean(rawValue) && /^[\d\s()+-]+$/.test(rawValue);
 }
 
 function isTurkishMobile(value) {
@@ -502,11 +512,19 @@ function inferCustomerGender(customer) {
 }
 
 function customerMatchesSearch(customer, term) {
-  const query = term.trim().toLowerCase();
+  const query = normalizeCustomerSearch(term);
   if (!query) return true;
 
-  return `${customer.first_name || ""} ${customer.last_name || ""} ${customer.phone || ""} ${customer.phone_2 || ""} ${customer.tc_no || ""} ${customer.batch_name || ""}`
-    .toLowerCase()
+  const numericQuery = isNumericCustomerSearch(term);
+  if (numericQuery) {
+    const rawDigits = digitsOnly(term);
+    const phoneQuery = normalizePhone(term);
+    return [customer.phone, customer.phone_2].some((phone) => normalizePhone(phone).includes(phoneQuery))
+      || digitsOnly(customer.tc_no).includes(rawDigits);
+  }
+
+  return `${customer.first_name || ""} ${customer.last_name || ""} ${customer.email || ""} ${customer.phone || ""} ${customer.phone_2 || ""} ${customer.tc_no || ""} ${customer.batch_name || ""}`
+    .toLocaleLowerCase("tr-TR")
     .includes(query);
 }
 
@@ -3230,8 +3248,11 @@ function CustomerTable({
       setRemoteLoading(true);
       setRemoteError("");
       const cleanSearch = normalizeCustomerSearch(debouncedSearchTerm);
+      const searchDigits = digitsOnly(debouncedSearchTerm);
+      const numericSearch = isNumericCustomerSearch(debouncedSearchTerm);
+      const exactPhoneSearch = numericSearch && normalizePhone(debouncedSearchTerm).length === 10;
 
-      if (cleanSearch && cleanSearch.length < 3) {
+      if (cleanSearch && cleanSearch.length < CUSTOMER_SEARCH_MIN_LENGTH) {
         setRemoteRows([]);
         setRemoteTotal(0);
         setRemoteLoading(false);
@@ -3241,7 +3262,7 @@ function CustomerTable({
 
       let query = supabase
         .from("customers")
-        .select(CUSTOMER_SELECT_COLUMNS, { count: REMOTE_CUSTOMER_COUNT_MODE });
+        .select(CUSTOMER_SELECT_COLUMNS, { count: cleanSearch && !exactPhoneSearch ? "planned" : REMOTE_CUSTOMER_COUNT_MODE });
 
       if (remoteScopeConfig.fixedAssignee) query = query.eq("assigned_employee", remoteScopeConfig.fixedAssignee);
       if (remoteScopeConfig.assignmentScope === "pool") query = query.is("assigned_employee", null);
@@ -3267,7 +3288,16 @@ function CustomerTable({
       if (statusFilter !== "all") query = query.eq("status", statusFilter);
 
       if (cleanSearch) {
-        query = query.ilike("search_text", `%${cleanSearch}%`);
+        if (exactPhoneSearch) {
+          const phoneKey = normalizePhone(debouncedSearchTerm);
+          const phoneFilters = [`phone_key.eq.${phoneKey}`, `phone_2_key.eq.${phoneKey}`];
+          if (searchDigits.length >= 11) phoneFilters.push(`tc_no.ilike.%${searchDigits}%`);
+          query = query.or(phoneFilters.join(","));
+        } else if (numericSearch) {
+          query = query.or(`phone.ilike.%${searchDigits}%,phone_2.ilike.%${searchDigits}%,tc_no.ilike.%${searchDigits}%`);
+        } else {
+          query = query.ilike("search_text", `%${cleanSearch}%`);
+        }
       }
 
       if (remoteScopeConfig.orderByAppointment) {
@@ -3304,7 +3334,9 @@ function CustomerTable({
         ? rows || []
         : (rows || []).filter((customer) => inferCustomerGender(customer) === genderFilter);
       setRemoteRows(visibleRows);
-      setRemoteTotal(Number.isFinite(count) ? count : from + visibleRows.length);
+      setRemoteTotal(cleanSearch && visibleRows.length < pageSize
+        ? from + visibleRows.length
+        : Number.isFinite(count) ? count : from + visibleRows.length);
     }
 
     const refreshTimer = window.setTimeout(loadRemotePage, 120);
