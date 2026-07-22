@@ -355,6 +355,12 @@ function callStatusLabel(call) {
   return "Tamamlandı";
 }
 
+function callProviderLabel(call) {
+  if (call?.provider === "jettel") return "Jettel";
+  if (call?.provider === "manual") return "Manuel";
+  return "MicroSIP";
+}
+
 function formatCallDuration(seconds) {
   const total = Math.max(0, Number(seconds) || 0);
   const minutes = Math.floor(total / 60);
@@ -3858,6 +3864,17 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             <p style={logNote}>
               Temsilci: {users.find((user) => user.id === call.profile_id)?.full_name || "Bilinmeyen kullanıcı"}
             </p>
+            {(call.caller_name || call.extension || call.transfer_target || call.provider) && (
+              <p style={logNote}>
+                Kaynak: {callProviderLabel(call)}
+                {call.caller_name ? ` · Arayan: ${call.caller_name}` : ""}
+                {call.extension ? ` · Dahili: ${call.extension}` : ""}
+                {call.transfer_target ? ` · Yonlendirme: ${call.transfer_target}` : ""}
+              </p>
+            )}
+            {call.recording_url && (
+              <a href={call.recording_url} target="_blank" rel="noreferrer" style={phoneLink}>Arama kaydini dinle</a>
+            )}
             <small style={logTime}>{formatDateTime(call.ringing_at || call.started_at || call.created_at)}</small>
           </div>
         ))}
@@ -4329,6 +4346,10 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
   const [repCustomersLoading, setRepCustomersLoading] = useState(true);
   const [repCustomersError, setRepCustomersError] = useState("");
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [jettelExtensions, setJettelExtensions] = useState([]);
+  const [jettelExtensionsLoading, setJettelExtensionsLoading] = useState(false);
+  const [jettelExtensionsError, setJettelExtensionsError] = useState("");
+  const [jettelSavingExtension, setJettelSavingExtension] = useState("");
   const reps = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
   const liveRepStats = useMemo(() => new Map((liveReport?.rep_stats || []).map((item) => [item.id, item])), [liveReport]);
   const customerMap = useMemo(() => new Map([...customers, ...repCustomers].map((customer) => [String(customer.id), customer])), [customers, repCustomers]);
@@ -4338,6 +4359,43 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
     const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (profile.role !== "boss") return undefined;
+    let cancelled = false;
+
+    async function loadJettelExtensions(showLoading = false) {
+      if (showLoading) setJettelExtensionsLoading(true);
+      setJettelExtensionsError("");
+      const { data, error } = await runWithRetry(() => supabase
+        .from("jettel_extensions")
+        .select("extension,profile_id,display_name,line_number,group_name,is_active,is_connected,last_seen_at")
+        .order("extension", { ascending: true }), 2);
+
+      if (cancelled) return;
+      setJettelExtensionsLoading(false);
+      if (error) {
+        const setupMissing = error.code === "PGRST205" || error.code === "42P01" || error.message?.includes("jettel_extensions");
+        setJettelExtensionsError(setupMissing
+          ? "Dahili yÃ¶netimi kurulumu eksik. Supabase SQL Editor'da JETTEL_CALL_INTEGRATION.sql dosyasÄ±nÄ± bir kez Ã§alÄ±ÅŸtÄ±r."
+          : "Dahili listesi okunamadÄ±: " + error.message);
+        setJettelExtensions([]);
+        return;
+      }
+      setJettelExtensions(data || []);
+    }
+
+    const channel = supabase
+      .channel(`jettel-extensions-${profile.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "jettel_extensions" }, () => loadJettelExtensions(false))
+      .subscribe();
+    loadJettelExtensions(true);
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [profile.id, profile.role]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4524,6 +4582,29 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
       : Number(liveRepStats.get(selectedRep)?.delayed) || 0
     : delayedCustomers.length;
 
+  async function updateJettelExtension(extension, profileId) {
+    if (profile.role !== "boss") return;
+    setJettelSavingExtension(extension);
+    setJettelExtensionsError("");
+    const assignedRep = reps.find((rep) => rep.id === profileId);
+    const { error } = await runWithRetry(() => supabase
+      .from("jettel_extensions")
+      .update({
+        profile_id: profileId || null,
+        display_name: assignedRep?.full_name || assignedRep?.email || extension,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("extension", extension), 2);
+    setJettelSavingExtension("");
+    if (error) {
+      setJettelExtensionsError("Dahili eÅŸlemesi kaydedilemedi: " + error.message);
+      return;
+    }
+    setJettelExtensions((current) => current.map((item) => item.extension === extension
+      ? { ...item, profile_id: profileId || null, display_name: assignedRep?.full_name || assignedRep?.email || item.extension }
+      : item));
+  }
+
   return (
     <div style={repCenterLayout}>
       <section style={panelCard}>
@@ -4553,8 +4634,15 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
           ))}
         </div>
 
+        {profile.role === "boss" && (
+          <div style={{ margin: "-8px 0 16px" }}>
+            <button type="button" onClick={() => setActiveTab("extensions")} style={activeTab === "extensions" ? repTabActive : repTabButton}>Dahili Yonetimi</button>
+          </div>
+        )}
+
         {activityError && <div style={messageSetupNotice}>{activityError}</div>}
         {repCustomersError && <div style={messageSetupNotice}>{repCustomersError}</div>}
+        {jettelExtensionsError && <div style={messageSetupNotice}>{jettelExtensionsError}</div>}
         {liveReportError && <div style={messageSetupNotice}>{liveReportError}</div>}
         {activityLoading && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
         {repCustomersLoading && <div style={syncNotice}>Tüm rep müşteri yükleri eksiksiz sayılıyor...</div>}
@@ -4616,6 +4704,51 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {activeTab === "extensions" && profile.role === "boss" && (
+          <div style={jettelExtensionPanel}>
+            <div style={sectionHeader}>
+              <div>
+                <h3 style={{ margin: 0 }}>Dahili - Rep Eslemesi</h3>
+                <p style={mutedText}>Jettel'den gelen arama 101, 102 gibi dahiliyle gelirse CRM burada secili rep hesabina yazar.</p>
+              </div>
+              {jettelExtensionsLoading && <span style={mutedText}>Dahililer yukleniyor...</span>}
+            </div>
+            <div style={jettelExtensionTable}>
+              <div style={jettelExtensionHeader}>
+                <span>Dahili</span><span>Hat</span><span>Grup</span><span>Durum</span><span>Bagli Rep</span>
+              </div>
+              {jettelExtensions.length === 0 && !jettelExtensionsLoading && (
+                <div style={emptyTableState}>Dahili kaydi yok. JETTEL_CALL_INTEGRATION.sql dosyasini Supabase'de calistirdigindan emin ol.</div>
+              )}
+              {jettelExtensions.map((extension) => {
+                const assignedRep = reps.find((rep) => rep.id === extension.profile_id);
+                return (
+                  <div key={extension.extension} style={jettelExtensionRow}>
+                    <strong>{extension.extension}</strong>
+                    <span>{extension.line_number || "-"}</span>
+                    <span>{extension.group_name || "-"}</span>
+                    <span style={extension.is_connected ? onlineBadgeStyle : offlineBadgeStyle}>{extension.is_connected ? "Bagli" : "Bagli degil"}</span>
+                    <div style={jettelExtensionSelectWrap}>
+                      <select
+                        value={extension.profile_id || ""}
+                        onChange={(event) => updateJettelExtension(extension.extension, event.target.value)}
+                        disabled={jettelSavingExtension === extension.extension}
+                        style={inputStyle}
+                      >
+                        <option value="">Bosta / rep yok</option>
+                        {reps.map((rep) => (
+                          <option key={rep.id} value={rep.id}>{rep.full_name || rep.email}</option>
+                        ))}
+                      </select>
+                      <small style={mutedText}>{jettelSavingExtension === extension.extension ? "Kaydediliyor..." : assignedRep ? `Aktif: ${assignedRep.full_name || assignedRep.email}` : "Bu dahili bosta"}</small>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -4945,6 +5078,8 @@ const paginationButton = { minWidth: 66, padding: "8px 10px", borderRadius: 7, b
 const employeeRow = { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff", color: brandRed, padding: 14, borderRadius: 12, marginBottom: 10, border: `1px solid ${brandRedBorder}` };
 const employeeIdentity = { display: "flex", alignItems: "center", gap: 12, minWidth: 0 };
 const roleBadge = { background: brandRed, color: "#ffffff", padding: "6px 12px", borderRadius: 999, fontSize: 13 };
+const onlineBadgeStyle = { display: "inline-flex", width: "fit-content", padding: "5px 8px", borderRadius: 999, background: "rgba(34,197,94,0.16)", color: "#15803d", fontSize: 12, fontWeight: 800 };
+const offlineBadgeStyle = { ...onlineBadgeStyle, background: "rgba(148,163,184,0.16)", color: "#64748b" };
 const staffActions = { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 };
 const deleteStaffButton = { padding: "7px 10px", borderRadius: 7, border: "1px solid rgba(252,165,165,0.55)", background: "rgba(127,29,29,0.5)", color: "#fecaca", cursor: "pointer", fontWeight: 700 };
 const staffFormBox = { background: "#ffffff", color: brandRed, padding: 18, borderRadius: 14, marginBottom: 20, border: `1px solid ${brandRedBorder}` };
@@ -4968,6 +5103,11 @@ const activityCustomer = { color: brandRed, fontWeight: 700, fontSize: 12 };
 const activityNote = { color: mutedRedText, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const overdueBadge = { padding: "5px 8px", borderRadius: 999, background: "rgba(239,68,68,0.2)", color: "#fca5a5", fontSize: 11, fontWeight: 800, textAlign: "center" };
 const waitingBadge = { ...overdueBadge, background: "rgba(245,158,11,0.18)", color: "#fde68a" };
+const jettelExtensionPanel = { display: "grid", gap: 14 };
+const jettelExtensionTable = { display: "grid", gap: 0, borderRadius: 12, overflow: "hidden", border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
+const jettelExtensionHeader = { display: "grid", gridTemplateColumns: "100px 150px 120px 120px minmax(240px,1fr)", gap: 10, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 12, fontWeight: 800, minWidth: 760 };
+const jettelExtensionRow = { display: "grid", gridTemplateColumns: "100px 150px 120px 120px minmax(240px,1fr)", gap: 10, alignItems: "center", padding: "11px 13px", borderBottom: `1px solid ${brandRedBorder}`, minWidth: 760, color: brandRed };
+const jettelExtensionSelectWrap = { display: "grid", gap: 2 };
 const modalBg = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 999 };
 const modalCard = { width: 860, maxWidth: "94%", maxHeight: "90vh", overflowY: "auto", background: "#ffffff", color: brandRed, padding: 25, borderRadius: 20, border: `1px solid ${brandRedBorder}` };
 const closeButton = { float: "right", padding: 8, cursor: "pointer", borderRadius: 8, border: `1px solid ${brandRed}`, background: brandRed, color: "#ffffff" };

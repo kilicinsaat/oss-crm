@@ -191,10 +191,9 @@ begin
   set assigned_employee = null,
       assigned_at = null,
       status = case
-        when customer.status = 'pool' then 'pool'::public.customer_status
-        when customer.status = 'assigned' and not exists (
-          select 1 from public.customer_logs log where log.customer_id = customer.id
-        ) then 'pool'::public.customer_status
+        when customer.status = 'assigned'
+          and customer.last_action_by is distinct from p_employee_id
+        then 'pool'::public.customer_status
         else customer.status
       end,
       last_action_by = auth.uid()
@@ -229,10 +228,9 @@ begin
   set assigned_employee = null,
       assigned_at = null,
       status = case
-        when customer.status = 'pool' then 'pool'::public.customer_status
-        when customer.status = 'assigned' and not exists (
-          select 1 from public.customer_logs log where log.customer_id = customer.id
-        ) then 'pool'::public.customer_status
+        when customer.status = 'assigned'
+          and customer.last_action_by is distinct from target_rep_id
+        then 'pool'::public.customer_status
         else customer.status
       end,
       last_action_by = auth.uid()

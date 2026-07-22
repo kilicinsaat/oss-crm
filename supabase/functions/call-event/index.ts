@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const allowedEvents = new Set(["incoming", "answer", "start", "end"]);
+const safeProviderValues = new Set(["microsip", "jettel", "manual"]);
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -16,6 +17,27 @@ function normalizePhone(value: unknown) {
   if (digits.startsWith("90") && digits.length === 12) digits = digits.slice(2);
   if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
   return /^5\d{9}$/.test(digits) ? digits : null;
+}
+
+function cleanText(value: unknown, maxLength = 160) {
+  const text = String(value ?? "").trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
+function cleanUrl(value: unknown) {
+  const text = cleanText(value, 500);
+  if (!text) return null;
+  try {
+    const url = new URL(text);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function cleanMetadata(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
 }
 
 Deno.serve(async (request) => {
@@ -37,8 +59,18 @@ Deno.serve(async (request) => {
   const eventType = String(payload.eventType || "").toLowerCase();
   const phone = normalizePhone(payload.phone);
   const deviceId = String(payload.deviceId || "").trim().slice(0, 120);
-  const profileId = String(payload.profileId || "").trim();
-  if (!allowedEvents.has(eventType) || !phone || !deviceId || !/^[0-9a-f-]{36}$/i.test(profileId)) {
+  const hasProvider = Boolean(cleanText(payload.provider, 40));
+  const providerInput = String(payload.provider || "microsip").toLowerCase();
+  const provider = safeProviderValues.has(providerInput) ? providerInput : "manual";
+  const suppliedProfileId = String(payload.profileId || "").trim();
+  const externalCallId = cleanText(payload.externalCallId || payload.callId, 160);
+  const callerName = cleanText(payload.callerName || payload.caller_name, 160);
+  const extension = cleanText(payload.extension || payload.dahili, 80);
+  const transferTarget = cleanText(payload.transferTarget || payload.transfer_to, 120);
+  const recordingUrl = cleanUrl(payload.recordingUrl || payload.recording_url);
+  const rawEvent = cleanMetadata(payload.metadata);
+  const validSuppliedProfileId = /^[0-9a-f-]{36}$/i.test(suppliedProfileId);
+  if (!allowedEvents.has(eventType) || !phone || !deviceId || (!validSuppliedProfileId && provider !== "jettel")) {
     return json({ success: false, error: "Invalid call event." }, 400);
   }
 
@@ -47,12 +79,27 @@ Deno.serve(async (request) => {
   if (!supabaseUrl || !serviceRoleKey) return json({ success: false, error: "Server configuration is incomplete." }, 500);
   const supabase = createClient(supabaseUrl, serviceRoleKey);
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("id")
-    .eq("id", profileId)
-    .eq("is_active", true)
-    .maybeSingle();
+  let profileId = validSuppliedProfileId ? suppliedProfileId : null;
+  if (!profileId && provider === "jettel" && extension) {
+    const { data: mappedExtension } = await supabase
+      .from("jettel_extensions")
+      .select("profile_id")
+      .eq("extension", extension)
+      .eq("is_active", true)
+      .maybeSingle();
+    profileId = mappedExtension?.profile_id ?? null;
+  }
+
+  let profile = null;
+  if (profileId) {
+    const profileResult = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("id", profileId)
+      .eq("is_active", true)
+      .maybeSingle();
+    profile = profileResult.data;
+  }
   if (!profile) return json({ success: false, error: "Active CRM profile not found." }, 403);
 
   const { data: customer } = await supabase
@@ -84,6 +131,13 @@ Deno.serve(async (request) => {
       direction: "incoming",
       status: "ringing",
       ringing_at: now,
+      provider,
+      external_call_id: externalCallId,
+      caller_name: callerName,
+      extension,
+      transfer_target: transferTarget,
+      recording_url: recordingUrl,
+      raw_event: rawEvent,
     }).select("id").single();
     if (error) return json({ success: false, error: error.message }, 500);
     return json({ success: true, callId: data.id });
@@ -95,6 +149,13 @@ Deno.serve(async (request) => {
       status: "answered",
       answered_at: openCall.answered_at || now,
       updated_at: now,
+      provider: hasProvider ? provider : openCall.provider,
+      external_call_id: externalCallId || openCall.external_call_id,
+      caller_name: callerName || openCall.caller_name,
+      extension: extension || openCall.extension,
+      transfer_target: transferTarget || openCall.transfer_target,
+      recording_url: recordingUrl || openCall.recording_url,
+      raw_event: { ...(openCall.raw_event || {}), ...rawEvent },
     }).eq("id", openCall.id);
     if (error) return json({ success: false, error: error.message }, 500);
     return json({ success: true, callId: openCall.id });
@@ -107,6 +168,13 @@ Deno.serve(async (request) => {
         started_at: openCall.started_at || now,
         answered_at: openCall.answered_at || now,
         updated_at: now,
+        provider: hasProvider ? provider : openCall.provider,
+        external_call_id: externalCallId || openCall.external_call_id,
+        caller_name: callerName || openCall.caller_name,
+        extension: extension || openCall.extension,
+        transfer_target: transferTarget || openCall.transfer_target,
+        recording_url: recordingUrl || openCall.recording_url,
+        raw_event: { ...(openCall.raw_event || {}), ...rawEvent },
       }).eq("id", openCall.id);
       if (error) return json({ success: false, error: error.message }, 500);
       return json({ success: true, callId: openCall.id });
@@ -120,6 +188,13 @@ Deno.serve(async (request) => {
       status: "answered",
       answered_at: now,
       started_at: now,
+      provider,
+      external_call_id: externalCallId,
+      caller_name: callerName,
+      extension,
+      transfer_target: transferTarget,
+      recording_url: recordingUrl,
+      raw_event: rawEvent,
     }).select("id").single();
     if (error) return json({ success: false, error: error.message }, 500);
     return json({ success: true, callId: data.id });
@@ -135,8 +210,14 @@ Deno.serve(async (request) => {
     ended_at: now,
     duration_seconds: durationSeconds,
     updated_at: now,
+    provider: hasProvider ? provider : openCall.provider,
+    external_call_id: externalCallId || openCall.external_call_id,
+    caller_name: callerName || openCall.caller_name,
+    extension: extension || openCall.extension,
+    transfer_target: transferTarget || openCall.transfer_target,
+    recording_url: recordingUrl || openCall.recording_url,
+    raw_event: { ...(openCall.raw_event || {}), ...rawEvent },
   }).eq("id", openCall.id);
   if (error) return json({ success: false, error: error.message }, 500);
   return json({ success: true, callId: openCall.id, durationSeconds });
 });
-
