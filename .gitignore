@@ -14,6 +14,7 @@ dist-ssr
 secret.txt
 call-bridge/**/secret.txt
 .codex-remote-attachments/
+supabase/.temp/
 
 # Editor directories and files
 .vscode/*

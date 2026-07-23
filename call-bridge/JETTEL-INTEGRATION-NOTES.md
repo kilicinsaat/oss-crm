@@ -9,33 +9,127 @@ Bu dosyaya canli API sifresi, token veya apicode yazilmaz. Bu degerler Supabase 
 - `supabase/JETTEL_CALL_INTEGRATION.sql` calistirilinca arama kayitlari icin Jettel alanlari eklenir:
   - `provider`
   - `external_call_id`
+  - `call_uuid`
   - `caller_name`
   - `extension`
   - `transfer_target`
   - `recording_url`
+  - `recording_storage_path`
+  - `recording_fetched_at`
+  - `recording_error`
+  - `waiting_seconds`
   - `raw_event`
+- `jettel-api` Edge Function Jettel Yonetici API isteklerini server tarafindan atar.
+- Jettel API sonuc ve hatalari `public.jettel_action_logs` tablosuna yazilir.
 
-## Jettel tarafindan lazim olan bilgiler
+## Jettel PDF'lerinden netlesen fonksiyonlar
 
-Dokumandan su endpoint/fonksiyon isimleri netlesmeli:
+Endpoint formati:
 
-- Arama gecmisi / CDR listesi endpoint'i
-- Arama kaydi ses dosyasi endpoint'i veya recording URL alani
-- Anlik gelen arama webhook destegi var mi
-- Dahili listesini okuma endpoint'i
-- Cagri yonlendirme ekleme/guncelleme endpoint'i
-- Tarih filtreleme formati
-- Sayfalama/limit formati
+```txt
+POST https://vip.jettel.com.tr/api/v1.php?mode=FonksiyonAdi
+Content-Type: application/x-www-form-urlencoded
+```
+
+Ortak alanlar:
+
+```txt
+token=...
+apicode=...
+username=admin-pbx349
+password=...
+```
+
+Desteklenen ana fonksiyonlar:
+
+- `ActiveCalls`: O anki aktif cagri/dahili bilgisini verir.
+- `ExtensionStatus`: Dahili bagli/bagli degil, IP ve cihaz durumunu verir.
+- `CallReport`: Arama gecmisini verir. Tarih araligi genel sorguda en fazla 24 saat olmali.
+- `PlayRecord`: `callID` veya `call_uuid` ile ses kaydini base64 `wav` olarak verir.
+- `CallBack`: Belirli dahili uzerinden musteriyi aratir.
+- `ExtensionQueuesCallStatus`: Dahiliyi kuyruk aramalarinda durdurur/devam ettirir.
+- `ExtensionDNDStatus`: Dahili rahatsiz etmeyin durumunu acar/kapatir.
+- `TwoWayCallback`: Iki dis numara arasinda callback baslatir.
+- `SpyCall`: Dinleme/fisilti/dahil olma. Guvenlik sebebiyle CRM'de varsayilan kapali tutulur.
+
+## CRM `jettel-api` action formatlari
+
+Frontend veya manuel testte Supabase Function'a su body'ler gonderilir:
+
+```json
+{ "action": "extension-status" }
+```
+
+```json
+{ "action": "active-calls" }
+```
+
+```json
+{
+  "action": "call-report",
+  "firstDay": "2026-07-23 00:00:00",
+  "lastDay": "2026-07-23 23:59:59",
+  "type": "",
+  "caller": "",
+  "called": "",
+  "status": ""
+}
+```
+
+```json
+{
+  "action": "callback",
+  "extension": "101",
+  "phone": "05321234567"
+}
+```
+
+```json
+{
+  "action": "play-record",
+  "callId": "123456"
+}
+```
+
+```json
+{
+  "action": "queue-call-status",
+  "extension": "101",
+  "status": "1"
+}
+```
+
+```json
+{
+  "action": "dnd-status",
+  "extension": "101",
+  "status": "0"
+}
+```
+
+```json
+{
+  "action": "two-way-callback",
+  "sourceNumber": "05321234567",
+  "destinationNumber": "05329876543",
+  "trunkCallerID": "902129030222",
+  "callDuration": 60,
+  "voiceRecord": 1
+}
+```
 
 ## Secrets
 
 Supabase Function Secrets olarak tutulacaklar:
 
-- `JETTEL_POST_URL`
+- `JETTEL_BASE_URL` = `https://vip.jettel.com.tr`
 - `JETTEL_USERNAME`
-- `JETTEL_API_PASSWORD`
+- `JETTEL_PASSWORD`
 - `JETTEL_TOKEN`
 - `JETTEL_APICODE`
+- `JETTEL_PBX_SUFFIX` = `pbx349`
+- `JETTEL_DEFAULT_TRUNK_CALLER_ID` = `902129030222`
+- `JETTEL_ENABLE_SPY_CALL` = `true` sadece audit/izin kurallari hazirsa.
 
 ## Ekranlardan netlesen santral yapisi
 
@@ -50,11 +144,12 @@ Bu bilgi CRM tarafinda `public.jettel_extensions` tablosuna yazilir. Her dahili 
 ## Onerilen akis
 
 1. `JETTEL_CALL_INTEGRATION.sql` Supabase SQL Editor'da bir kez calistirilir.
-2. Jettel dokumanindan arama gecmisi ve kayit endpoint'i netlestirilir.
-3. Yeni bir `jettel-call-sync` Edge Function yazilir.
-4. Function belirli araliklarla Jettel'den son aramalari ceker.
-5. Gelen kayitlar `call_sessions.external_call_id` ile idempotent sekilde insert/update edilir.
-6. CRM müşteri detayinda kayıt linki, arayan, dahili ve yonlendirme bilgisi otomatik gorunur.
+2. Supabase Function Secrets'a Jettel bilgileri girilir.
+3. `jettel-api` Edge Function deploy edilir.
+4. Boss panelde Rep Takip Merkezi > Dahili Yonetimi ekranindan rep-dahili eslesmeleri yapilir.
+5. `extension-status` ile dahili baglanti durumu canli yenilenir.
+6. `call-report` periyodik calistirilirse Jettel arama gecmisi `call_sessions` tablosuna islenir.
+7. CRM musteri detayinda arama gecmisi, arayan/aranan, dahili, sure ve kayit bilgisi gorunur.
 
 ## Cagri yonlendirme
 

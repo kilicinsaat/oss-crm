@@ -61,6 +61,8 @@ const appTextColor = brandRed;
 const mutedRedText = "#8a2a08";
 const IMPORTANT_CUSTOMER_STATUSES = ["assigned", "appointment", "contract_appointment", "callback"];
 const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"];
+const APPOINTMENT_REMINDER_STATUSES = ["appointment", "contract_appointment"];
+const CALENDAR_REMINDER_STATUSES = ["callback", "appointment", "contract_appointment"];
 const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
 const REMOTE_CUSTOMER_COUNT_MODE = "exact";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
@@ -71,6 +73,9 @@ const SESSION_CHECK_INTERVAL = 60_000;
 const CUSTOMER_PRELOAD_PAGE_SIZE = 1000;
 const REP_MONITOR_PAGE_SIZE = 1000;
 const REP_MONITOR_RECONCILE_INTERVAL = 30_000;
+const APPOINTMENT_RECONCILE_INTERVAL = 60_000;
+const APPOINTMENT_DAY_ALERT_MS = 24 * 60 * 60 * 1000;
+const APPOINTMENT_SOON_ALERT_MS = 30 * 60 * 1000;
 const INITIAL_CUSTOMER_PAGES = 1;
 const MAX_PRIORITY_PRELOAD_PAGES = 1;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -607,6 +612,8 @@ function App() {
   const [customerLogsLoading, setCustomerLogsLoading] = useState(false);
   const [customerCalls, setCustomerCalls] = useState([]);
   const [customerCallsLoading, setCustomerCallsLoading] = useState(false);
+  const [customerSmsLogs, setCustomerSmsLogs] = useState([]);
+  const [customerSmsLogsLoading, setCustomerSmsLogsLoading] = useState(false);
   const [users, setUsers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -659,12 +666,18 @@ function App() {
 
   const [systemToast, setSystemToast] = useState(null);
   const [messageNotices, setMessageNotices] = useState([]);
+  const [appointmentCustomers, setAppointmentCustomers] = useState([]);
+  const [appointmentNotices, setAppointmentNotices] = useState([]);
   const [notificationPermission, setNotificationPermission] = useState(() =>
     typeof Notification === "undefined" ? "unsupported" : Notification.permission
   );
   const toastTimerRef = useRef(null);
   const customerLogsRequestRef = useRef(0);
   const customerCallsRequestRef = useRef(0);
+  const customerSmsLogsRequestRef = useRef(0);
+  const dismissedAppointmentNoticeIdsRef = useRef(new Set());
+  const announcedAppointmentNoticeIdsRef = useRef(new Set());
+  const appointmentAudioContextRef = useRef(null);
   const selectedCustomerRelatedIdsRef = useRef(new Set());
   const usersRef = useRef([]);
   const customersRef = useRef([]);
@@ -939,6 +952,94 @@ function App() {
 
   useEffect(() => {
     if (!profile) return undefined;
+    let cancelled = false;
+
+    async function loadAppointmentCustomers(showWarnings = false) {
+      const rows = [];
+      try {
+        for (let from = 0; !cancelled; from += REP_MONITOR_PAGE_SIZE) {
+          let query = supabase
+            .from("customers")
+            .select(CUSTOMER_SELECT_COLUMNS)
+            .in("status", CALENDAR_REMINDER_STATUSES)
+            .not("appointment_date", "is", null)
+            .order("appointment_date", { ascending: true, nullsFirst: false })
+            .range(from, from + REP_MONITOR_PAGE_SIZE - 1);
+          if (["employee", "manager"].includes(profile.role)) {
+            query = query.eq("assigned_employee", profile.id);
+          }
+          const { data, error } = await runWithRetry(() => query, 3);
+          if (error) throw error;
+          const page = data || [];
+          rows.push(...page);
+          if (page.length < REP_MONITOR_PAGE_SIZE) break;
+        }
+        if (!cancelled) {
+          setAppointmentCustomers(Array.from(
+            new Map(rows.map((customer) => [String(customer.id), customer])).values()
+          ));
+        }
+      } catch (error) {
+        if (!cancelled && showWarnings) {
+          showSystemToast("Randevu takvimi eksiksiz okunamadi: " + (error.message || "Baglanti hatasi"), "warning");
+        }
+      }
+    }
+
+    loadAppointmentCustomers(true);
+    const reconcileTimer = window.setInterval(() => loadAppointmentCustomers(false), APPOINTMENT_RECONCILE_INTERVAL);
+    const customerChannel = supabase
+      .channel(`crm-appointments-${profile.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, () => {
+        window.setTimeout(() => loadAppointmentCustomers(false), 250);
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(reconcileTimer);
+      supabase.removeChannel(customerChannel);
+    };
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
+
+    function refreshAppointmentNotices() {
+      const now = Date.now();
+      const upcomingNotices = appointmentCustomers
+        .filter((customer) => customer.appointment_date && APPOINTMENT_REMINDER_STATUSES.includes(customer.status))
+        .map((customer) => {
+          const appointmentTime = new Date(customer.appointment_date).getTime();
+          const remainingMs = appointmentTime - now;
+          if (remainingMs <= 0 || remainingMs > APPOINTMENT_DAY_ALERT_MS) return null;
+          const level = remainingMs <= APPOINTMENT_SOON_ALERT_MS ? "soon" : "day";
+          const id = `${customer.id}-${level}-${customer.appointment_date}`;
+          if (dismissedAppointmentNoticeIdsRef.current.has(id)) return null;
+          const rep = usersRef.current.find((user) => user.id === customer.assigned_employee);
+          const repName = rep?.full_name || rep?.email || "Atanmamis rep";
+          const customerName = customerFullName(customer);
+          const title = level === "soon" ? "Randevu yaklasiyor" : "Yarin / gun ici randevu";
+          const body = `${formatDateTime(customer.appointment_date)} · ${customerName} · ${repName}`;
+          return { id, level, customer, title, body, appointmentTime, repName };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.appointmentTime - b.appointmentTime)
+        .slice(0, 5);
+
+      setAppointmentNotices(upcomingNotices);
+      upcomingNotices.forEach(announceAppointmentNotice);
+    }
+
+    refreshAppointmentNotices();
+    const timer = window.setInterval(refreshAppointmentNotices, 60_000);
+    return () => window.clearInterval(timer);
+  // Notification functions intentionally use the latest refs and stable setters.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, appointmentCustomers]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
     let mounted = true;
 
     async function refreshMessages() {
@@ -1107,6 +1208,23 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, selectedCustomer]);
 
+  useEffect(() => {
+    if (!profile || !selectedCustomer) return undefined;
+    const phones = [selectedCustomer.phone, selectedCustomer.phone_2].map(normalizePhone).filter(Boolean);
+    const smsChannel = supabase
+      .channel(`crm-customer-detail-sms-${profile.id}-${selectedCustomer.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sms_logs" }, (payload) => {
+        const log = payload.new?.id ? payload.new : payload.old;
+        if (!log?.phone) return;
+        if (!phones.includes(normalizePhone(log.phone))) return;
+        loadCustomerSmsLogs(selectedCustomer);
+      })
+      .subscribe();
+    return () => supabase.removeChannel(smsChannel);
+  // The loader intentionally uses the selected customer snapshot.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, selectedCustomer]);
+
   useEffect(() => () => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
   }, []);
@@ -1117,6 +1235,53 @@ function App() {
     toastTimerRef.current = setTimeout(() => setSystemToast(null), 2500);
   }
 
+  function dismissAppointmentNotice(noticeId) {
+    dismissedAppointmentNoticeIdsRef.current.add(noticeId);
+    setAppointmentNotices((current) => current.filter((notice) => notice.id !== noticeId));
+  }
+
+  function playAppointmentReminderSound() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioContext = appointmentAudioContextRef.current || new AudioContextClass();
+      appointmentAudioContextRef.current = audioContext;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
+      oscillator.frequency.setValueAtTime(660, audioContext.currentTime + 0.16);
+      gain.gain.setValueAtTime(0.001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.42);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.45);
+    } catch {
+      // Browser audio can be blocked until the user interacts with the page.
+    }
+  }
+
+  function announceAppointmentNotice(notice) {
+    if (announcedAppointmentNoticeIdsRef.current.has(notice.id)) return;
+    announcedAppointmentNoticeIdsRef.current.add(notice.id);
+    playAppointmentReminderSound();
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      const browserNotice = new Notification(`OSS CRM · ${notice.title}`, {
+        body: notice.body,
+        icon: "/oss-center-mark.png",
+        tag: `crm-appointment-${notice.id}`,
+      });
+      browserNotice.onclick = () => {
+        window.focus();
+        setSelectedCustomer(notice.customer);
+        loadMessageHistoryForCustomer(notice.customer);
+        browserNotice.close();
+      };
+    }
+  }
+
   function resetAuthenticatedState() {
     setProfile(null);
     setCustomers([]);
@@ -1125,11 +1290,17 @@ function App() {
     setCustomerLogsLoading(false);
     setCustomerCalls([]);
     setCustomerCallsLoading(false);
+    setCustomerSmsLogs([]);
+    setCustomerSmsLogsLoading(false);
     setSelectedCustomer(null);
     setSelectedIds([]);
     setBulkEmployee("");
     setMessages([]);
     setMessageNotices([]);
+    setAppointmentCustomers([]);
+    setAppointmentNotices([]);
+    dismissedAppointmentNoticeIdsRef.current = new Set();
+    announcedAppointmentNoticeIdsRef.current = new Set();
     setMyNotes([]);
     setActivePage("dashboard");
     setCustomerFilter("all");
@@ -1668,6 +1839,51 @@ function App() {
     ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
     if (loadError && loadError.code !== "42P01") {
       showSystemToast("Arama geçmişi okunamadı.", "warning");
+    }
+  }
+
+  async function loadCustomerSmsLogs(customerOrId) {
+    const requestId = customerSmsLogsRequestRef.current + 1;
+    customerSmsLogsRequestRef.current = requestId;
+    const customer = typeof customerOrId === "object"
+      ? customerOrId
+      : customersRef.current.find((item) => item.id === customerOrId);
+    const phones = [customer?.phone, customer?.phone_2]
+      .map(normalizePhone)
+      .filter(Boolean)
+      .flatMap((phone) => [phone, `90${phone}`]);
+    if (phones.length === 0) {
+      setCustomerSmsLogs([]);
+      setCustomerSmsLogsLoading(false);
+      return;
+    }
+
+    setCustomerSmsLogsLoading(true);
+    const allLogs = [];
+    let loadError = null;
+    for (let from = 0; customerSmsLogsRequestRef.current === requestId; from += REP_MONITOR_PAGE_SIZE) {
+      const { data, error } = await runWithRetry(() => supabase
+        .from("sms_logs")
+        .select("*")
+        .in("phone", [...new Set(phones)])
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, from + REP_MONITOR_PAGE_SIZE - 1), 3);
+      if (error) {
+        loadError = error;
+        break;
+      }
+      const page = data || [];
+      allLogs.push(...page);
+      if (page.length < REP_MONITOR_PAGE_SIZE) break;
+    }
+    if (customerSmsLogsRequestRef.current !== requestId) return;
+    setCustomerSmsLogsLoading(false);
+    setCustomerSmsLogs(loadError ? [] : Array.from(
+      new Map(allLogs.map((log) => [String(log.id), log])).values()
+    ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
+    if (loadError && !["42P01", "PGRST205"].includes(loadError.code)) {
+      showSystemToast("SMS gecmisi okunamadi.", "warning");
     }
   }
 
@@ -2350,18 +2566,22 @@ function App() {
     setCustomerLogs([]);
     setCustomerLogsLoading(true);
     setCustomerCalls([]);
+    setCustomerSmsLogs([]);
     setSelectedCustomer(customer);
-    await Promise.all([loadCustomerLogs(customer), loadCustomerCalls(customer)]);
+    await Promise.all([loadCustomerLogs(customer), loadCustomerCalls(customer), loadCustomerSmsLogs(customer)]);
   }
 
   function closeCustomerModal() {
     customerLogsRequestRef.current += 1;
     customerCallsRequestRef.current += 1;
+    customerSmsLogsRequestRef.current += 1;
     selectedCustomerRelatedIdsRef.current = new Set();
     setCustomerLogsLoading(false);
     setCustomerLogs([]);
     setCustomerCallsLoading(false);
     setCustomerCalls([]);
+    setCustomerSmsLogsLoading(false);
+    setCustomerSmsLogs([]);
     setSelectedCustomer(null);
   }
 
@@ -2405,9 +2625,12 @@ function App() {
   const reminderCustomers = visibleCustomers
     .filter((customer) => customer.appointment_date && ["callback", "appointment", "contract_appointment"].includes(customer.status))
     .sort((a, b) => new Date(a.appointment_date) - new Date(b.appointment_date));
+  const calendarCustomers = (appointmentCustomers.length ? appointmentCustomers : reminderCustomers)
+    .filter((customer) => customer.appointment_date && CALENDAR_REMINDER_STATUSES.includes(customer.status))
+    .sort((a, b) => new Date(a.appointment_date) - new Date(b.appointment_date));
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const overdueReminders = reminderCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
-  const todayWorkItems = reminderCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
+  const overdueReminders = calendarCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
+  const todayWorkItems = calendarCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
   const reportCustomers = ["employee", "manager"].includes(profileRole) ? visibleCustomers : customers;
   const bossReportSummary = profileRole === "boss" ? bossLiveReport?.summary : null;
   const liveRepStatsById = new Map((bossLiveReport?.rep_stats || []).map((item) => [item.id, item]));
@@ -2556,6 +2779,21 @@ function App() {
             <span style={messageNoticeClose} onClick={(event) => {
               event.stopPropagation();
               setMessageNotices((current) => current.filter((item) => item.id !== notice.id));
+            }}>×</span>
+          </button>
+        ))}
+      </div>
+      <div style={appointmentNoticeStack}>
+        {appointmentNotices.map((notice) => (
+          <button key={notice.id} type="button" style={appointmentNoticeCard(notice.level)} onClick={() => loadMessageHistoryForCustomer(notice.customer)}>
+            <span style={appointmentNoticeIcon}>{notice.level === "soon" ? "!" : "◷"}</span>
+            <span style={messageNoticeCopy}>
+              <strong>{notice.title}</strong>
+              <small>{notice.body}</small>
+            </span>
+            <span style={messageNoticeClose} onClick={(event) => {
+              event.stopPropagation();
+              dismissAppointmentNotice(notice.id);
             }}>×</span>
           </button>
         ))}
@@ -2999,7 +3237,9 @@ function App() {
 
         {activePage === "calendar" && (
           <CalendarView
-            customers={reminderCustomers}
+            customers={calendarCustomers}
+            users={users}
+            profile={profile}
             setSelectedCustomer={loadMessageHistoryForCustomer}
           />
         )}
@@ -3030,6 +3270,7 @@ function App() {
             setStaffForm={setStaffForm}
             addStaff={addStaff}
             deleteStaff={deleteStaff}
+            showSystemToast={showSystemToast}
           />
         )}
 
@@ -3097,6 +3338,9 @@ function App() {
             customerLogsLoading={customerLogsLoading}
             customerCalls={customerCalls}
             customerCallsLoading={customerCallsLoading}
+            customerSmsLogs={customerSmsLogs}
+            customerSmsLogsLoading={customerSmsLogsLoading}
+            reloadCustomerSmsLogs={loadCustomerSmsLogs}
             updateCustomer={updateCustomer}
             users={users}
             customers={visibleCustomers}
@@ -3578,7 +3822,7 @@ function CustomerTable({
   );
 }
 
-function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, customerCalls, customerCallsLoading, updateCustomer, users, customers, profile }) {
+function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, customerCalls, customerCallsLoading, customerSmsLogs, customerSmsLogsLoading, reloadCustomerSmsLogs, updateCustomer, users, customers, profile }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
@@ -3618,6 +3862,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
 
       setSmsMessage(DEFAULT_SMS_MESSAGE);
       setSmsComposerOpen(false);
+      await reloadCustomerSmsLogs(selectedCustomer);
       alert(`SMS gönderildi. Gönderim no: ${data.messageId || "-"}`);
     } catch (error) {
       alert("SMS gönderilemedi: " + (error?.message || "Bilinmeyen hata"));
@@ -3853,6 +4098,22 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
         <h3 style={historyTitle}>Arama Geçmişi</h3>
         {customerCallsLoading && <p style={logLoadingText}>Arama geçmişi yükleniyor...</p>}
         {!customerCallsLoading && customerCalls.length === 0 && <p style={{ opacity: 0.7 }}>Henüz arama kaydı bulunamadı.</p>}
+        <h3 style={historyTitle}>SMS Gecmisi</h3>
+        {customerSmsLogsLoading && <p style={logLoadingText}>SMS gecmisi yukleniyor...</p>}
+        {!customerSmsLogsLoading && customerSmsLogs.length === 0 && <p style={{ opacity: 0.7 }}>Henuz SMS kaydi bulunamadi.</p>}
+        {!customerSmsLogsLoading && customerSmsLogs.map((sms) => (
+          <div key={sms.id} style={{ ...logBox, borderLeft: `4px solid ${sms.status === "sent" ? "#22c55e" : "#ef4444"}` }}>
+            <strong style={logUser}>SMS {sms.status === "sent" ? "gonderildi" : "basarisiz"}</strong>
+            <p style={logStatusRow}>
+              {formatPhoneDisplay(sms.phone)} · Kod: {sms.provider_code || "-"} · Gonderim no: {sms.provider_message_id || "-"}
+            </p>
+            <p style={logNote}>Temsilci: {users.find((user) => user.id === sms.user_id)?.full_name || "Bilinmeyen kullanici"}</p>
+            {sms.error_message && <p style={logEmptyNote}>{sms.error_message}</p>}
+            <p style={logNote}>{sms.message}</p>
+            <small style={logTime}>{formatDateTime(sms.created_at)}</small>
+          </div>
+        ))}
+
         {!customerCallsLoading && customerCalls.map((call) => (
           <div key={call.id} style={{ ...logBox, borderLeft: `4px solid ${call.status === "missed" ? "#ef4444" : call.ended_at ? "#22c55e" : "#38bdf8"}` }}>
             <strong style={logUser}>
@@ -4334,7 +4595,7 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
   );
 }
 
-function EmployeesView({ profile, users, customers, customerSummary, liveReport, liveReportError, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff }) {
+function EmployeesView({ profile, users, customers, customerSummary, liveReport, liveReportError, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff, showSystemToast }) {
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedRep, setSelectedRep] = useState("all");
   const [datePreset, setDatePreset] = useState("today");
@@ -4350,6 +4611,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
   const [jettelExtensionsLoading, setJettelExtensionsLoading] = useState(false);
   const [jettelExtensionsError, setJettelExtensionsError] = useState("");
   const [jettelSavingExtension, setJettelSavingExtension] = useState("");
+  const [jettelSyncing, setJettelSyncing] = useState(false);
   const reps = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
   const liveRepStats = useMemo(() => new Map((liveReport?.rep_stats || []).map((item) => [item.id, item])), [liveReport]);
   const customerMap = useMemo(() => new Map([...customers, ...repCustomers].map((customer) => [String(customer.id), customer])), [customers, repCustomers]);
@@ -4369,7 +4631,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
       setJettelExtensionsError("");
       const { data, error } = await runWithRetry(() => supabase
         .from("jettel_extensions")
-        .select("extension,profile_id,display_name,line_number,group_name,is_active,is_connected,last_seen_at")
+        .select("extension,ext_id,profile_id,display_name,line_number,group_name,is_active,is_connected,last_seen_at")
         .order("extension", { ascending: true }), 2);
 
       if (cancelled) return;
@@ -4396,6 +4658,21 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
       supabase.removeChannel(channel);
     };
   }, [profile.id, profile.role]);
+
+  async function syncJettelExtensionStatus() {
+    if (profile.role !== "boss" || jettelSyncing) return;
+    setJettelSyncing(true);
+    setJettelExtensionsError("");
+    const { data, error } = await supabase.functions.invoke("jettel-api", {
+      body: { action: "extension-status" },
+    });
+    setJettelSyncing(false);
+    if (error || data?.success === false) {
+      setJettelExtensionsError("Jettel dahili durumlari cekilemedi: " + (data?.error || error?.message || "Bilinmeyen hata"));
+      return;
+    }
+    showSystemToast("Jettel dahili durumlari guncellendi.");
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -4714,11 +4991,16 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
                 <h3 style={{ margin: 0 }}>Dahili - Rep Eslemesi</h3>
                 <p style={mutedText}>Jettel'den gelen arama 101, 102 gibi dahiliyle gelirse CRM burada secili rep hesabina yazar.</p>
               </div>
-              {jettelExtensionsLoading && <span style={mutedText}>Dahililer yukleniyor...</span>}
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                {jettelExtensionsLoading && <span style={mutedText}>Dahililer yukleniyor...</span>}
+                <button type="button" onClick={syncJettelExtensionStatus} disabled={jettelSyncing} style={smallButton}>
+                  {jettelSyncing ? "Jettel okunuyor..." : "Jettel'den durumu yenile"}
+                </button>
+              </div>
             </div>
             <div style={jettelExtensionTable}>
               <div style={jettelExtensionHeader}>
-                <span>Dahili</span><span>Hat</span><span>Grup</span><span>Durum</span><span>Bagli Rep</span>
+                <span>Dahili</span><span>Ext ID</span><span>Hat</span><span>Durum</span><span>Bagli Rep</span>
               </div>
               {jettelExtensions.length === 0 && !jettelExtensionsLoading && (
                 <div style={emptyTableState}>Dahili kaydi yok. JETTEL_CALL_INTEGRATION.sql dosyasini Supabase'de calistirdigindan emin ol.</div>
@@ -4728,8 +5010,8 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
                 return (
                   <div key={extension.extension} style={jettelExtensionRow}>
                     <strong>{extension.extension}</strong>
+                    <span>{extension.ext_id || `${extension.extension}-pbx349`}</span>
                     <span>{extension.line_number || "-"}</span>
-                    <span>{extension.group_name || "-"}</span>
                     <span style={extension.is_connected ? onlineBadgeStyle : offlineBadgeStyle}>{extension.is_connected ? "Bagli" : "Bagli degil"}</span>
                     <div style={jettelExtensionSelectWrap}>
                       <select
@@ -4906,7 +5188,8 @@ function AssignmentOverview({ employees, customers, exactPoolCount, exactRepStat
   );
 }
 
-function CalendarView({ customers, setSelectedCustomer }) {
+function CalendarView({ customers, users, profile, setSelectedCustomer }) {
+  const userMap = new Map((users || []).map((user) => [user.id, user]));
   const grouped = customers.reduce((acc, customer) => {
     const key = formatDate(customer.appointment_date);
     if (!acc[key]) acc[key] = [];
@@ -4934,6 +5217,11 @@ function CalendarView({ customers, setSelectedCustomer }) {
               >
                 <strong>{customer.first_name} {customer.last_name}</strong>
                 <span>{formatTime(customer.appointment_date)} - {statusLabel(customer.status)}</span>
+                {profile?.role === "boss" && (
+                  <small style={calendarItemMeta}>
+                    Alan rep: {userMap.get(customer.assigned_employee)?.full_name || userMap.get(customer.assigned_employee)?.email || "Atanmamis"}
+                  </small>
+                )}
               </button>
             ))}
           </div>
@@ -5205,6 +5493,7 @@ const celebrationCustomer = { margin: "0 0 10px", color: "#fde68a", fontSize: 18
 const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginTop: 16 };
 const calendarDay = { background: "#ffffff", color: brandRed, padding: 14, borderRadius: 14, border: `1px solid ${brandRedBorder}` };
 const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer" };
+const calendarItemMeta = { color: mutedRedText, fontSize: 12, opacity: 0.86 };
 const loginPage = { minHeight: "100vh", background: "#ffffff", display: "grid", gridTemplateColumns: "1.2fr 420px", alignItems: "center", gap: 50, padding: "60px 9%", color: brandRed };
 const loginLeft = { maxWidth: 620 };
 const brandBadge = { display: "inline-block", background: brandRedSoft, border: `1px solid ${brandRedBorder}`, padding: "8px 14px", borderRadius: 999, fontSize: 13, letterSpacing: 1, marginBottom: 22 };
@@ -5315,6 +5604,9 @@ const messageNoticeCard = { width: "100%", display: "grid", gridTemplateColumns:
 const messageNoticeIcon = { width: 42, height: 42, display: "grid", placeItems: "center", borderRadius: 11, background: "rgba(34,211,238,0.16)", color: "#67e8f9", fontSize: 20 };
 const messageNoticeCopy = { minWidth: 0, display: "grid", gap: 3 };
 const messageNoticeClose = { width: 24, height: 24, display: "grid", placeItems: "center", borderRadius: 7, background: "rgba(255,255,255,0.08)", color: "#cbd5e1", fontSize: 18 };
+const appointmentNoticeStack = { position: "fixed", right: 18, bottom: 18, zIndex: 1300, width: "min(430px,calc(100vw - 36px))", display: "grid", gap: 10 };
+const appointmentNoticeCard = (level) => ({ width: "100%", display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 24px", alignItems: "center", gap: 10, padding: 12, borderRadius: 12, border: level === "soon" ? "1px solid rgba(252,165,165,0.62)" : "1px solid rgba(251,191,36,0.5)", background: level === "soon" ? "linear-gradient(135deg,rgba(127,29,29,0.98),rgba(194,65,12,0.96))" : "linear-gradient(135deg,rgba(120,53,15,0.98),rgba(217,119,6,0.94))", color: "white", boxShadow: "0 18px 45px rgba(0,0,0,0.38)", cursor: "pointer", textAlign: "left" });
+const appointmentNoticeIcon = { width: 42, height: 42, display: "grid", placeItems: "center", borderRadius: 11, background: "rgba(255,255,255,0.16)", color: "#fff7ed", fontSize: 20, fontWeight: 900 };
 const messageSetupNotice = { alignSelf: "center", justifySelf: "center", margin: 24, padding: 16, borderRadius: 8, background: "rgba(180,83,9,0.2)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", textAlign: "center" };
 const presenceVisuals = {
   online: { label: "Çevrimiçi", color: "#34d399" },
