@@ -57,9 +57,13 @@ function asRows(payload: unknown) {
   if (Array.isArray(payload)) return payload as JsonRecord[];
   if (!payload || typeof payload !== "object") return [];
   const record = payload as JsonRecord;
-  for (const key of ["data", "rows", "result", "records", "calls", "extensions"]) {
+  for (const key of ["data", "Data", "rows", "Rows", "result", "Result", "records", "Records", "calls", "Calls", "extensions", "Extensions", "extensionStatus", "ExtensionStatus"]) {
     const value = record[key];
     if (Array.isArray(value)) return value as JsonRecord[];
+    if (value && typeof value === "object") {
+      const nestedRows = asRows(value);
+      if (nestedRows.length > 0) return nestedRows;
+    }
   }
   return [record];
 }
@@ -134,6 +138,42 @@ function getRowValue(row: JsonRecord, keys: string[]) {
     if (value !== undefined && value !== null && String(value).trim() !== "") return value;
   }
   return "";
+}
+
+function normalizeExtension(value: unknown) {
+  const text = cleanText(value, 120);
+  const match = text.match(/\d{2,6}/);
+  return match ? match[0] : "";
+}
+
+function isExtensionConnected(row: JsonRecord) {
+  const rawStatus = getRowValue(row, [
+    "durum",
+    "Durum",
+    "status",
+    "Status",
+    "connected",
+    "Connected",
+    "is_connected",
+    "isConnected",
+  ]);
+  const normalizedStatus = String(rawStatus).trim().toLocaleLowerCase("tr-TR");
+  if (["0", "true", "online", "registered", "connected", "aktif", "bagli", "bağlı"].includes(normalizedStatus)) return true;
+  if (normalizedStatus.includes("değil") || normalizedStatus.includes("degil") || normalizedStatus.includes("not")) return false;
+  if (normalizedStatus.includes("bağlı") || normalizedStatus.includes("bagli")) return true;
+
+  const extStatus = String(getRowValue(row, ["ext_status", "ExtStatus", "EXT_STATUS"])).trim();
+  if (extStatus && extStatus !== "4") return true;
+
+  const ip = cleanText(getRowValue(row, [
+    "ip",
+    "IP",
+    "ip_adresi",
+    "IP Adresi",
+    "ext_last_registered_ip",
+    "ExtLastRegisteredIp",
+  ]), 120);
+  return Boolean(ip);
 }
 
 function mapCallReportRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>, customerMap: Map<string, JsonRecord>) {
@@ -225,13 +265,22 @@ Deno.serve(async (request) => {
       const rows = asRows(providerPayload);
       const updates: JsonRecord[] = [];
       for (const row of rows) {
-        const extension = cleanText(getRowValue(row, ["dahili", "extension", "ext"]));
+        const extension = normalizeExtension(getRowValue(row, [
+          "dahili",
+          "Dahili",
+          "extension",
+          "Extension",
+          "ext",
+          "Ext",
+          "ext_id",
+          "ExtId",
+          "extId",
+        ]));
         if (!extension) continue;
-        const statusCode = String(getRowValue(row, ["durum", "status"]));
         updates.push({
           extension,
           ext_id: cleanText(getRowValue(row, ["ext_id"])) || buildExtId(extension),
-          is_connected: statusCode === "0",
+          is_connected: isExtensionConnected(row),
           last_seen_at: new Date().toISOString(),
           raw_status: row,
           updated_at: new Date().toISOString(),
