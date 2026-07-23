@@ -19,6 +19,7 @@ const managerActions = new Set([
 ]);
 
 const bossOnlyActions = new Set(["two-way-callback", "spy-call"]);
+const JETTEL_REQUEST_TIMEOUT_MS = 45_000;
 
 class JettelRequestError extends Error {
   details: JsonRecord;
@@ -133,40 +134,63 @@ async function jettelPost(mode: string, fields: JsonRecord) {
     }
   }
 
-  const url = `${config.baseUrl}/api/v1.php?mode=${encodeURIComponent(mode)}`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
-      body,
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Fetch failed before reaching Jettel.";
-    throw new JettelRequestError(`Jettel ${mode} request could not be sent: ${message}`, {
-      mode,
-      url,
-      error_name: error instanceof Error ? error.name : "UnknownError",
-      error_message: message,
-      request_fields: Object.fromEntries(
-        Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
-      ),
-    });
+  const primaryUrl = `${config.baseUrl}/api/v1.php?mode=${encodeURIComponent(mode)}`;
+  const urls = [primaryUrl];
+  if (primaryUrl.startsWith("https://")) {
+    urls.push(`http://${primaryUrl.slice("https://".length)}`);
   }
-  const text = await response.text();
-  const payload = parseProviderPayload(text);
-  if (!response.ok) {
-    throw new JettelRequestError(`Jettel ${mode} HTTP ${response.status}: ${text.slice(0, 500)}`, {
-      mode,
-      url,
-      http_status: response.status,
-      http_status_text: response.statusText,
-      raw_text: text.slice(0, 5000),
-      parsed_body: payload as JsonRecord,
-    });
+
+  let lastError: JettelRequestError | null = null;
+  for (const url of urls) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json, text/plain, */*",
+          "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+          "User-Agent": "OSS-CRM-Jettel-Bridge/1.0",
+        },
+        body,
+        signal: AbortSignal.timeout(JETTEL_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Fetch failed before reaching Jettel.";
+      lastError = new JettelRequestError(`Jettel ${mode} request could not be sent: ${message}`, {
+        mode,
+        url,
+        attempted_urls: urls,
+        timeout_ms: JETTEL_REQUEST_TIMEOUT_MS,
+        error_name: error instanceof Error ? error.name : "UnknownError",
+        error_message: message,
+        request_fields: Object.fromEntries(
+          Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
+        ),
+      });
+      continue;
+    }
+    const text = await response.text();
+    const payload = parseProviderPayload(text);
+    if (!response.ok) {
+      lastError = new JettelRequestError(`Jettel ${mode} HTTP ${response.status}: ${text.slice(0, 500)}`, {
+        mode,
+        url,
+        attempted_urls: urls,
+        http_status: response.status,
+        http_status_text: response.statusText,
+        raw_text: text.slice(0, 5000),
+        parsed_body: payload as JsonRecord,
+      });
+      continue;
+    }
+    return payload;
   }
-  return payload;
+
+  if (lastError) throw lastError;
+  throw new JettelRequestError(`Jettel ${mode} request failed before any attempt.`, {
+    mode,
+    attempted_urls: urls,
+  });
 }
 
 function getRowValue(row: JsonRecord, keys: string[]) {
