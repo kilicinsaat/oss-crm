@@ -20,6 +20,16 @@ const managerActions = new Set([
 
 const bossOnlyActions = new Set(["two-way-callback", "spy-call"]);
 
+class JettelRequestError extends Error {
+  details: JsonRecord;
+
+  constructor(message: string, details: JsonRecord = {}) {
+    super(message);
+    this.name = "JettelRequestError";
+    this.details = details;
+  }
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -105,7 +115,11 @@ async function writeActionLog(supabase: ReturnType<typeof createClient>, row: Js
 async function jettelPost(mode: string, fields: JsonRecord) {
   const { config, missing } = getEnvConfig();
   if (missing.length > 0) {
-    throw new Error(`Missing Jettel secrets: ${missing.join(", ")}`);
+    throw new JettelRequestError(`Missing Jettel secrets: ${missing.join(", ")}`, {
+      mode,
+      missing,
+      baseUrl: config.baseUrl,
+    });
   }
 
   const body = new URLSearchParams();
@@ -119,15 +133,38 @@ async function jettelPost(mode: string, fields: JsonRecord) {
     }
   }
 
-  const response = await fetch(`${config.baseUrl}/api/v1.php?mode=${encodeURIComponent(mode)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
-    body,
-  });
+  const url = `${config.baseUrl}/api/v1.php?mode=${encodeURIComponent(mode)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+      body,
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Fetch failed before reaching Jettel.";
+    throw new JettelRequestError(`Jettel ${mode} request could not be sent: ${message}`, {
+      mode,
+      url,
+      error_name: error instanceof Error ? error.name : "UnknownError",
+      error_message: message,
+      request_fields: Object.fromEntries(
+        Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
+      ),
+    });
+  }
   const text = await response.text();
   const payload = parseProviderPayload(text);
   if (!response.ok) {
-    throw new Error(`Jettel ${mode} HTTP ${response.status}: ${text.slice(0, 500)}`);
+    throw new JettelRequestError(`Jettel ${mode} HTTP ${response.status}: ${text.slice(0, 500)}`, {
+      mode,
+      url,
+      http_status: response.status,
+      http_status_text: response.statusText,
+      raw_text: text.slice(0, 5000),
+      parsed_body: payload as JsonRecord,
+    });
   }
   return payload;
 }
@@ -531,12 +568,18 @@ Deno.serve(async (request) => {
     return json({ success: false, error: "Unknown Jettel action." }, 400);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Jettel request failed.";
+    const errorDetails = error instanceof JettelRequestError
+      ? error.details
+      : {
+          error_name: error instanceof Error ? error.name : "UnknownError",
+          error_message: message,
+        };
     await writeActionLog(admin, {
       user_id: profile.id,
       action,
       status: "failed",
       raw_request: rawRequest,
-      raw_response: {},
+      raw_response: errorDetails,
       error_message: message,
     });
     return json({ success: false, error: message }, 502);
