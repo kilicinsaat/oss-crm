@@ -3,6 +3,11 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type JsonRecord = Record<string, unknown>;
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
+
 const managerActions = new Set([
   "active-calls",
   "extension-status",
@@ -18,7 +23,7 @@ const bossOnlyActions = new Set(["two-way-callback", "spy-call"]);
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" },
   });
 }
 
@@ -171,6 +176,7 @@ function mapCallReportRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>
 }
 
 Deno.serve(async (request) => {
+  if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (request.method !== "POST") return json({ success: false, error: "Only POST is supported." }, 405);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
