@@ -98,7 +98,7 @@ Deno.serve(async (request) => {
   const hostname = (Deno.env.get("INTERAKTIF_SMS_HOSTNAME") || "https://api.1sms.com.tr").replace(/\/$/, "");
   if (!username || !password || !header) {
     await writeSmsLog({ status: "failed", errorMessage: "Interaktif SMS server settings are incomplete." });
-    return json({ success: false, error: "Interaktif SMS sunucu ayarlari tamamlanmamis." }, 500);
+    return json({ success: false, error: "Interaktif SMS sunucu ayarlari tamamlanmamis." });
   }
 
   const url = new URL(`${hostname}/api/smsget/v1`);
@@ -123,7 +123,13 @@ Deno.serve(async (request) => {
         rawResponse: providerBody,
       });
       console.error("Interaktif SMS error", { code, status: providerResponse.status, userId: user.id });
-      return json({ success: false, error: providerError }, 502);
+      return json({
+        success: false,
+        error: providerError,
+        providerCode: code || null,
+        providerStatus: providerResponse.status,
+        rawResponse: providerBody,
+      });
     }
 
     await writeSmsLog({
@@ -136,8 +142,9 @@ Deno.serve(async (request) => {
     console.log("Interaktif SMS sent", { messageId, userId: user.id, customerId: payload.customerId ?? null });
     return json({ success: true, messageId: messageId || null });
   } catch (error) {
-    await writeSmsLog({ status: "failed", errorMessage: String(error) });
-    console.error("Interaktif SMS request failed", { error: String(error), userId: user.id });
-    return json({ success: false, error: "SMS servisine ulasilamadi." }, 502);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await writeSmsLog({ status: "failed", errorMessage });
+    console.error("Interaktif SMS request failed", { error: errorMessage, userId: user.id });
+    return json({ success: false, error: `SMS servisine ulasilamadi: ${errorMessage}` });
   }
 });

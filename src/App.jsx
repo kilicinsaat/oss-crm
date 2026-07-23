@@ -83,6 +83,29 @@ const CUSTOMER_SEARCH_MIN_LENGTH = 3;
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+async function getFunctionErrorMessage(error) {
+  if (!error) return "";
+  const context = error.context;
+  if (context && typeof context.json === "function") {
+    try {
+      const body = await context.json();
+      if (body?.error) return body.error;
+      if (body?.message) return body.message;
+    } catch {
+      // Fall back to text/message below.
+    }
+  }
+  if (context && typeof context.text === "function") {
+    try {
+      const text = await context.text();
+      if (text) return text.slice(0, 500);
+    } catch {
+      // Fall back to regular error message.
+    }
+  }
+  return error.message || "";
+}
+
 function readSessionStartedAt() {
   try {
     const value = window.sessionStorage.getItem(SESSION_STARTED_AT_KEY);
@@ -3857,7 +3880,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
       const { data, error } = await supabase.functions.invoke("send-sms", {
         body: { phone, message, customerId: selectedCustomer.id },
       });
-      if (error) throw error;
+      if (error) throw new Error(await getFunctionErrorMessage(error) || error.message);
       if (!data?.success) throw new Error(data?.error || "SMS sağlayıcısı gönderimi kabul etmedi.");
 
       setSmsMessage(DEFAULT_SMS_MESSAGE);
@@ -3865,6 +3888,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
       await reloadCustomerSmsLogs(selectedCustomer);
       alert(`SMS gönderildi. Gönderim no: ${data.messageId || "-"}`);
     } catch (error) {
+      await reloadCustomerSmsLogs(selectedCustomer);
       alert("SMS gönderilemedi: " + (error?.message || "Bilinmeyen hata"));
     } finally {
       setSendingSms(false);
