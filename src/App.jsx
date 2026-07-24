@@ -5031,12 +5031,16 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
               )}
               {jettelExtensions.map((extension) => {
                 const assignedRep = reps.find((rep) => rep.id === extension.profile_id);
+                const lastSeenAt = extension.last_seen_at ? new Date(extension.last_seen_at).getTime() : 0;
+                const isStale = !lastSeenAt || clockNow - lastSeenAt > 2 * 60 * 1000;
                 return (
                   <div key={extension.extension} style={jettelExtensionRow}>
                     <strong>{extension.extension}</strong>
                     <span>{extension.ext_id || `${extension.extension}-pbx349`}</span>
                     <span>{extension.line_number || "-"}</span>
-                    <span style={extension.is_connected ? onlineBadgeStyle : offlineBadgeStyle}>{extension.is_connected ? "Bagli" : "Bagli degil"}</span>
+                    <span style={isStale ? offlineBadgeStyle : extension.is_connected ? onlineBadgeStyle : waitingBadge}>
+                      {isStale ? "Sync yok" : extension.is_connected ? "Bagli" : "Bagli degil"}
+                    </span>
                     <div style={jettelExtensionSelectWrap}>
                       <select
                         value={extension.profile_id || ""}

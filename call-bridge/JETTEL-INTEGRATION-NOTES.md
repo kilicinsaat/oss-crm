@@ -154,3 +154,32 @@ Bu bilgi CRM tarafinda `public.jettel_extensions` tablosuna yazilir. Her dahili 
 ## Cagri yonlendirme
 
 Yonlendirme islemi dogrudan CRM'den yapilacaksa boss yetkili bir Edge Function gerekir. CRM frontend Jettel sifresini asla gormemeli; frontend sadece Supabase function'a "su dahiliyi su hedefe yonlendir" istegi atar, Jettel API cagrisi server tarafinda yapilir.
+
+## Turkiye IP zorunlulugu
+
+Jettel/Mornet bilgisine gore `vip.jettel.com.tr` adresine Turkiye disindan gelen POST istekleri timeout alir. Supabase Edge Function yurtdisi cikisli oldugu icin Jettel API'ye dogrudan ulasamayabilir.
+
+Bu durumda iki saglam cozum vardir:
+
+1. Turkiye lokasyonlu VPS uzerinde local sync calistirmak.
+2. Ofiste/sirket bilgisayarinda `jettel-local-sync.ps1` calistirmak.
+
+VPS, internette 7/24 acik duran kiralik kucuk bir bilgisayardir. Turkiye lokasyonlu VPS kullanilirsa Jettel API istekleri Turkiye IP ile gider ve CRM bilgisayar acik olmasa bile sync devam eder.
+
+Ofis PC cozumunde ise PC acik ve internet baglantisi varken sync otomatik calisir. `install-jettel-local-sync.ps1` Windows Gorev Zamanlayici'ya bir arka plan gorevi ekler; kullanici elle butona basmaz.
+
+Kurulum:
+
+```powershell
+.\call-bridge\install-jettel-local-sync.ps1
+```
+
+Script su bilgileri sorar:
+
+- `JETTEL_USERNAME`
+- `JETTEL_PASSWORD`
+- `JETTEL_TOKEN`
+- `JETTEL_APICODE`
+- `CALL_BRIDGE_SECRET`
+
+Sonra her 30 saniyede bir `ExtensionStatus` bilgisini Jettel'den Turkiye IP uzerinden ceker ve `jettel-bridge-ingest` Edge Function'a gonderir. CRM ekrani `jettel_extensions` tablosunu canli okudugu icin bagli/bagli degil durumu otomatik guncellenir.
