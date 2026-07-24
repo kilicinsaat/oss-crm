@@ -90,14 +90,33 @@ begin
   select coalesce(jsonb_agg(to_jsonb(data_row) order by data_row.paid desc, data_row.appointment desc, data_row.total desc, data_row.name), '[]'::jsonb)
   into data_result
   from (
+    with source_rows as (
+      select
+        coalesce(nullif(btrim(source.batch_name), ''), 'Manuel kayıt') as name,
+        customer.status,
+        customer.payment_received
+      from public.customer_data_sources source
+      join public.customers customer on customer.id = source.customer_id
+      union all
+      select
+        coalesce(nullif(btrim(customer.batch_name), ''), 'Manuel kayıt') as name,
+        customer.status,
+        customer.payment_received
+      from public.customers customer
+      where not exists (
+        select 1
+        from public.customer_data_sources source
+        where source.customer_id = customer.id
+      )
+    )
     select
-      coalesce(nullif(btrim(batch_name), ''), 'Manuel kayıt') as name,
+      name,
       count(*) as total,
       count(*) filter (where status in ('appointment', 'contract_appointment')) as appointment,
       count(*) filter (where payment_received = true or status = 'paid') as paid,
       count(*) filter (where status = 'wrong_number') as "wrongNumber"
-    from public.customers
-    group by coalesce(nullif(btrim(batch_name), ''), 'Manuel kayıt')
+    from source_rows
+    group by name
   ) data_row;
 
   return jsonb_build_object(

@@ -19,10 +19,58 @@ const spreadsheetPhone = (value) => {
   return /^5\d{9}$/.test(digits) ? digits : "";
 };
 
-const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel)/.test(normalizeHeader(value));
-const isNameHeader = (value) => ["hesapad", "adisoyad", "adsoyad", "musteri", "unvan", "isimsoyisim", "advesoyad"]
-  .some((name) => normalizeHeader(value).includes(name));
-const isTcHeader = (value) => ["tc", "tckimlik", "kimlikno"].some((name) => normalizeHeader(value).includes(name));
+const isPhoneHeader = (value) => /^(telefon|phone|gsm|cep|ceptel|ceptelefon|tel|numara|telno|gsmno|cepno)/.test(normalizeHeader(value));
+const isNameHeader = (value) => {
+  const header = normalizeHeader(value);
+  if (["ad", "adi", "isim", "unvan"].includes(header)) return true;
+  return ["hesapad", "adisoyad", "adsoyad", "musteri", "musteriad", "isimsoyisim", "advesoyad"]
+    .some((name) => header.includes(name));
+};
+const isTcHeader = (value) => {
+  const header = normalizeHeader(value);
+  if (["tc", "tckn"].includes(header)) return true;
+  return ["tckimlik", "kimlikno"].some((name) => header.includes(name));
+};
+const isEmailHeader = (value) => ["email", "eposta", "mail"].some((name) => normalizeHeader(value).includes(name));
+
+const ignoredInfoHeaders = new Set([
+  "sira",
+  "no",
+  "id",
+  "telefon",
+  "telefon1",
+  "telefon2",
+  "numara",
+  "telno",
+  "gsmno",
+  "cepno",
+  "phone",
+  "phone1",
+  "phone2",
+  "gsm",
+  "cep",
+  "ceptel",
+  "ceptelefon",
+  "tel",
+  "tc",
+  "tckn",
+  "tckimlik",
+  "kimlikno",
+  "hesapad",
+  "adisoyad",
+  "adsoyad",
+  "musteri",
+  "musteriad",
+  "unvan",
+  "isim",
+  "isimsoyisim",
+  "advesoyad",
+  "ad",
+  "adi",
+  "email",
+  "eposta",
+  "mail",
+]);
 
 const cleanDigits = (value) => String(value || "").replace(/\D/g, "");
 const validTurkishTc = (value) => {
@@ -37,6 +85,7 @@ const validTurkishTc = (value) => {
 };
 
 const cleanName = (value) => String(value || "").replace(/\s+/g, " ").trim();
+const friendlyHeader = (header, index) => cleanName(header) || `Kolon ${index + 1}`;
 const hasReadableName = (value) => {
   const text = cleanName(value);
   return text.length >= 2 && text.length <= 160 && /[A-Za-zÇĞİÖŞÜçğıöşü]/.test(text);
@@ -54,6 +103,35 @@ const splitName = (fullName) => {
   return {
     first_name: parts.slice(0, -1).join(" ") || parts[0] || "Müşteri",
     last_name: parts.length > 1 ? parts.at(-1) : "",
+  };
+};
+
+const buildRowInfo = ({ headers = [], row = [], sheetName, rowNumber, usedColumns = new Set() }) => {
+  const columns = {};
+  const noteLines = [];
+
+  row.forEach((value, index) => {
+    const text = cleanName(value);
+    if (!text || usedColumns.has(index)) return;
+    const header = friendlyHeader(headers[index], index);
+    const normalized = normalizeHeader(header);
+    if (ignoredInfoHeaders.has(normalized) || isPhoneHeader(header) || isNameHeader(header) || isTcHeader(header) || isEmailHeader(header)) return;
+    if (spreadsheetPhone(text) || validTurkishTc(text)) return;
+    columns[header] = text;
+    noteLines.push(`${header}: ${text}`);
+  });
+
+  const contextLines = [];
+  if (sheetName) contextLines.push(`Excel sayfasi: ${sheetName}`);
+  if (rowNumber) contextLines.push(`Excel satiri: ${rowNumber}`);
+
+  return {
+    infoNote: [...contextLines, ...noteLines].join("\n"),
+    sourceExtra: {
+      sheet_name: sheetName || "",
+      row_number: rowNumber || null,
+      columns,
+    },
   };
 };
 
@@ -80,7 +158,16 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
 
     const totalRows = sheets.reduce((sum, sheet) => sum + sheet.matrix.length, 0);
 
-    const addCustomer = ({ fullName, phones, tcValue = "", sheetName, rowNumber, trustedNameColumn = false }) => {
+    const addCustomer = ({
+      fullName,
+      phones,
+      tcValue = "",
+      emailValue = "",
+      rowNumber,
+      trustedNameColumn = false,
+      infoNote = "",
+      sourceExtra = null,
+    }) => {
       const uniquePhones = [...new Set(phones.map(spreadsheetPhone).filter(Boolean))];
       const primaryPhone = uniquePhones[0];
       if (!(trustedNameColumn ? hasReadableName(fullName) : isPlausibleName(fullName)) || !primaryPhone) {
@@ -104,10 +191,11 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
         phone: primaryPhone,
         phone_2: secondPhone,
         tc_no: tcNo,
-        email: "",
+        email: cleanName(emailValue),
         batch_name: fileName,
         batch_page: rowNumber,
-        info_note: sheetName === workbook.SheetNames[0] ? "" : `Excel sayfası: ${sheetName}`,
+        info_note: infoNote,
+        source_extra: sourceExtra,
         status: "pool",
         approved: false,
         payment_received: false,
@@ -123,16 +211,24 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
         const nameColumn = headers.findIndex(isNameHeader);
         const phoneColumns = headers.map((header, index) => isPhoneHeader(header) ? index : -1).filter((index) => index >= 0);
         const tcColumn = headers.findIndex(isTcHeader);
+        const emailColumn = headers.findIndex(isEmailHeader);
 
         matrix.slice(headerRowIndex + 1).forEach((row, index) => {
+          const rowNumber = headerRowIndex + index + 2;
+          const usedColumns = new Set([nameColumn, ...phoneColumns]);
+          if (tcColumn >= 0) usedColumns.add(tcColumn);
+          if (emailColumn >= 0) usedColumns.add(emailColumn);
+          const info = buildRowInfo({ headers, row, sheetName, rowNumber, usedColumns });
           const before = preparedRows.length;
           addCustomer({
             fullName: row[nameColumn],
             phones: phoneColumns.map((column) => row[column]),
             tcValue: tcColumn >= 0 ? row[tcColumn] : "",
-            sheetName,
-            rowNumber: headerRowIndex + index + 2,
+            emailValue: emailColumn >= 0 ? row[emailColumn] : "",
+            rowNumber,
             trustedNameColumn: true,
+            infoNote: info.infoNote,
+            sourceExtra: info.sourceExtra,
           });
           if (preparedRows.length > before) extractedFromSheet += 1;
           processedRowCount += 1;
@@ -152,8 +248,23 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
               usedPhoneColumns.add(phoneColumn);
             }
             if (!phoneCandidates.length) return;
+            const localUsedColumns = new Set([columnIndex]);
+            for (let offset = 1; offset <= 2; offset += 1) {
+              const phoneColumn = columnIndex + offset;
+              if (spreadsheetPhone(row[phoneColumn])) localUsedColumns.add(phoneColumn);
+            }
+            const tcColumn = row.findIndex((candidate, candidateIndex) => candidateIndex !== columnIndex && validTurkishTc(candidate));
+            if (tcColumn >= 0) localUsedColumns.add(tcColumn);
+            const info = buildRowInfo({ row, sheetName, rowNumber: rowIndex + 1, usedColumns: localUsedColumns });
             const before = preparedRows.length;
-            addCustomer({ fullName: cell, phones: phoneCandidates, sheetName, rowNumber: rowIndex + 1 });
+            addCustomer({
+              fullName: cell,
+              phones: phoneCandidates,
+              tcValue: tcColumn >= 0 ? row[tcColumn] : "",
+              rowNumber: rowIndex + 1,
+              infoNote: info.infoNote,
+              sourceExtra: info.sourceExtra,
+            });
             if (preparedRows.length > before) extractedFromSheet += 1;
           });
           processedRowCount += 1;

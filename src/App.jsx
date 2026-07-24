@@ -651,6 +651,7 @@ function App() {
   const [customerDataVersion, setCustomerDataVersion] = useState(0);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
+  const [lastImportSummary, setLastImportSummary] = useState(null);
 
   const [form, setForm] = useState({
     first_name: "",
@@ -1938,11 +1939,14 @@ function App() {
         + `${preparedRows.length} benzersiz geçerli kayıt kontrol edilecek.\n`
         + `${rejectedRows} eksik ad/telefon satırı yüklenmeyecek.\n`
         + `${duplicateRows} dosya içi mükerrer satır atlandı.\n`
-        + "Sistemde mevcut telefon veya TC numaraları yeniden eklenmeyecek.\n\nDevam edilsin mi?"
+        + "Sistemde mevcut telefon veya TC numaraları yeni kart açmadan mevcut müşteriye data kaynağı olarak bağlanacak.\n\nDevam edilsin mi?"
       );
       if (!confirmed) return;
 
       let imported = 0;
+      let matchedExisting = 0;
+      let sourceRows = 0;
+      let alreadyTracked = 0;
       let skipped = duplicateRows;
       const batchSize = 200;
 
@@ -1962,6 +1966,9 @@ function App() {
         }
 
         imported += Number(importResult?.inserted) || 0;
+        matchedExisting += Number(importResult?.matched_existing) || 0;
+        sourceRows += Number(importResult?.source_rows) || 0;
+        alreadyTracked += Number(importResult?.already_tracked) || 0;
         skipped += Number(importResult?.skipped) || 0;
         setImportProgress({ phase: "Supabase'e kaydediliyor", current: Math.min(i + chunk.length, preparedRows.length), total: preparedRows.length });
         await wait(25);
@@ -1969,7 +1976,19 @@ function App() {
 
       setCustomerDataVersion((version) => version + 1);
 
-      showSystemToast(`Excel yüklendi: ${imported} yeni, ${skipped} mükerrer/atlanan kayıt`);
+      setLastImportSummary({
+        fileName: file.name,
+        sheetName,
+        checked: preparedRows.length,
+        inserted: imported,
+        matchedExisting,
+        sourceRows,
+        alreadyTracked,
+        fileDuplicates: duplicateRows,
+        skipped,
+        rejectedRows,
+      });
+      showSystemToast(`Excel yüklendi: ${imported} yeni müşteri, ${matchedExisting} mevcut müşteriye bağlandı, ${sourceRows} yeni data kaynağı işlendi, ${alreadyTracked} zaten takipte, ${skipped} dosya içi/atlanan kayıt`);
       await loadCustomers();
     } catch (error) {
       alert("Excel okunamadı: " + error.message);
@@ -2974,6 +2993,20 @@ function App() {
                     </div>
                     <div style={chartTrack}>
                       <div style={{ ...chartBar, width: `${importProgress?.total ? Math.max((importProgress.current / importProgress.total) * 100, 2) : 12}%` }} />
+                    </div>
+                  </div>
+                )}
+                {lastImportSummary && (
+                  <div style={importSummaryBox}>
+                    <strong>{lastImportSummary.fileName}</strong>
+                    <span>{lastImportSummary.sheetName} · {lastImportSummary.checked.toLocaleString("tr-TR")} geçerli benzersiz satır kontrol edildi</span>
+                    <div style={importSummaryGrid}>
+                      <span>Yeni müşteri: <strong>{lastImportSummary.inserted.toLocaleString("tr-TR")}</strong></span>
+                      <span>Mevcuda bağlandı: <strong>{lastImportSummary.matchedExisting.toLocaleString("tr-TR")}</strong></span>
+                      <span>Yeni data kaynağı: <strong>{lastImportSummary.sourceRows.toLocaleString("tr-TR")}</strong></span>
+                      <span>Zaten takipte: <strong>{lastImportSummary.alreadyTracked.toLocaleString("tr-TR")}</strong></span>
+                      <span>Dosya içi mükerrer: <strong>{lastImportSummary.fileDuplicates.toLocaleString("tr-TR")}</strong></span>
+                      <span>Eksik/hatalı: <strong>{lastImportSummary.rejectedRows.toLocaleString("tr-TR")}</strong></span>
                     </div>
                   </div>
                 )}
@@ -5349,6 +5382,8 @@ const toolbarSelect = { width: "100%", padding: 12, borderRadius: 8, border: `1p
 const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, color: mutedRedText, fontSize: 12 };
 const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
 const importProgressBox = { display: "grid", gap: 8, margin: "4px 0 14px", padding: 12, borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, fontSize: 13 };
+const importSummaryBox = { display: "grid", gap: 8, margin: "10px 0 14px", padding: 12, borderRadius: 10, background: "#fff7ed", border: "1px solid rgba(226,68,7,0.25)", color: "#7c2d12", fontSize: 13 };
+const importSummaryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 8 };
 const dataActions = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8, paddingTop: 14, borderTop: `1px solid ${brandRedBorder}` };
 const cleanupButtons = { display: "flex", flexWrap: "wrap", gap: 8 };
 const cleanInvalidButton = { padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(251,191,36,0.55)", background: "rgba(180,83,9,0.38)", color: "#fde68a", cursor: "pointer", fontWeight: 700 };

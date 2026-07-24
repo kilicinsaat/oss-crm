@@ -3,6 +3,44 @@
 
 begin;
 
+create table if not exists public.customer_data_sources (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references public.customers(id) on delete cascade,
+  batch_name text not null,
+  batch_page integer,
+  source_phone text,
+  source_phone_2 text,
+  source_tc_no text,
+  source_contact_key text not null,
+  source_info_note text,
+  source_extra jsonb not null default '{}'::jsonb,
+  import_status text not null default 'existing'
+    check (import_status in ('inserted', 'existing')),
+  created_by uuid,
+  created_at timestamptz not null default now(),
+  unique (batch_name, batch_page, source_contact_key)
+);
+
+create index if not exists customer_data_sources_batch_idx
+  on public.customer_data_sources (batch_name, created_at desc);
+
+create index if not exists customer_data_sources_customer_idx
+  on public.customer_data_sources (customer_id);
+
+alter table public.customer_data_sources
+  add column if not exists source_info_note text,
+  add column if not exists source_extra jsonb not null default '{}'::jsonb;
+
+alter table public.customer_data_sources enable row level security;
+
+drop policy if exists "Authenticated users read customer data sources" on public.customer_data_sources;
+create policy "Authenticated users read customer data sources"
+  on public.customer_data_sources for select
+  to authenticated
+  using (true);
+
+grant select on table public.customer_data_sources to authenticated;
+
 create or replace function public.crm_import_customers(p_rows jsonb)
 returns jsonb
 language plpgsql
@@ -15,7 +53,15 @@ declare
   primary_key text;
   secondary_key text;
   tc_key text;
+  source_batch_name text;
+  source_batch_page integer;
+  existing_customer_id uuid;
+  inserted_customer_id uuid;
+  source_inserted_id uuid;
   inserted_count integer := 0;
+  matched_existing_count integer := 0;
+  source_count integer := 0;
+  already_tracked_count integer := 0;
   skipped_count integer := 0;
 begin
   select role into actor_role
@@ -35,6 +81,8 @@ begin
     primary_key := public.crm_phone_key(row_data->>'phone');
     secondary_key := public.crm_phone_key(row_data->>'phone_2');
     tc_key := nullif(regexp_replace(coalesce(row_data->>'tc_no', ''), '[^0-9]', '', 'g'), '');
+    source_batch_name := coalesce(nullif(btrim(row_data->>'batch_name'), ''), 'Manuel kayıt');
+    source_batch_page := nullif(row_data->>'batch_page', '')::integer;
 
     if primary_key is null then
       skipped_count := skipped_count + 1;
@@ -45,17 +93,48 @@ begin
     from (
       select distinct unnest(array[primary_key, secondary_key, case when tc_key is null then null else 'tc:' || tc_key end]) as lock_key
     ) locks
-    where lock_key is not null
-    order by lock_key;
+      where lock_key is not null
+      order by lock_key;
 
-    if exists (
-      select 1
+    select customer.id into existing_customer_id
       from public.customers customer
       where customer.phone_key in (primary_key, secondary_key)
          or customer.phone_2_key in (primary_key, secondary_key)
          or (tc_key is not null and regexp_replace(coalesce(customer.tc_no, ''), '[^0-9]', '', 'g') = tc_key)
-    ) then
-      skipped_count := skipped_count + 1;
+      order by
+        case when customer.status <> 'pool' then 0 else 1 end,
+        customer.assigned_at desc nulls last,
+        customer.updated_at desc nulls last,
+        customer.created_at desc
+      limit 1;
+
+    if existing_customer_id is not null then
+      insert into public.customer_data_sources (
+        customer_id, batch_name, batch_page, source_phone, source_phone_2,
+        source_tc_no, source_contact_key, source_info_note, source_extra, import_status, created_by
+      ) values (
+        existing_customer_id, source_batch_name, source_batch_page, row_data->>'phone',
+        nullif(row_data->>'phone_2', ''), tc_key, primary_key,
+        nullif(row_data->>'info_note', ''),
+        coalesce(row_data->'source_extra', '{}'::jsonb),
+        'existing', auth.uid()
+      )
+      on conflict (batch_name, batch_page, source_contact_key) do nothing
+      returning id into source_inserted_id;
+
+      if source_inserted_id is null then
+        already_tracked_count := already_tracked_count + 1;
+      else
+        matched_existing_count := matched_existing_count + 1;
+        source_count := source_count + 1;
+        update public.customers
+        set info_note = nullif(btrim(concat_ws(E'\n\n', nullif(info_note, ''), nullif(row_data->>'info_note', ''))), ''),
+            updated_at = now()
+        where id = existing_customer_id
+          and nullif(row_data->>'info_note', '') is not null
+          and coalesce(info_note, '') not like '%' || nullif(row_data->>'info_note', '') || '%';
+      end if;
+      source_inserted_id := null;
       continue;
     end if;
 
@@ -78,12 +157,38 @@ begin
       false,
       auth.uid(),
       auth.uid()
-    );
+    )
+    returning id into inserted_customer_id;
+
+    insert into public.customer_data_sources (
+      customer_id, batch_name, batch_page, source_phone, source_phone_2,
+      source_tc_no, source_contact_key, source_info_note, source_extra, import_status, created_by
+    ) values (
+      inserted_customer_id, source_batch_name, source_batch_page, row_data->>'phone',
+      nullif(row_data->>'phone_2', ''), tc_key, primary_key,
+      nullif(row_data->>'info_note', ''),
+      coalesce(row_data->'source_extra', '{}'::jsonb),
+      'inserted', auth.uid()
+    )
+    on conflict (batch_name, batch_page, source_contact_key) do nothing
+    returning id into source_inserted_id;
 
     inserted_count := inserted_count + 1;
+    if source_inserted_id is null then
+      already_tracked_count := already_tracked_count + 1;
+    else
+      source_count := source_count + 1;
+    end if;
+    source_inserted_id := null;
   end loop;
 
-  return jsonb_build_object('inserted', inserted_count, 'skipped', skipped_count);
+  return jsonb_build_object(
+    'inserted', inserted_count,
+    'matched_existing', matched_existing_count,
+    'source_rows', source_count,
+    'already_tracked', already_tracked_count,
+    'skipped', skipped_count
+  );
 end;
 $function$;
 
