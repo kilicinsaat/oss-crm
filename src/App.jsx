@@ -4720,15 +4720,23 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
     if (profile.role !== "boss" || jettelSyncing) return;
     setJettelSyncing(true);
     setJettelExtensionsError("");
-    const { data, error } = await supabase.functions.invoke("jettel-api", {
-      body: { action: "extension-status" },
-    });
+    const { data, error } = await runWithRetry(() => supabase
+      .from("jettel_extensions")
+      .select("extension,ext_id,profile_id,display_name,line_number,group_name,is_active,is_connected,last_seen_at")
+      .order("extension", { ascending: true }), 2);
     setJettelSyncing(false);
-    if (error || data?.success === false) {
-      setJettelExtensionsError("Jettel dahili durumlari cekilemedi: " + (data?.error || error?.message || "Bilinmeyen hata"));
+    if (error) {
+      setJettelExtensionsError("Bridge verisi okunamadi: " + (error.message || "Bilinmeyen hata"));
       return;
     }
-    showSystemToast("Jettel dahili durumlari guncellendi.");
+    const rows = data || [];
+    setJettelExtensions(rows);
+    const freshRows = rows.filter((row) => row.last_seen_at && Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60_000);
+    if (rows.length > 0 && freshRows.length === 0) {
+      setJettelExtensionsError("Bridge verisi bayat gorunuyor. Ofis PC'deki OSS Jettel Local Sync calisiyor mu kontrol et.");
+      return;
+    }
+    showSystemToast("Bridge verisi yenilendi.");
   }
 
   useEffect(() => {
@@ -5051,7 +5059,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 {jettelExtensionsLoading && <span style={mutedText}>Dahililer yukleniyor...</span>}
                 <button type="button" onClick={syncJettelExtensionStatus} disabled={jettelSyncing} style={smallButton}>
-                  {jettelSyncing ? "Jettel okunuyor..." : "Jettel'den durumu yenile"}
+                  {jettelSyncing ? "Bridge okunuyor..." : "Bridge verisini yenile"}
                 </button>
               </div>
             </div>

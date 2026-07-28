@@ -1,5 +1,17 @@
 # OSS Call Bridge
 
+## Jettel local sync paketi
+
+Jettel/Mornet santral bilgisi icin rep secimi sormayan paket:
+
+```text
+call-bridge/OSS-Jettel-Local-Sync-USB.zip
+```
+
+Bu zip'i rep bilgisayarina acin ve `KURULUM-JETTEL-BASLAT.bat` dosyasini yonetici olarak calistirin.
+
+Not: `call-bridge/usb-package` eski MicroSIP/rep bazli pakettir; rep secimi sormasi normaldir. Jettel local sync icin onu kullanmayin.
+
 MicroSIP çağrı olaylarını OSS Center'a gönderir. SIP hesabını veya Jettel santral yönlendirmelerini değiştirmez.
 
 ## Kurulum sırası

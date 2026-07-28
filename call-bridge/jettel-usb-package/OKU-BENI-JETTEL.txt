@@ -1,0 +1,30 @@
+OSS CRM - Jettel Local Sync Kurulumu
+
+BU PAKET REP SECIMI SORMAZ.
+
+Ne ise yarar?
+- Bu bilgisayar acikken Jettel API'ye Turkiye IP uzerinden baglanir.
+- Dahili bagli/bagli degil bilgisini Supabase'e yollar.
+- Varsayilan olarak son 2 gunluk arama raporunu Supabase'e yollar.
+- CRM bu verileri Supabase'den okur.
+
+Kurulum:
+1) Bu klasoru rep bilgisayarina kopyala.
+2) KURULUM-JETTEL-BASLAT.bat dosyasina sag tikla.
+3) "Yonetici olarak calistir" de.
+4) Sorulan bilgileri gir:
+   - JETTEL_USERNAME
+   - JETTEL_PASSWORD
+   - JETTEL_TOKEN
+   - JETTEL_APICODE
+   - CALL_BRIDGE_SECRET
+
+Kurulum bitince Windows Gorev Zamanlayici'ya "OSS Jettel Local Sync" eklenir.
+PC acildiginda otomatik baslar.
+
+Log dosyasi:
+%LOCALAPPDATA%\OSSCallBridge\jettel-sync.log
+
+Not:
+- Eski usb-package klasoru MicroSIP/rep bazli kurulumdur ve rep secimi sorar.
+- Jettel local sync icin bu paketi kullan.

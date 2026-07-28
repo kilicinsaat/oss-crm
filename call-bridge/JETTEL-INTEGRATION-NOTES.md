@@ -182,4 +182,18 @@ Script su bilgileri sorar:
 - `JETTEL_APICODE`
 - `CALL_BRIDGE_SECRET`
 
-Sonra her 30 saniyede bir `ExtensionStatus` bilgisini Jettel'den Turkiye IP uzerinden ceker ve `jettel-bridge-ingest` Edge Function'a gonderir. CRM ekrani `jettel_extensions` tablosunu canli okudugu icin bagli/bagli degil durumu otomatik guncellenir.
+Sonra her 30 saniyede bir `ExtensionStatus` bilgisini ve varsayilan olarak son 2 gunluk `CallReport` bilgisini Jettel'den Turkiye IP uzerinden ceker ve `jettel-bridge-ingest` Edge Function'a gonderir. CRM ekrani `jettel_extensions` ve `call_sessions` tablolarini canli okudugu icin dahili bagli/bagli degil durumu ve arama gecmisi otomatik guncellenir.
+
+Arama raporu sync'i kapatilmak istenirse:
+
+```powershell
+.\call-bridge\install-jettel-local-sync.ps1 -DisableCallReportSync
+```
+
+Daha uzun gecmis taramak istenirse:
+
+```powershell
+.\call-bridge\install-jettel-local-sync.ps1 -CallReportLookbackDays 7
+```
+
+Not: Bu ucretsiz cozumde bridge'in calistigi PC/VPS acik ve internete bagli olmalidir. PC kapaliysa CRM son gelen veriyi gosterir; yeni Jettel bilgisi akmaz.
