@@ -4731,12 +4731,13 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
     }
     const rows = data || [];
     setJettelExtensions(rows);
-    const freshRows = rows.filter((row) => row.last_seen_at && Date.now() - new Date(row.last_seen_at).getTime() < 10 * 60_000);
-    if (rows.length > 0 && freshRows.length === 0) {
-      setJettelExtensionsError("Bridge verisi bayat gorunuyor. Ofis PC'deki OSS Jettel Local Sync calisiyor mu kontrol et.");
+    const rowsWithSync = rows.filter((row) => row.last_seen_at);
+    const freshRows = rowsWithSync.filter((row) => Date.now() - new Date(row.last_seen_at).getTime() < 10 * 60_000);
+    if (rows.length > 0 && rowsWithSync.length === 0) {
+      setJettelExtensionsError("Bridge verisi henuz gelmemis. Ofis PC'deki OSS Jettel Local Sync calisiyor mu kontrol et.");
       return;
     }
-    showSystemToast("Bridge verisi yenilendi.");
+    showSystemToast(freshRows.length > 0 ? "Bridge verisi yenilendi." : "Bridge son verisi okundu; yeni sync bekleniyor.");
   }
 
   useEffect(() => {
@@ -4985,7 +4986,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
         {activityError && <div style={messageSetupNotice}>{activityError}</div>}
         {repCustomersError && <div style={messageSetupNotice}>{repCustomersError}</div>}
         {jettelExtensionsError && <div style={messageSetupNotice}>{jettelExtensionsError}</div>}
-        {liveReportError && <div style={messageSetupNotice}>{liveReportError}</div>}
+        {liveReportError && activeTab !== "extensions" && <div style={messageSetupNotice}>{liveReportError}</div>}
         {activityLoading && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
         {repCustomersLoading && <div style={syncNotice}>Tüm rep müşteri yükleri eksiksiz sayılıyor...</div>}
 
@@ -5073,15 +5074,21 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
               {jettelExtensions.map((extension) => {
                 const assignedRep = reps.find((rep) => rep.id === extension.profile_id);
                 const lastSeenAt = extension.last_seen_at ? new Date(extension.last_seen_at).getTime() : 0;
-                const isStale = !lastSeenAt || clockNow - lastSeenAt > 10 * 60 * 1000;
+                const hasSync = Boolean(lastSeenAt);
+                const isStale = hasSync && clockNow - lastSeenAt > 10 * 60 * 1000;
                 const lastSeenLabel = lastSeenAt ? new Date(lastSeenAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }) : "";
+                const statusLabel = !hasSync
+                  ? "Sync yok"
+                  : extension.is_connected
+                    ? "Bagli"
+                    : "Bagli degil";
                 return (
                   <div key={extension.extension} style={jettelExtensionRow}>
                     <strong>{extension.extension}</strong>
                     <span>{extension.ext_id || `${extension.extension}-pbx349`}</span>
                     <span>{extension.line_number || "-"}</span>
-                    <span style={isStale ? offlineBadgeStyle : extension.is_connected ? onlineBadgeStyle : waitingBadge}>
-                      {isStale ? "Sync yok" : extension.is_connected ? "Bagli" : "Bagli degil"}{lastSeenLabel ? ` · ${lastSeenLabel}` : ""}
+                    <span style={!hasSync ? offlineBadgeStyle : extension.is_connected ? onlineBadgeStyle : waitingBadge}>
+                      {statusLabel}{lastSeenLabel ? ` · ${lastSeenLabel}${isStale ? " eski" : ""}` : ""}
                     </span>
                     <div style={jettelExtensionSelectWrap}>
                       <select
