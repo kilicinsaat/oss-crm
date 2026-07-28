@@ -227,6 +227,130 @@ function mapCallReportRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>
   };
 }
 
+function detectCallPartyPhone(row: JsonRecord, preferredKeys: string[]) {
+  const directPhone = normalizeCustomerPhone(getRowValue(row, preferredKeys));
+  if (directPhone) return directPhone;
+
+  for (const value of rowValues(row)) {
+    const phone = normalizeCustomerPhone(value);
+    if (phone) return phone;
+  }
+  return "";
+}
+
+function detectCallDirection(row: JsonRecord, extension: string, callerPhone: string, calledPhone: string) {
+  const valuesText = rowValues(row).join(" ").toLocaleLowerCase("tr-TR");
+  if (valuesText.includes("gelen") || valuesText.includes("incoming")) return "incoming";
+  if (valuesText.includes("giden") || valuesText.includes("outgoing")) return "outgoing";
+
+  const callerText = cleanText(getRowValue(row, [
+    "arayan",
+    "caller",
+    "CLI",
+    "from",
+    "src",
+    "source",
+    "callerid",
+    "caller_id",
+    "caller_number",
+    "calling",
+    "calling_number",
+  ]), 180);
+  const calledText = cleanText(getRowValue(row, [
+    "aranan",
+    "called",
+    "CLID",
+    "to",
+    "dst",
+    "destination",
+    "called_number",
+    "dialed",
+    "dialed_number",
+  ]), 180);
+
+  if (extension && callerText.includes(extension) && calledPhone) return "outgoing";
+  if (extension && calledText.includes(extension) && callerPhone) return "incoming";
+  if (callerPhone && !calledPhone) return "incoming";
+  if (calledPhone && !callerPhone) return "outgoing";
+  return "incoming";
+}
+
+function detectActiveStatus(row: JsonRecord) {
+  const valuesText = rowValues(row).join(" ").toLocaleLowerCase("tr-TR");
+  if (valuesText.includes("cevap") || valuesText.includes("answer") || valuesText.includes("connected") || valuesText.includes("konuş") || valuesText.includes("konus")) {
+    return "answered";
+  }
+  return "ringing";
+}
+
+function mapActiveCallRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>, customerMap: Map<string, JsonRecord>) {
+  const extension = detectExtension(row);
+  const callerPhone = detectCallPartyPhone(row, [
+    "arayan",
+    "caller",
+    "CLI",
+    "from",
+    "src",
+    "source",
+    "callerid",
+    "caller_id",
+    "caller_number",
+    "calling",
+    "calling_number",
+    "0",
+    "1",
+    "2",
+  ]);
+  const calledPhone = detectCallPartyPhone(row, [
+    "aranan",
+    "called",
+    "CLID",
+    "to",
+    "dst",
+    "destination",
+    "called_number",
+    "dialed",
+    "dialed_number",
+    "3",
+    "4",
+    "5",
+  ]);
+  const direction = detectCallDirection(row, extension, callerPhone, calledPhone);
+  const customerPhone = direction === "incoming" ? callerPhone || calledPhone : calledPhone || callerPhone;
+  if (!customerPhone && !extension) return null;
+
+  const now = new Date().toISOString();
+  const mappedExtension = extensionMap.get(extension);
+  const customer = customerPhone ? customerMap.get(customerPhone) : null;
+  const callUuid = cleanText(getRowValue(row, ["call_uuid", "uuid", "uniqueid", "unique_id"]), 160) || null;
+  const externalCallId = cleanText(getRowValue(row, ["callID", "call_id", "id", "ActionID", "actionID", "linkedid", "linked_id"]), 160)
+    || callUuid
+    || `active:${extension || "jettel"}:${customerPhone || "unknown"}`;
+  const status = detectActiveStatus(row);
+
+  return {
+    customer_id: customer?.id ?? null,
+    profile_id: mappedExtension?.profile_id ?? null,
+    device_id: extension || "jettel",
+    phone: customerPhone || "0000000000",
+    direction,
+    status,
+    ringing_at: now,
+    answered_at: status === "answered" ? now : null,
+    started_at: status === "answered" ? now : null,
+    ended_at: null,
+    duration_seconds: toNumber(getRowValue(row, ["duration", "duration_seconds", "konusma", "süre", "sure"])),
+    waiting_seconds: toNumber(getRowValue(row, ["waiting", "waiting_seconds", "bekleme"])),
+    provider: "jettel",
+    external_call_id: externalCallId,
+    call_uuid: callUuid,
+    caller_name: cleanText(getRowValue(row, ["caller_name", "name", "isim", "ad"]), 160) || null,
+    extension: extension || null,
+    raw_event: row,
+    updated_at: now,
+  };
+}
+
 async function writeActionLog(supabase: ReturnType<typeof createClient>, row: JsonRecord) {
   try {
     await supabase.from("jettel_action_logs").insert(row);
@@ -282,7 +406,7 @@ Deno.serve(async (request) => {
 
   const eventType = cleanText(payload.eventType || payload.type, 80);
   const raw = payload.raw ?? payload.data ?? payload.rows ?? payload;
-  if (!["extension-status", "call-report"].includes(eventType)) {
+  if (!["extension-status", "active-calls", "call-report"].includes(eventType)) {
     await writeActionLog(supabase, {
       action: eventType || "unknown",
       status: "failed",
@@ -294,6 +418,85 @@ Deno.serve(async (request) => {
   }
 
   const rows = asRows(raw);
+  if (eventType === "active-calls") {
+    const { data: extensions } = await supabase.from("jettel_extensions").select("extension,profile_id");
+    const extensionMap = new Map((extensions || []).map((item: JsonRecord) => [String(item.extension), item]));
+
+    const phones = Array.from(new Set(rows.flatMap((row) => [
+      detectCallPartyPhone(row, ["arayan", "caller", "CLI", "from", "src", "source", "callerid", "caller_id", "caller_number", "calling", "calling_number", "0", "1", "2"]),
+      detectCallPartyPhone(row, ["aranan", "called", "CLID", "to", "dst", "destination", "called_number", "dialed", "dialed_number", "3", "4", "5"]),
+    ]).filter(Boolean)));
+    const customerMap = new Map<string, JsonRecord>();
+    for (const phone of phones) {
+      const { data: customer } = await supabase
+        .from("customers")
+        .select("id,phone,phone_2")
+        .or(`phone.eq.${phone},phone_2.eq.${phone}`)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (customer) customerMap.set(phone, customer as JsonRecord);
+    }
+
+    const mappedCalls = rows
+      .map((row) => mapActiveCallRow(row, extensionMap, customerMap))
+      .filter((row): row is NonNullable<ReturnType<typeof mapActiveCallRow>> => Boolean(row));
+
+    let inserted = 0;
+    let updated = 0;
+    for (const call of mappedCalls) {
+      const { data: existingCall } = await supabase
+        .from("call_sessions")
+        .select("id,status")
+        .eq("provider", "jettel")
+        .eq("external_call_id", call.external_call_id)
+        .limit(1)
+        .maybeSingle();
+
+      if ((existingCall as JsonRecord | null)?.id) {
+        const { error } = await supabase.from("call_sessions").update(call).eq("id", (existingCall as JsonRecord).id);
+        if (!error) updated += 1;
+      } else {
+        const { error } = await supabase.from("call_sessions").insert(call);
+        if (!error) inserted += 1;
+      }
+    }
+
+    const activeIds = mappedCalls.map((call) => call.external_call_id).filter(Boolean);
+    const staleCutoff = new Date(Date.now() - 90_000).toISOString();
+    let closeQuery = supabase
+      .from("call_sessions")
+      .update({
+        status: "missed",
+        ended_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("provider", "jettel")
+      .in("status", ["ringing", "answered"])
+      .lt("updated_at", staleCutoff);
+    if (activeIds.length > 0) closeQuery = closeQuery.not("external_call_id", "in", `(${activeIds.map((id) => `"${String(id).replaceAll('"', '\\"')}"`).join(",")})`);
+    await closeQuery;
+
+    await writeActionLog(supabase, {
+      action: "active-calls",
+      status: "success",
+      raw_request: {
+        eventType,
+        sourceDevice: payload.sourceDevice || null,
+        occurredAt: payload.occurredAt || null,
+      },
+      raw_response: {
+        rows_seen: rows.length,
+        mapped: mappedCalls.length,
+        inserted,
+        updated,
+        active_ids: activeIds,
+      },
+    });
+
+    return json({ success: true, rowsSeen: rows.length, mapped: mappedCalls.length, inserted, updated });
+  }
+
   if (eventType === "call-report") {
     const { data: extensions } = await supabase.from("jettel_extensions").select("extension,profile_id");
     const extensionMap = new Map((extensions || []).map((item: JsonRecord) => [String(item.extension), item]));

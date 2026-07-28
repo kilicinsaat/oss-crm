@@ -1,6 +1,7 @@
 param(
   [switch]$Loop,
   [int]$IntervalSeconds = 30,
+  [switch]$DisableActiveCallsSync,
   [switch]$SyncCallReport,
   [int]$CallReportLookbackDays = 2,
   [string]$Extensions = ''
@@ -139,8 +140,20 @@ function Sync-Once {
   Send-ToSupabase -Config $config -EventType 'extension-status' -RawResponse $response
   Write-SyncLog 'ExtensionStatus Supabase aktarimi basarili.'
 
+  $shouldSyncActiveCalls = -not $DisableActiveCallsSync
+  if ($null -ne $config.syncActiveCalls) {
+    $shouldSyncActiveCalls = [bool]($config.syncActiveCalls)
+  }
+  if ($shouldSyncActiveCalls) {
+    Start-Sleep -Milliseconds 1500
+    $activeResponse = Invoke-JettelPost -Config $config -Mode 'ActiveCalls' -Fields @{}
+    Send-ToSupabase -Config $config -EventType 'active-calls' -RawResponse $activeResponse
+    Write-SyncLog 'ActiveCalls Supabase aktarimi basarili.'
+  }
+
   $shouldSyncCallReport = $SyncCallReport -or [bool]($config.syncCallReport)
   if ($shouldSyncCallReport) {
+    Start-Sleep -Milliseconds 1500
     $lookbackDays = if ($config.callReportLookbackDays) { [int]$config.callReportLookbackDays } else { $CallReportLookbackDays }
     $startDate = (Get-Date).Date.AddDays(-[Math]::Max(0, $lookbackDays)).ToString('yyyy-MM-dd')
     $endDate = (Get-Date).Date.ToString('yyyy-MM-dd')

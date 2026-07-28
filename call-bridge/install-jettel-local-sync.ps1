@@ -9,6 +9,7 @@ param(
   [int]$IntervalSeconds = 30,
   [string]$Extensions = '101,102,103,104,105,106,107,108,109,110',
   [string]$JettelPbxSuffix = 'pbx349',
+  [switch]$DisableActiveCallsSync,
   [switch]$DisableCallReportSync,
   [int]$CallReportLookbackDays = 2,
   [switch]$NoScheduledTask
@@ -68,6 +69,7 @@ Copy-Item -LiteralPath (Join-Path $sourceRoot 'jettel-local-sync.ps1') -Destinat
   intervalSeconds = $IntervalSeconds
   extensions = $Extensions
   jettelPbxSuffix = $JettelPbxSuffix
+  syncActiveCalls = -not [bool]$DisableActiveCallsSync
   syncCallReport = -not [bool]$DisableCallReportSync
   callReportLookbackDays = $CallReportLookbackDays
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $installRoot 'jettel-sync-config.json') -Encoding UTF8
@@ -105,7 +107,7 @@ if (-not $NoScheduledTask) {
     Start-Process -FilePath 'powershell.exe' -ArgumentList $taskArgument -WindowStyle Hidden
     Write-Host "Startup otomatik baslatma aktif: $startupCmd" -ForegroundColor Green
   }
-  Write-Host "Bu PC acikken Jettel durumlari ve arama raporlari $IntervalSeconds saniyede bir Supabase'e aktarilir." -ForegroundColor Green
+  Write-Host "Bu PC acikken Jettel durumlari ve aktif cagri bilgisi $IntervalSeconds saniyede bir Supabase'e aktarilir." -ForegroundColor Green
 }
 
 Write-Host ''
