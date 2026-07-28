@@ -146,7 +146,16 @@ function Sync-Once {
   }
   if ($shouldSyncActiveCalls) {
     Start-Sleep -Milliseconds 1500
-    $activeResponse = Invoke-JettelPost -Config $config -Mode 'ActiveCalls' -Fields @{}
+    try {
+      $activeResponse = Invoke-JettelPost -Config $config -Mode 'ActiveCalls' -Fields @{}
+    } catch {
+      $activeResponse = @{
+        rows = @(@{
+          error = $_.Exception.Message
+          mode = 'ActiveCalls'
+        })
+      }
+    }
     Send-ToSupabase -Config $config -EventType 'active-calls' -RawResponse $activeResponse
     Write-SyncLog 'ActiveCalls Supabase aktarimi basarili.'
   }
