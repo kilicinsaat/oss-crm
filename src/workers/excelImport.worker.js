@@ -85,6 +85,10 @@ const validTurkishTc = (value) => {
 };
 
 const cleanName = (value) => String(value || "").replace(/\s+/g, " ").trim();
+const HEADERLESS_LOOKAHEAD_COLUMNS = 6;
+
+const uniqueValues = (values) => [...new Set(values.filter(Boolean))];
+
 const friendlyHeader = (header, index) => cleanName(header) || `Kolon ${index + 1}`;
 const hasReadableName = (value) => {
   const text = cleanName(value);
@@ -105,6 +109,37 @@ const splitName = (fullName) => {
     last_name: parts.length > 1 ? parts.at(-1) : "",
   };
 };
+
+const findHeaderlessPhones = (row, nameColumn, usedPhoneColumns = new Set()) => {
+  const candidates = [];
+  const candidateColumns = [];
+
+  for (let offset = 1; offset <= HEADERLESS_LOOKAHEAD_COLUMNS; offset += 1) {
+    const phoneColumn = nameColumn + offset;
+    const phone = spreadsheetPhone(row[phoneColumn]);
+    if (!phone || usedPhoneColumns.has(phoneColumn)) continue;
+    candidates.push(phone);
+    candidateColumns.push(phoneColumn);
+  }
+
+  return {
+    phones: uniqueValues(candidates),
+    columns: candidateColumns,
+  };
+};
+
+const findHeaderlessTcColumn = (row, nameColumn, phoneColumns = []) => row.findIndex((candidate, candidateIndex) => (
+  candidateIndex !== nameColumn
+  && !phoneColumns.includes(candidateIndex)
+  && validTurkishTc(candidate)
+));
+
+const findHeaderlessEmailColumn = (row, nameColumn, phoneColumns = [], tcColumn = -1) => row.findIndex((candidate, candidateIndex) => (
+  candidateIndex !== nameColumn
+  && candidateIndex !== tcColumn
+  && !phoneColumns.includes(candidateIndex)
+  && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanName(candidate))
+));
 
 const buildRowInfo = ({ headers = [], row = [], sheetName, rowNumber, usedColumns = new Set() }) => {
   const columns = {};
@@ -239,28 +274,22 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
           const usedPhoneColumns = new Set();
           row.forEach((cell, columnIndex) => {
             if (!isPlausibleName(cell)) return;
-            const phoneCandidates = [];
-            for (let offset = 1; offset <= 2; offset += 1) {
-              const phoneColumn = columnIndex + offset;
-              const phone = spreadsheetPhone(row[phoneColumn]);
-              if (!phone || usedPhoneColumns.has(phoneColumn)) continue;
-              phoneCandidates.push(phone);
-              usedPhoneColumns.add(phoneColumn);
-            }
+            const { phones: phoneCandidates, columns: phoneColumns } = findHeaderlessPhones(row, columnIndex, usedPhoneColumns);
             if (!phoneCandidates.length) return;
+            phoneColumns.forEach((phoneColumn) => usedPhoneColumns.add(phoneColumn));
             const localUsedColumns = new Set([columnIndex]);
-            for (let offset = 1; offset <= 2; offset += 1) {
-              const phoneColumn = columnIndex + offset;
-              if (spreadsheetPhone(row[phoneColumn])) localUsedColumns.add(phoneColumn);
-            }
-            const tcColumn = row.findIndex((candidate, candidateIndex) => candidateIndex !== columnIndex && validTurkishTc(candidate));
+            phoneColumns.forEach((phoneColumn) => localUsedColumns.add(phoneColumn));
+            const tcColumn = findHeaderlessTcColumn(row, columnIndex, phoneColumns);
             if (tcColumn >= 0) localUsedColumns.add(tcColumn);
+            const emailColumn = findHeaderlessEmailColumn(row, columnIndex, phoneColumns, tcColumn);
+            if (emailColumn >= 0) localUsedColumns.add(emailColumn);
             const info = buildRowInfo({ row, sheetName, rowNumber: rowIndex + 1, usedColumns: localUsedColumns });
             const before = preparedRows.length;
             addCustomer({
               fullName: cell,
               phones: phoneCandidates,
               tcValue: tcColumn >= 0 ? row[tcColumn] : "",
+              emailValue: emailColumn >= 0 ? row[emailColumn] : "",
               rowNumber: rowIndex + 1,
               infoNote: info.infoNote,
               sourceExtra: info.sourceExtra,

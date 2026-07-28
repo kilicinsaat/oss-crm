@@ -652,6 +652,9 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
   const [lastImportSummary, setLastImportSummary] = useState(null);
+  const [cleaningData, setCleaningData] = useState(false);
+  const [cleanProgress, setCleanProgress] = useState(null);
+  const [lastCleanSummary, setLastCleanSummary] = useState(null);
 
   const [form, setForm] = useState({
     first_name: "",
@@ -1999,6 +2002,79 @@ function App() {
     }
   }
 
+  async function cleanCustomerDataFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setCleaningData(true);
+      setCleanProgress({ phase: "Data okunuyor", current: 0, total: 0 });
+
+      const buffer = await file.arrayBuffer();
+      const parsed = await parseExcelInWorker(buffer, file.name, (current, total) => {
+        setCleanProgress({ phase: "Satırlar temizleniyor", current, total });
+      });
+
+      if (!parsed.rows.length) {
+        throw new Error(`Temizlenecek geçerli kayıt bulunamadı. ${parsed.rejectedRows} eksik/hatalı satır tespit edildi.`);
+      }
+
+      const XLSX = await import("xlsx");
+      const cleanedRows = parsed.rows.map((row) => ({
+        "Ad Soyad": `${row.first_name || ""} ${row.last_name || ""}`.trim(),
+        "Telefon": row.phone ? `0${row.phone}` : "",
+        "Telefon 2": row.phone_2 ? `0${row.phone_2}` : "",
+        "TC No": row.tc_no || "",
+        "E-Posta": row.email || "",
+        "Data": row.batch_name || file.name,
+        "Excel Sayfası": row.source_extra?.sheet_name || parsed.sheetName || "",
+        "Excel Satırı": row.batch_page || "",
+        "Ek Bilgi": row.info_note || "",
+      }));
+
+      const workbook = XLSX.utils.book_new();
+      const worksheet = XLSX.utils.json_to_sheet(cleanedRows);
+      worksheet["!cols"] = [
+        { wch: 34 },
+        { wch: 14 },
+        { wch: 14 },
+        { wch: 13 },
+        { wch: 26 },
+        { wch: 32 },
+        { wch: 18 },
+        { wch: 12 },
+        { wch: 48 },
+      ];
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Temiz Data");
+
+      const safeBaseName = file.name
+        .replace(/\.[^.]+$/, "")
+        .replace(/[\\/:*?"<>|]+/g, "-")
+        .replace(/\s+/g, " ")
+        .trim()
+        || "data";
+      const outputName = `${safeBaseName}-TEMIZ-CRM.xlsx`;
+      XLSX.writeFile(workbook, outputName);
+
+      setLastCleanSummary({
+        fileName: file.name,
+        outputName,
+        sheetName: parsed.sheetName,
+        cleaned: cleanedRows.length,
+        rejectedRows: parsed.rejectedRows,
+        duplicateRows: parsed.duplicateRows || 0,
+        secondPhones: cleanedRows.filter((row) => row["Telefon 2"]).length,
+      });
+      showSystemToast(`${cleanedRows.length.toLocaleString("tr-TR")} kayıt temizlendi ve Excel indirildi.`);
+    } catch (error) {
+      alert("Data temizlenemedi: " + error.message);
+    } finally {
+      setCleaningData(false);
+      setCleanProgress(null);
+      event.target.value = "";
+    }
+  }
+
   async function addCustomer(event) {
     event.preventDefault();
     if (!profile) return;
@@ -2983,8 +3059,37 @@ function App() {
 
             {profile.role === "boss" && (
               <section style={{ ...panelCard, marginTop: 20 }}>
+                <h2 style={sectionTitle}>Data Düzenleyici</h2>
+                <p style={mutedText}>Ham Excel/CSV dosyasını seç; sistem veritabanına dokunmadan isim, telefon, ikinci telefon, TC ve ek bilgileri ayıklayıp temiz Excel olarak indirir.</p>
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={cleanCustomerDataFile} disabled={cleaningData || importing} style={inputStyle} />
+                {cleaningData && (
+                  <div style={importProgressBox}>
+                    <div style={chartLabel}>
+                      <span>{cleanProgress?.phase || "Temizleniyor"}</span>
+                      <strong>{cleanProgress?.total ? `${cleanProgress.current.toLocaleString("tr-TR")} / ${cleanProgress.total.toLocaleString("tr-TR")}` : "Hazırlanıyor"}</strong>
+                    </div>
+                    <div style={chartTrack}>
+                      <div style={{ ...chartBar, width: `${cleanProgress?.total ? Math.max((cleanProgress.current / cleanProgress.total) * 100, 2) : 12}%` }} />
+                    </div>
+                  </div>
+                )}
+                {lastCleanSummary && (
+                  <div style={cleanSummaryBox}>
+                    <strong>{lastCleanSummary.outputName}</strong>
+                    <span>{lastCleanSummary.sheetName} · Temiz dosya indirildi, henüz CRM'e kayıt atılmadı.</span>
+                    <div style={importSummaryGrid}>
+                      <span>Temiz kayıt: <strong>{lastCleanSummary.cleaned.toLocaleString("tr-TR")}</strong></span>
+                      <span>İkinci telefon: <strong>{lastCleanSummary.secondPhones.toLocaleString("tr-TR")}</strong></span>
+                      <span>Dosya içi mükerrer: <strong>{lastCleanSummary.duplicateRows.toLocaleString("tr-TR")}</strong></span>
+                      <span>Eksik/hatalı: <strong>{lastCleanSummary.rejectedRows.toLocaleString("tr-TR")}</strong></span>
+                    </div>
+                    <span style={mutedText}>İnen temiz dosyayı aşağıdaki “Excel / CSV Data Yükle” alanından manuel yükleyebilirsin.</span>
+                  </div>
+                )}
+
                 <h2 style={sectionTitle}>Excel / CSV Data Yükle</h2>
-                <input type="file" accept=".xlsx,.xls,.csv" onChange={importExcel} disabled={importing} style={inputStyle} />
+                <p style={mutedText}>Bu alan seçtiğin dosyayı doğrudan CRM'e kaydeder. Önce temizlemek istiyorsan yukarıdaki Data Düzenleyici'yi kullan.</p>
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={importExcel} disabled={importing || cleaningData} style={inputStyle} />
                 {importing && (
                   <div style={importProgressBox}>
                     <div style={chartLabel}>
@@ -5399,6 +5504,7 @@ const tableSummary = { display: "flex", justifyContent: "space-between", gap: 12
 const primaryButton = { width: "100%", padding: 13, borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
 const importProgressBox = { display: "grid", gap: 8, margin: "4px 0 14px", padding: 12, borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, fontSize: 13 };
 const importSummaryBox = { display: "grid", gap: 8, margin: "10px 0 14px", padding: 12, borderRadius: 10, background: "#fff7ed", border: "1px solid rgba(226,68,7,0.25)", color: "#7c2d12", fontSize: 13 };
+const cleanSummaryBox = { ...importSummaryBox, background: "#ecfeff", border: "1px solid rgba(8,145,178,0.28)", color: "#164e63" };
 const importSummaryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 8 };
 const dataActions = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8, paddingTop: 14, borderTop: `1px solid ${brandRedBorder}` };
 const cleanupButtons = { display: "flex", flexWrap: "wrap", gap: 8 };
