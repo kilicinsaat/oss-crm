@@ -4731,7 +4731,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
     }
     const rows = data || [];
     setJettelExtensions(rows);
-    const freshRows = rows.filter((row) => row.last_seen_at && Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60_000);
+    const freshRows = rows.filter((row) => row.last_seen_at && Date.now() - new Date(row.last_seen_at).getTime() < 10 * 60_000);
     if (rows.length > 0 && freshRows.length === 0) {
       setJettelExtensionsError("Bridge verisi bayat gorunuyor. Ofis PC'deki OSS Jettel Local Sync calisiyor mu kontrol et.");
       return;
@@ -5073,14 +5073,15 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
               {jettelExtensions.map((extension) => {
                 const assignedRep = reps.find((rep) => rep.id === extension.profile_id);
                 const lastSeenAt = extension.last_seen_at ? new Date(extension.last_seen_at).getTime() : 0;
-                const isStale = !lastSeenAt || clockNow - lastSeenAt > 2 * 60 * 1000;
+                const isStale = !lastSeenAt || clockNow - lastSeenAt > 10 * 60 * 1000;
+                const lastSeenLabel = lastSeenAt ? new Date(lastSeenAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }) : "";
                 return (
                   <div key={extension.extension} style={jettelExtensionRow}>
                     <strong>{extension.extension}</strong>
                     <span>{extension.ext_id || `${extension.extension}-pbx349`}</span>
                     <span>{extension.line_number || "-"}</span>
                     <span style={isStale ? offlineBadgeStyle : extension.is_connected ? onlineBadgeStyle : waitingBadge}>
-                      {isStale ? "Sync yok" : extension.is_connected ? "Bagli" : "Bagli degil"}
+                      {isStale ? "Sync yok" : extension.is_connected ? "Bagli" : "Bagli degil"}{lastSeenLabel ? ` · ${lastSeenLabel}` : ""}
                     </span>
                     <div style={jettelExtensionSelectWrap}>
                       <select
