@@ -491,6 +491,7 @@ Deno.serve(async (request) => {
         inserted,
         updated,
         active_ids: activeIds,
+        sample_rows: rows.slice(0, 10),
       },
     });
 
