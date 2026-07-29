@@ -276,6 +276,10 @@ function detectCallDirection(row: JsonRecord, extension: string, callerPhone: st
 }
 
 function detectActiveStatus(row: JsonRecord) {
+  const rawStatus = cleanText(getRowValue(row, ["durum", "Durum", "status", "Status", "call_status", "CallStatus"]), 80).toLocaleLowerCase("tr-TR");
+  if (["1", "answered", "connected", "cevaplandi", "cevaplandı", "konusuyor", "konuşuyor"].includes(rawStatus)) return "answered";
+  if (["0", "ringing", "calling", "dialing", "caliyor", "çalıyor", "ariyor", "arıyor"].includes(rawStatus)) return "ringing";
+
   const valuesText = rowValues(row).join(" ").toLocaleLowerCase("tr-TR");
   if (valuesText.includes("cevap") || valuesText.includes("answer") || valuesText.includes("connected") || valuesText.includes("konuş") || valuesText.includes("konus")) {
     return "answered";
