@@ -1140,15 +1140,19 @@ function App() {
       if (message.recipient_id && message.recipient_id !== profile.id) return;
 
       const sender = usersRef.current.find((user) => user.id === message.sender_id);
+      const isGeneralMessage = !message.recipient_id;
       const senderName = sender?.full_name || sender?.email || "Bir çalışan";
+      const rawBody = message.body || message.attachment_name || "Yeni mesaj";
       const notice = {
         id: message.id || `${Date.now()}-${Math.random()}`,
-        title: message.recipient_id ? senderName : `Genel · ${senderName}`,
-        body: message.body || message.attachment_name || "Yeni mesaj",
+        title: isGeneralMessage ? "Ofis Genel Kanalı" : senderName,
+        body: isGeneralMessage ? `${senderName}: ${rawBody}` : rawBody,
         target: message.recipient_id ? message.sender_id : "general",
+        tone: isGeneralMessage ? "broadcast" : "direct",
       };
       setMessageNotices((current) => [...current.filter((item) => item.id !== notice.id), notice].slice(-4));
-      window.setTimeout(() => setMessageNotices((current) => current.filter((item) => item.id !== notice.id)), 7000);
+      window.setTimeout(() => setMessageNotices((current) => current.filter((item) => item.id !== notice.id)), isGeneralMessage ? 4000 : 7000);
+      playMessageNoticeSound(isGeneralMessage);
 
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
         const browserNotice = new Notification(`OSS CRM · ${notice.title}`, {
@@ -1382,6 +1386,29 @@ function App() {
       gain.connect(audioContext.destination);
       oscillator.start();
       oscillator.stop(audioContext.currentTime + 0.58);
+    } catch {
+      // Browser audio can be blocked until the user interacts with the page.
+    }
+  }
+
+  function playMessageNoticeSound(isBroadcast = false) {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioContext = appointmentAudioContextRef.current || new AudioContextClass();
+      appointmentAudioContextRef.current = audioContext;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = isBroadcast ? "square" : "sine";
+      oscillator.frequency.setValueAtTime(isBroadcast ? 620 : 720, audioContext.currentTime);
+      oscillator.frequency.setValueAtTime(isBroadcast ? 820 : 880, audioContext.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(isBroadcast ? 0.16 : 0.1, audioContext.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.34);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.36);
     } catch {
       // Browser audio can be blocked until the user interacts with the page.
     }
@@ -3015,12 +3042,12 @@ function App() {
       )}
       <div style={messageNoticeStack}>
         {messageNotices.map((notice) => (
-          <button key={notice.id} type="button" style={messageNoticeCard} onClick={() => {
+          <button key={notice.id} type="button" style={notice.tone === "broadcast" ? messageBroadcastNoticeCard : messageNoticeCard} onClick={() => {
             setMessageTarget(notice.target);
             setActivePage("messages");
             setMessageNotices((current) => current.filter((item) => item.id !== notice.id));
           }}>
-            <span style={messageNoticeIcon}>✉</span>
+            <span style={notice.tone === "broadcast" ? messageBroadcastNoticeIcon : messageNoticeIcon}>{notice.tone === "broadcast" ? "#" : "✉"}</span>
             <span style={messageNoticeCopy}><strong>{notice.title}</strong><small>{notice.body}</small></span>
             <span style={messageNoticeClose} onClick={(event) => {
               event.stopPropagation();
@@ -6018,7 +6045,9 @@ const errorFallbackCode = { display: "block", padding: 12, borderRadius: 10, bac
 const errorFallbackActions = { display: "flex", flexWrap: "wrap", gap: 10, marginTop: 4 };
 const messageNoticeStack = { position: "fixed", top: 18, right: 18, zIndex: 1300, width: "min(390px,calc(100vw - 36px))", display: "grid", gap: 10 };
 const messageNoticeCard = { width: "100%", display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 24px", alignItems: "center", gap: 10, padding: 12, borderRadius: 12, border: "1px solid rgba(103,232,249,0.42)", background: "linear-gradient(135deg,rgba(9,35,72,0.98),rgba(15,76,92,0.98))", color: "white", boxShadow: "0 18px 45px rgba(0,0,0,0.4)", cursor: "pointer", textAlign: "left" };
+const messageBroadcastNoticeCard = { ...messageNoticeCard, border: "1px solid rgba(253,186,116,0.62)", background: "linear-gradient(135deg,rgba(127,29,29,0.98),rgba(226,68,7,0.96))" };
 const messageNoticeIcon = { width: 42, height: 42, display: "grid", placeItems: "center", borderRadius: 11, background: "rgba(34,211,238,0.16)", color: "#67e8f9", fontSize: 20 };
+const messageBroadcastNoticeIcon = { ...messageNoticeIcon, background: "rgba(255,255,255,0.18)", color: "#fff7ed", fontWeight: 900 };
 const messageNoticeCopy = { minWidth: 0, display: "grid", gap: 3 };
 const messageNoticeClose = { width: 24, height: 24, display: "grid", placeItems: "center", borderRadius: 7, background: "rgba(255,255,255,0.08)", color: "#cbd5e1", fontSize: 18 };
 const appointmentNoticeStack = { position: "fixed", right: 18, bottom: 18, zIndex: 1300, width: "min(430px,calc(100vw - 36px))", display: "grid", gap: 10 };
