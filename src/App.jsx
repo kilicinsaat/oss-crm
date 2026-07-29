@@ -7,6 +7,7 @@ import callbackIcon from "./assets/sistem-icon/callback.png";
 import contractIcon from "./assets/sistem-icon/contract.png";
 import customersIcon from "./assets/sistem-icon/customers.png";
 import dashboardIcon from "./assets/sistem-icon/dashboard.png";
+import managerNewCustomersIcon from "./assets/sistem-icon/manager-new-customers.jpg";
 import messagesIcon from "./assets/sistem-icon/messages.png";
 import newCustomersIcon from "./assets/sistem-icon/new-customers.png";
 import noAnswerIcon from "./assets/sistem-icon/no-answer.png";
@@ -14,6 +15,7 @@ import notApprovedIcon from "./assets/sistem-icon/not-approved.png";
 import notesIcon from "./assets/sistem-icon/notes.png";
 import paidIcon from "./assets/sistem-icon/paid.png";
 import reportsIcon from "./assets/sistem-icon/reports.png";
+import followupsIcon from "./assets/sistem-icon/followups.png";
 import todayWorkIcon from "./assets/sistem-icon/today-work.png";
 import wrongNumberIcon from "./assets/sistem-icon/wrong-number.png";
 
@@ -77,6 +79,7 @@ const appTextColor = brandRed;
 const mutedRedText = "#8a2a08";
 const IMPORTANT_CUSTOMER_STATUSES = ["assigned", "appointment", "contract_appointment", "callback"];
 const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"];
+const REP_NEGATIVE_CUSTOMER_STATUSES = new Set(["no_answer", "busy", "not_approved", "wrong_number"]);
 const APPOINTMENT_REMINDER_STATUSES = ["appointment", "contract_appointment"];
 const CALENDAR_REMINDER_STATUSES = ["callback", "appointment", "contract_appointment"];
 const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
@@ -103,7 +106,9 @@ const menuIconAssets = {
   customers: customersIcon,
   dashboard: dashboardIcon,
   employees: customersIcon,
-  followups: todayWorkIcon,
+  managerCustomers: newCustomersIcon,
+  managerNewCustomers: managerNewCustomersIcon,
+  followups: followupsIcon,
   messages: messagesIcon,
   newCustomers: newCustomersIcon,
   noAnswer: noAnswerIcon,
@@ -550,6 +555,7 @@ function getUserStats(customers, userId) {
     total: myCustomers.length,
     called: myCustomers.filter((c) => c.status === "called").length,
     appointment: myCustomers.filter((c) => c.status === "appointment").length,
+    negative: myCustomers.filter((c) => REP_NEGATIVE_CUSTOMER_STATUSES.has(c.status)).length,
     approved: myCustomers.filter((c) => c.approved).length,
     paid: myCustomers.filter((c) => c.payment_received).length,
   };
@@ -611,15 +617,6 @@ function getDataStats(customers) {
   }, {});
 
   return Object.values(grouped).sort((a, b) => b.paid - a.paid || b.appointment - a.appointment || b.total - a.total);
-}
-
-function rankMedal(index) {
-  const tones = [
-    { background: "#fbbf24", color: "#422006" },
-    { background: "#cbd5e1", color: "#1e293b" },
-    { background: "#fb923c", color: "#431407" },
-  ];
-  return { width: 28, height: 28, display: "grid", placeItems: "center", flexShrink: 0, borderRadius: "50%", fontSize: 12, fontWeight: 900, ...(tones[index] || { background: "#1e3a5f", color: "#bae6fd" }) };
 }
 
 function parseExcelInWorker(buffer, fileName, onProgress) {
@@ -983,7 +980,7 @@ function App() {
   }, [summaryProfileId, customerDataVersion]);
 
   useEffect(() => {
-    if (profile?.role !== "boss") return undefined;
+    if (!["boss", "manager"].includes(profile?.role)) return undefined;
 
     let cancelled = false;
     async function refreshBossLiveReport() {
@@ -1010,7 +1007,7 @@ function App() {
   }, [profile, customerDataVersion]);
 
   useEffect(() => {
-    if (profile?.role !== "boss") return undefined;
+    if (!["boss", "manager"].includes(profile?.role)) return undefined;
     const profileChannel = supabase
       .channel(`crm-profiles-${profile.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => loadUsers())
@@ -1021,7 +1018,7 @@ function App() {
   useEffect(() => {
     if (!profile) return undefined;
 
-    const isBoss = profile.role === "boss";
+    const canSeeAllCustomers = ["boss", "manager"].includes(profile.role);
     const channel = supabase.channel(`crm-customers-${profile.id}`);
 
     function handleCustomerChange(payload) {
@@ -1034,10 +1031,10 @@ function App() {
       const customer = payload.new;
       if (!customer?.id) return;
 
-      if (isBoss || customer.assigned_employee === profile.id) {
+      if (canSeeAllCustomers || customer.assigned_employee === profile.id) {
         upsertCustomerRows(customer);
         setCustomerDataVersion((version) => version + 1);
-        if (!isBoss && customer.assigned_employee === profile.id && customer.last_action_by !== profile.id) {
+        if (!canSeeAllCustomers && customer.assigned_employee === profile.id && customer.last_action_by !== profile.id) {
           showSystemToast("Yeni mÃ¼ÅŸteri atandÄ±");
         }
       } else {
@@ -1045,7 +1042,7 @@ function App() {
       }
     }
 
-    if (isBoss) {
+    if (canSeeAllCustomers) {
       channel
         .on("postgres_changes", { event: "INSERT", schema: "public", table: "customers" }, handleCustomerChange)
         .on("postgres_changes", { event: "UPDATE", schema: "public", table: "customers" }, handleCustomerChange)
@@ -2505,7 +2502,7 @@ function App() {
   }
 
   async function assignCustomer(customerOrId, employeeId) {
-    if (!profile || profile.role !== "boss") return false;
+    if (!profile || !["boss", "manager"].includes(profile.role)) return false;
     const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
     const currentCustomer = typeof customerOrId === "object"
       ? customerOrId
@@ -2563,7 +2560,7 @@ function App() {
     const customerIdsToUpdate = Array.isArray(customerIdsOverride) ? customerIdsOverride : selectedIds;
 
     if (sourceEmployeeOverride) {
-      if (!profile || profile.role !== "boss") return false;
+      if (!profile || !["boss", "manager"].includes(profile.role)) return false;
       if (!window.confirm("Repteki tüm müşteriler havuza geri alınsın mı?")) return false;
 
       const { data: releasedCount, error: releaseError } = await runWithRetry(() =>
@@ -2899,19 +2896,21 @@ function App() {
   const profileId = profile?.id || "";
   const profileFullName = profile?.full_name || "";
   const profileEmail = profile?.email || "";
+  const isManagementProfile = ["boss", "manager"].includes(profileRole);
   const customersStillLoading = customerSummary === null;
   const customerMetric = (key, fallback = 0) => {
     const value = customerSummary?.[key];
     return value === null || value === undefined ? fallback : Number(value) || 0;
   };
   const employees = users.filter((user) => ["employee", "manager"].includes(user.role));
-  const managerCustomers = profileRole === "manager"
-    ? customers.filter((customer) => customer.assigned_employee === profileId)
-    : [];
-  const visibleCustomers = ["employee", "manager"].includes(profileRole)
+  const ownAssignedCustomers = ["employee", "manager"].includes(profileRole)
     ? customers.filter((customer) => customer.assigned_employee === profileId)
     : customers;
+  const managerCustomers = profileRole === "manager" ? ownAssignedCustomers : [];
+  const visibleCustomers = isManagementProfile ? customers : ownAssignedCustomers;
   const newIncomingCustomers = visibleCustomers.filter(isFreshAssignedCustomer);
+  const ownNewIncomingCustomers = ownAssignedCustomers.filter(isFreshAssignedCustomer);
+  const repNewIncomingCustomers = profileRole === "manager" ? ownNewIncomingCustomers : newIncomingCustomers;
   const completeCustomers = profileRole === "employee"
     ? visibleCustomers.filter((customer) => customer.assigned_employee === profileId)
     : visibleCustomers;
@@ -2922,6 +2921,7 @@ function App() {
       if (customerFilter === "assigned") return !!customer.assigned_employee;
       if (customerFilter === "approved") return customer.approved;
       if (customerFilter === "paid") return customer.payment_received;
+      if (CUSTOMER_STATUSES.has(customerFilter)) return customer.status === customerFilter;
       return true;
     })
     .filter((customer) => customerMatchesSearch(customer, searchTerm));
@@ -2941,8 +2941,8 @@ function App() {
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const overdueReminders = calendarCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
   const todayWorkItems = calendarCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
-  const reportCustomers = ["employee", "manager"].includes(profileRole) ? visibleCustomers : customers;
-  const bossReportSummary = profileRole === "boss" ? bossLiveReport?.summary : null;
+  const reportCustomers = isManagementProfile ? customers : visibleCustomers;
+  const bossReportSummary = isManagementProfile ? bossLiveReport?.summary : null;
   const liveRepStatsById = new Map((bossLiveReport?.rep_stats || []).map((item) => [item.id, item]));
   const repStats = users
     .filter((user) => user.role === "employee")
@@ -2954,6 +2954,7 @@ function App() {
           total: Number(liveStats.total) || 0,
           called: Number(liveStats.called) || 0,
           appointment: Number(liveStats.appointment) || 0,
+          negative: Number(liveStats.negative) || customers.filter((customer) => customer.assigned_employee === user.id && REP_NEGATIVE_CUSTOMER_STATUSES.has(customer.status)).length,
           approved: Number(liveStats.approved) || 0,
           paid: Number(liveStats.paid) || 0,
           untouched: Number(liveStats.untouched) || 0,
@@ -2973,7 +2974,7 @@ function App() {
     { key: "using", title: "Kullanıyor", value: bossReportSummary ? Number(bossReportSummary.using) || 0 : reportCustomers.filter((customer) => customer.status === "using").length },
     { key: "paid", title: "Satış", value: bossReportSummary ? Number(bossReportSummary.paid) || 0 : reportCustomers.filter((customer) => customer.status === "paid").length },
   ];
-  const dataStats = profileRole === "boss" && bossLiveReport?.data_stats
+  const dataStats = isManagementProfile && bossLiveReport?.data_stats
     ? bossLiveReport.data_stats.map((item) => ({
         ...item,
         total: Number(item.total) || 0,
@@ -2983,7 +2984,9 @@ function App() {
       }))
     : getDataStats(reportCustomers);
   const totalCustomerCount = customerMetric("total", completeCustomers.length);
-  const freshCustomerCount = customerMetric("fresh_assigned", newIncomingCustomers.length);
+  const freshCustomerCount = profileRole === "manager"
+    ? ownNewIncomingCustomers.length
+    : customerMetric("fresh_assigned", newIncomingCustomers.length);
   const assignedCustomerCount = customerMetric("assigned_total", visibleCustomers.filter((customer) => customer.assigned_employee).length);
   const poolCustomerCount = customerMetric("pool", visibleCustomers.filter((customer) => customer.status === "pool").length);
   const approvedCustomerCount = customerMetric("approved", visibleCustomers.filter((customer) => customer.approved).length);
@@ -2992,8 +2995,9 @@ function App() {
   const todayWorkCount = customerMetric("today_work", todayWorkItems.length);
   const manualDuplicate = findDuplicateCustomer(customers, form.phone);
   const ownCustomerRemoteScope = ["employee", "manager"].includes(profileRole) ? { fixedAssignee: profileId } : {};
+  const customerListBaseRemoteScope = profileRole === "employee" ? ownCustomerRemoteScope : {};
   const customerListRemoteScope = {
-    ...ownCustomerRemoteScope,
+    ...customerListBaseRemoteScope,
     assignmentScope: customerFilter === "pool" ? "pool" : customerFilter === "assigned" ? "assigned" : "all",
     approvedOnly: customerFilter === "approved",
     paidOnly: customerFilter === "paid",
@@ -3109,22 +3113,24 @@ function App() {
         ))}
       </div>
 
-      <aside style={{ ...sidebar, width: sidebarCollapsed ? 74 : 260, padding: sidebarCollapsed ? 12 : 24 }}>
+      <aside style={{ ...sidebar, ...(sidebarCollapsed ? sidebarCollapsedStyle : sidebarExpandedStyle) }}>
         <div style={sidebarTopRow}>
-          {!sidebarCollapsed && (
-            <div style={brandBlock}>
-              <img src="/oss-center-logo.png" alt="OSS Center" style={brandLogo} />
-              <p style={sideEmail}>{roleName(profile.role)}</p>
-            </div>
-          )}
+          <div style={{ ...brandBlock, ...(sidebarCollapsed ? brandBlockCollapsed : {}) }}>
+            <img src="/oss-center-logo.png" alt="OSS Center" style={brandLogo} />
+            <p style={sideEmail}>{roleName(profile.role)}</p>
+          </div>
           <button
             type="button"
             title={sidebarCollapsed ? "Menüyü aç" : "Menüyü kapat"}
             aria-label={sidebarCollapsed ? "Menüyü aç" : "Menüyü kapat"}
             onClick={() => setSidebarCollapsed((value) => !value)}
-            style={menuToggle}
+            style={{ ...menuToggle, ...(sidebarCollapsed ? menuToggleCollapsed : menuToggleExpanded) }}
           >
-            ☰
+            <span style={menuToggleIcon} aria-hidden="true">
+              <span style={{ ...menuToggleLine, ...menuToggleLineTop, ...(sidebarCollapsed ? {} : menuToggleLineTopOpen) }} />
+              <span style={{ ...menuToggleLine, ...menuToggleLineMiddle, ...(sidebarCollapsed ? {} : menuToggleLineMiddleOpen) }} />
+              <span style={{ ...menuToggleLine, ...menuToggleLineBottom, ...(sidebarCollapsed ? {} : menuToggleLineBottomOpen) }} />
+            </span>
           </button>
         </div>
         {sidebarCollapsed && (
@@ -3137,8 +3143,6 @@ function App() {
         <MenuButton icon="✉" iconSrc={menuIconAssets.messages} title={`Mesajlar${unreadMessageCount ? ` (${unreadMessageCount})` : ""}`} page="messages" tone="messages" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="▦" iconSrc={menuIconAssets.dashboard} title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="♟" iconSrc={menuIconAssets.customers} title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"} page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
-        <MenuButton icon="✎" iconSrc={menuIconAssets.notes} title="Notlarım" page="notes" tone="notes" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-
         {profile.role === "employee" && (
           <>
             <MenuButton icon="✦" iconSrc={menuIconAssets.newCustomers} title={`Yeni Gelenler (${freshCustomerCount})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -3152,10 +3156,15 @@ function App() {
         )}
 
         {profile.role === "manager" && (
-          <MenuButton icon="◉" iconSrc={menuIconAssets.customers} title={`Müşterilerim (${totalCustomerCount})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+          <>
+            <MenuButton icon="◉" iconSrc={menuIconAssets.managerCustomers} title={`Müşterilerim (${managerCustomers.length.toLocaleString("tr-TR")})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="✦" iconSrc={menuIconAssets.managerNewCustomers} title={`Yeni Gelenler (${freshCustomerCount})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+          </>
         )}
 
-        {profile.role === "boss" && (
+        <MenuButton icon="✎" iconSrc={menuIconAssets.notes} title="Notlarım" page="notes" tone="notes" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+
+        {isManagementProfile && (
           <>
             <MenuButton icon="+" iconSrc={menuIconAssets.pool} title="Yeni Müşteri Havuzu" page="pool" tone="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="!" iconSrc={menuIconAssets.followups} title={`Takip Gerekenler (${followUpCustomerCount})`} page="followups" tone="urgent" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
@@ -3166,7 +3175,7 @@ function App() {
         <MenuButton icon="▣" iconSrc={menuIconAssets.calendar} title="Takvim" page="calendar" tone="calendar" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         <MenuButton icon="!" iconSrc={menuIconAssets.wrongNumber} title="Numara Yanlış" page="wrong_number" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
-        {profile.role === "boss" && (
+        {isManagementProfile && (
           <MenuButton icon="◎" iconSrc={menuIconAssets.employees} title="Rep Takip Merkezi" page="employees" tone="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
@@ -3202,7 +3211,7 @@ function App() {
             <div style={statsGrid}>
               <ClickStat tone="total" title={customersStillLoading ? "Müşteriler hazırlanıyor" : profile.role === "employee" ? "Komple Müşterilerim" : "Toplam Müşteri"} value={totalCustomerCount} onClick={() => { setCustomerFilter("all"); setActivePage("customers"); }} />
               {profile.role === "employee" && <ClickStat tone="new" title="Yeni Gelenler" value={freshCustomerCount} onClick={() => { setActivePage("rep_new"); }} />}
-              {profile.role === "boss" && <ClickStat tone="new" title="Yeni Müşteriler" value={poolCustomerCount} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
+              {isManagementProfile && <ClickStat tone="new" title="Yeni Müşteriler" value={poolCustomerCount} onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
               <ClickStat tone="assigned" title="Atanmış" value={assignedCustomerCount} onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />
               <ClickStat tone="approved" title="Onaylandı" value={approvedCustomerCount} onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
               <ClickStat tone="paid" title="Para Alındı" value={paidCustomerCount} onClick={() => { setCustomerFilter("paid"); setActivePage("customers"); }} />
@@ -3212,28 +3221,15 @@ function App() {
               <div style={{ ...panelCard, ...pipelinePanel }}>
                 <h2>Operasyon Pipeline</h2>
                 <div style={pipelineList}>
-                  {profile.role === "boss" && <PipelineRow label="Yeni Müşteriler" value={poolCustomerCount} color="#38bdf8" />}
-                  {profile.role === "boss" && <PipelineRow label="Atandı" value={customerMetric("assigned", customers.filter((customer) => customer.status === "assigned").length)} color="#818cf8" />}
-                  <PipelineRow label="Ulaşılamadı" value={customerMetric("no_answer", visibleCustomers.filter((customer) => customer.status === "no_answer").length)} color="#94a3b8" />
-                  <PipelineRow label="Randevu" value={customerMetric("appointment", visibleCustomers.filter((customer) => customer.status === "appointment").length)} color="#fbbf24" />
-                  <PipelineRow label="Yapmayacak" value={customerMetric("not_approved", visibleCustomers.filter((customer) => customer.status === "not_approved").length)} color="#f87171" />
-                  <PipelineRow label="Kullanıyor" value={customerMetric("using", visibleCustomers.filter((customer) => customer.status === "using").length)} color="#2dd4bf" />
-                  <PipelineRow label="Onaylandı" value={approvedCustomerCount} color="#4ade80" />
-                  <PipelineRow label="Para Alındı" value={paidCustomerCount} color="#34d399" />
+                  {isManagementProfile && <PipelineRow label="Yeni Müşteriler" value={poolCustomerCount} color="#38bdf8" onClick={() => { setCustomerFilter("pool"); setActivePage("pool"); }} />}
+                  {isManagementProfile && <PipelineRow label="Atandı" value={customerMetric("assigned", customers.filter((customer) => customer.status === "assigned").length)} color="#818cf8" onClick={() => { setCustomerFilter("assigned"); setActivePage("customers"); }} />}
+                  <PipelineRow label="Ulaşılamadı" value={customerMetric("no_answer", visibleCustomers.filter((customer) => customer.status === "no_answer").length)} color="#94a3b8" onClick={() => { setCustomerFilter("no_answer"); setActivePage(profile.role === "employee" ? "rep_no_answer" : "customers"); }} />
+                  <PipelineRow label="Randevu" value={customerMetric("appointment", visibleCustomers.filter((customer) => customer.status === "appointment").length)} color="#fbbf24" onClick={() => { setCustomerFilter("appointment"); setActivePage(profile.role === "employee" ? "rep_appointment" : "customers"); }} />
+                  <PipelineRow label="Yapmayacak" value={customerMetric("not_approved", visibleCustomers.filter((customer) => customer.status === "not_approved").length)} color="#f87171" onClick={() => { setCustomerFilter("not_approved"); setActivePage(profile.role === "employee" ? "rep_not_approved" : "customers"); }} />
+                  <PipelineRow label="Kullanıyor" value={customerMetric("using", visibleCustomers.filter((customer) => customer.status === "using").length)} color="#2dd4bf" onClick={() => { setCustomerFilter("using"); setActivePage("customers"); }} />
+                  <PipelineRow label="Onaylandı" value={approvedCustomerCount} color="#4ade80" onClick={() => { setCustomerFilter("approved"); setActivePage("customers"); }} />
+                  <PipelineRow label="Para Alındı" value={paidCustomerCount} color="#34d399" onClick={() => { setCustomerFilter("paid"); setActivePage(profile.role === "employee" ? "rep_paid" : "customers"); }} />
                 </div>
-              </div>
-
-              <div style={panelCard}>
-                <h2>Top Rep</h2>
-                {repStats
-                  .slice(0, 5)
-                  .map((user, index) => (
-                    <div key={user.id} style={topRepRow}>
-                      <span style={rankMedal(index)}>{index + 1}</span>
-                      <strong style={{ flex: 1 }}>{user.full_name || user.email}</strong>
-                      <span style={salesFigure}>₺ {user.stats.paid}</span>
-                    </div>
-                  ))}
               </div>
             </div>
 
@@ -3363,7 +3359,7 @@ function App() {
         {activePage === "rep_new" && (
           <CustomerTable
             title="Yeni Gelen Müşteriler"
-            data={newIncomingCustomers}
+            data={repNewIncomingCustomers}
             employees={employees}
             profile={profile}
             assignCustomer={assignCustomer}
@@ -3522,7 +3518,7 @@ function App() {
           />
         )}
 
-        {profile.role === "boss" && activePage === "pool" && (
+        {isManagementProfile && activePage === "pool" && (
           <CustomerTable
             title="Müşteri Havuzu"
             data={customers.filter((customer) => customer.status === "pool")}
@@ -3542,7 +3538,7 @@ function App() {
           />
         )}
 
-        {profile.role === "boss" && activePage === "followups" && (
+        {isManagementProfile && activePage === "followups" && (
           <CustomerTable
             title="Takip Gerekenler"
             data={followUps}
@@ -3610,7 +3606,7 @@ function App() {
           />
         )}
 
-        {profile.role === "boss" && activePage === "employees" && (
+        {isManagementProfile && activePage === "employees" && (
           <EmployeesView
             profile={profile}
             users={users}
@@ -3732,7 +3728,7 @@ function MenuButton({ icon, iconSrc, title, page, tone, activePage, setActivePag
       <span style={{ ...menuIcon, ...toneMap }}>
         {iconSrc ? <img src={iconSrc} alt="" aria-hidden="true" style={menuIconImage} /> : icon}
       </span>
-      {!collapsed && <span>{title}</span>}
+      <span style={{ ...menuButtonLabel, ...(collapsed ? menuButtonLabelCollapsed : {}) }}>{title}</span>
     </button>
   );
 }
@@ -3746,13 +3742,13 @@ function ClickStat({ title, value, onClick, tone = "total" }) {
   );
 }
 
-function PipelineRow({ label, value, color }) {
+function PipelineRow({ label, value, color, onClick }) {
   return (
-    <div style={pipelineRow}>
+    <button type="button" style={pipelineRow} onClick={onClick}>
       <span style={{ ...pipelineDot, background: color }} />
       <span style={pipelineLabel}>{label}</span>
       <strong style={{ ...pipelineValue, color }}>{value.toLocaleString("tr-TR")}</strong>
-    </div>
+    </button>
   );
 }
 
@@ -3826,7 +3822,7 @@ function CustomerTable({
   remoteScope,
   dataVersion,
 }) {
-  const canManage = profile.role === "boss";
+  const canManage = ["boss", "manager"].includes(profile.role);
   const canViewTc = profile.role !== "employee";
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [genderFilter, setGenderFilter] = useState("all");
@@ -4942,6 +4938,7 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
 
 function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers, liveReportError, generatedAt }) {
   const maxValue = Math.max(...reportStats.map((item) => item.value), 1);
+  const isManagementProfile = ["boss", "manager"].includes(profile.role);
   return (
     <div style={reportsLayout}>
       <section style={panelCard}>
@@ -4953,7 +4950,7 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
             {generatedAt && <p style={mutedText}>Canlı özet: {formatDateTime(generatedAt)}</p>}
           </div>
         </div>
-        {liveReportError && profile.role === "boss" && <div style={messageSetupNotice}>{liveReportError}</div>}
+        {liveReportError && isManagementProfile && <div style={messageSetupNotice}>{liveReportError}</div>}
 
         <div style={chartList}>
           {reportStats.map((item) => {
@@ -4974,7 +4971,7 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
         </div>
       </section>
 
-      {profile.role === "boss" && (
+      {isManagementProfile && (
         <section style={panelCard}>
           <h2 style={sectionTitle}>En İyi Rep Tablosu</h2>
           {repStats.length === 0 && <p style={mutedText}>Henüz rep bulunmuyor.</p>}
@@ -4983,13 +4980,14 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
               <strong>#{index + 1} {rep.full_name || rep.email}</strong>
               <span style={leaderFigure}><b>◉</b> {rep.stats.total.toLocaleString("tr-TR")}</span>
               <span style={leaderFigure}><b>◦</b> {rep.stats.appointment.toLocaleString("tr-TR")}</span>
+              <span style={{ ...leaderFigure, color: "#fca5a5" }}><b>!</b> {(rep.stats.negative || 0).toLocaleString("tr-TR")}</span>
               <span style={{ ...leaderFigure, color: "#6ee7b7" }}><b>₺</b> {rep.stats.paid.toLocaleString("tr-TR")}</span>
             </div>
           ))}
         </section>
       )}
 
-      {profile.role === "boss" && (
+      {isManagementProfile && (
         <section style={panelCard}>
           <h2 style={sectionTitle}>Data Kaynağı Performansı</h2>
           <p style={mutedText}>Hangi datanın daha çok randevu ve satış getirdiğini karşılaştır.</p>
@@ -5242,6 +5240,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
     const assigned = repCustomers.filter((customer) => customer.assigned_employee === rep.id);
     const exactStats = liveRepStats.get(rep.id);
     const callActions = logs.filter((log) => ["no_answer", "busy", "callback"].includes(log.new_status)).length;
+    const negative = assigned.filter((customer) => REP_NEGATIVE_CUSTOMER_STATUSES.has(customer.status)).length;
     const appointments = logs.filter((log) => ["appointment", "contract_appointment"].includes(log.new_status)).length;
     const sales = logs.filter((log) => log.new_status === "paid").length;
     const untouched = assigned.filter(isFreshAssignedCustomer).length;
@@ -5251,6 +5250,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
       logs,
       assigned: exactStats ? Number(exactStats.total) || 0 : assigned.length,
       callActions,
+      negative,
       appointments,
       sales,
       untouched: exactStats ? Number(exactStats.untouched) || 0 : untouched,
@@ -5274,6 +5274,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
 
   const totalActions = repRows.reduce((sum, row) => sum + row.logs.length, 0);
   const totalAppointments = repRows.reduce((sum, row) => sum + row.appointments, 0);
+  const totalNegative = repRows.reduce((sum, row) => sum + row.negative, 0);
   const totalSales = repRows.reduce((sum, row) => sum + row.sales, 0);
   const totalUntouched = repRows.reduce((sum, row) => sum + row.untouched, 0);
   const totalDelayed = liveRepStats.size
@@ -5352,17 +5353,18 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
             <div style={repMetricGrid}>
               <RepMetric label="Toplam işlem" value={totalActions} tone="#38bdf8" />
               <RepMetric label="Randevu" value={totalAppointments} tone="#fbbf24" />
+              <RepMetric label="Negatif" value={totalNegative} tone="#f87171" />
               <RepMetric label="Satış" value={totalSales} tone="#34d399" />
               <RepMetric label="İşlem bekleyen" value={totalUntouched} tone="#f87171" />
             </div>
             <div style={repComparisonTable}>
               <div style={repComparisonHeader}>
-                <span>Çalışan</span><span>İşlem</span><span>Üzerindeki</span><span>Arama</span><span>Randevu</span><span>Satış</span><span>Dönüşüm</span><span>Bekleyen</span><span>Son işlem</span>
+                <span>Çalışan</span><span>İşlem</span><span>Üzerindeki</span><span>Arama</span><span>Randevu</span><span>Negatif</span><span>Satış</span><span>Dönüşüm</span><span>Bekleyen</span><span>Son işlem</span>
               </div>
               {repRows.filter((row) => selectedRep === "all" || row.rep.id === selectedRep).map((row) => (
                 <button key={row.rep.id} type="button" style={repComparisonRow} onClick={() => { setSelectedRep(row.rep.id); setActiveTab("stream"); }}>
                   <span style={repTableIdentity}><ProfileAvatar user={row.rep} size={34} /><span><strong>{row.rep.full_name || row.rep.email}</strong><PresenceBadge user={row.rep} onlineUserIds={onlineUserIds} compact /></span></span>
-                  <strong>{row.logs.length}</strong><span>{row.assigned.toLocaleString("tr-TR")}</span><span>{row.callActions}</span><span>{row.appointments}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched}</span><small>{formatDateTime(row.lastAction)}</small>
+                  <strong>{row.logs.length}</strong><span>{row.assigned.toLocaleString("tr-TR")}</span><span>{row.callActions}</span><span>{row.appointments}</span><span style={{ color: row.negative ? "#fca5a5" : "#86efac" }}>{row.negative}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched}</span><small>{formatDateTime(row.lastAction)}</small>
                 </button>
               ))}
             </div>
@@ -5733,12 +5735,17 @@ const sidebar = {
   background: "#ffffff",
   padding: 24,
   borderRight: `1px solid ${brandRedBorder}`,
-  transition: "width 180ms ease, padding 180ms ease",
+  transition: "width 280ms cubic-bezier(0.22, 1, 0.36, 1), padding 280ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 280ms ease",
   flexShrink: 0,
   boxShadow: "10px 0 30px rgba(226,68,7,0.08)",
+  overflow: "hidden",
+  willChange: "width, padding",
 };
+const sidebarExpandedStyle = { width: 260, padding: 24, boxShadow: "14px 0 38px rgba(226,68,7,0.10)" };
+const sidebarCollapsedStyle = { width: 82, padding: 14, boxShadow: "8px 0 24px rgba(226,68,7,0.07)" };
 const sidebarTopRow = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, minHeight: 46, marginBottom: 18 };
-const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 8, background: "#ffffff", border: `1px solid ${brandRedBorder}` };
+const brandBlock = { width: 150, minWidth: 0, padding: "7px 8px", boxSizing: "border-box", borderRadius: 12, background: "#ffffff", border: `1px solid ${brandRedBorder}`, opacity: 1, transform: "translateX(0)", overflow: "hidden", transition: "width 260ms cubic-bezier(0.22, 1, 0.36, 1), padding 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease, transform 260ms ease, border-color 220ms ease" };
+const brandBlockCollapsed = { width: 0, padding: 0, opacity: 0, transform: "translateX(-10px)", borderColor: "transparent" };
 const brandLogo = { display: "block", width: "100%", height: "auto" };
 const brandMarkFrame = { width: 46, height: 48, display: "grid", placeItems: "center", margin: "-4px auto 14px" };
 const brandMark = { display: "block", width: 42, height: "auto" };
@@ -5754,12 +5761,24 @@ const welcomeEyebrow = { display: "block", fontSize: 13, color: mutedRedText, ma
 const welcomeTitle = { margin: 0, color: brandRed, fontSize: 28, lineHeight: 1.15, maxWidth: 760, overflowWrap: "anywhere" };
 const welcomeMeta = { margin: "6px 0 0", color: mutedRedText };
 const welcomeStatusRow = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginTop: 6 };
-const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: brandRed, color: "white", border: `1px solid ${brandRed}`, borderRadius: 8, cursor: "pointer", fontSize: 20 };
-const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, transition: "transform 150ms ease, border-color 150ms ease, background 150ms ease" };
+const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", placeItems: "center", background: brandRed, color: "white", border: `1px solid ${brandRed}`, borderRadius: 14, cursor: "pointer", boxShadow: "0 12px 24px rgba(226,68,7,0.18)", transition: "border-radius 240ms ease, transform 220ms ease, box-shadow 240ms ease, background 240ms ease" };
+const menuToggleCollapsed = { transform: "translateX(0)", borderRadius: 14 };
+const menuToggleExpanded = { transform: "translateX(2px)", borderRadius: 12, boxShadow: "0 14px 30px rgba(226,68,7,0.24)" };
+const menuToggleIcon = { width: 18, height: 14, position: "relative", display: "block" };
+const menuToggleLine = { position: "absolute", left: 0, width: 18, height: 2, borderRadius: 999, background: "#ffffff", transformOrigin: "center", transition: "top 220ms cubic-bezier(0.22, 1, 0.36, 1), transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease" };
+const menuToggleLineTop = { top: 0 };
+const menuToggleLineMiddle = { top: 6, left: 2, width: 14 };
+const menuToggleLineBottom = { top: 12 };
+const menuToggleLineTopOpen = { top: 6, transform: "rotate(45deg)" };
+const menuToggleLineMiddleOpen = { top: 6, opacity: 0, transform: "scaleX(0.4)" };
+const menuToggleLineBottomOpen = { top: 6, transform: "rotate(-45deg)" };
+const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, overflow: "hidden", transition: "transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease" };
 const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
 const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
 const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
 const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover" };
+const menuButtonLabel = { minWidth: 0, whiteSpace: "nowrap", opacity: 1, transform: "translateX(0)", transition: "opacity 180ms ease 60ms, transform 220ms cubic-bezier(0.22, 1, 0.36, 1) 40ms" };
+const menuButtonLabelCollapsed = { opacity: 0, transform: "translateX(-8px)", transitionDelay: "0ms", pointerEvents: "none" };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
 const syncNotice = { margin: "-8px 0 16px", padding: "10px 12px", borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, color: brandRed, fontSize: 13, fontWeight: 600 };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
@@ -5771,11 +5790,11 @@ const statCardTones = {
   approved: { background: "linear-gradient(135deg,#15803d,#166534)", borderColor: "rgba(134,239,172,0.42)" },
   paid: { background: "linear-gradient(135deg,#047857,#065f46)", borderColor: "rgba(110,231,183,0.46)" },
 };
-const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
+const dashboardGrid = { display: "grid", gridTemplateColumns: "1fr", gap: 18 };
 const panelCard = { background: "#ffffff", color: brandRed, padding: 22, borderRadius: 18, border: `1px solid ${brandRedBorder}`, boxShadow: "0 16px 34px rgba(226,68,7,0.08)" };
 const pipelinePanel = { background: "#ffffff" };
 const pipelineList = { display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, marginTop: 18 };
-const pipelineRow = { minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}` };
+const pipelineRow = { width: "100%", minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, cursor: "pointer", textAlign: "left", font: "inherit" };
 const pipelineDot = { width: 8, height: 24, flexShrink: 0, borderRadius: 4 };
 const pipelineLabel = { flex: 1, color: mutedRedText, fontSize: 13 };
 const pipelineValue = { fontSize: 18 };
@@ -5852,8 +5871,8 @@ const repTabActive = { ...repTabButton, background: brandRed, color: "white", bo
 const repMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12, marginBottom: 18 };
 const repMetricCard = { display: "grid", gap: 7, minHeight: 92, alignContent: "center", padding: 15, borderRadius: 12, border: "1px solid", background: "#ffffff" };
 const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
-const repComparisonHeader = { minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 11, fontWeight: 800 };
-const repComparisonRow = { width: "100%", minWidth: 1050, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(7,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", textAlign: "left" };
+const repComparisonHeader = { minWidth: 1120, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(8,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 11, fontWeight: 800 };
+const repComparisonRow = { width: "100%", minWidth: 1120, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(8,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", textAlign: "left" };
 const repTableIdentity = { display: "flex", alignItems: "center", gap: 9, minWidth: 0 };
 const activityStream = { display: "grid", gap: 8, maxHeight: "68vh", overflowY: "auto", paddingRight: 4 };
 const activityStreamRow = { display: "grid", gridTemplateColumns: "145px minmax(140px,.8fr) minmax(180px,1fr) 150px minmax(180px,1.2fr)", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, border: `1px solid ${brandRedBorder}`, borderLeft: "4px solid", background: "#ffffff", minWidth: 830 };
@@ -5935,7 +5954,7 @@ const reportVisuals = {
   using: { icon: "✓", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   paid: { icon: "₺", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
 };
-const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px", gap: 10, alignItems: "center", background: "#ffffff", color: brandRed, padding: 12, borderRadius: 8, marginTop: 10, border: `1px solid ${brandRedBorder}` };
+const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px 90px", gap: 10, alignItems: "center", background: "#ffffff", color: brandRed, padding: 12, borderRadius: 8, marginTop: 10, border: `1px solid ${brandRedBorder}` };
 const leaderFigure = { display: "flex", alignItems: "center", gap: 7, color: brandRed, fontSize: 13 };
 const dataSourceRow = { display: "grid", gridTemplateColumns: "minmax(170px, 1fr) repeat(4, auto)", gap: 16, alignItems: "center", background: "#ffffff", color: brandRed, padding: 12, borderRadius: 10, marginTop: 10, border: `1px solid ${brandRedBorder}`, fontSize: 13 };
 const dataMetric = { minWidth: 64, padding: "5px 8px", borderRadius: 6, background: brandRedSoft, fontWeight: 800, textAlign: "center" };
@@ -5985,8 +6004,6 @@ const poweredByVercel = { display: "flex", alignItems: "center", justifyContent:
 const vercelMark = { color: "#e2e8f0", fontSize: 11, lineHeight: 1 };
 const loginInput = { width: "100%", padding: "14px 15px", marginBottom: 16, boxSizing: "border-box", borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed };
 const loginButton = { width: "100%", padding: 14, borderRadius: 12, border: "none", background: brandRed, color: "white", fontWeight: 700, cursor: "pointer" };
-const topRepRow = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#ffffff", color: brandRed, padding: 12, borderRadius: 8, marginBottom: 10, border: `1px solid ${brandRedBorder}` };
-const salesFigure = { minWidth: 54, padding: "5px 8px", borderRadius: 6, background: "rgba(5,150,105,0.16)", color: "#6ee7b7", fontWeight: 800, textAlign: "center" };
 const avatarBase = { display: "grid", placeItems: "center", overflow: "hidden", boxSizing: "border-box", borderRadius: "50%", background: brandRed, color: "#ffffff", border: `2px solid ${brandRedBorder}`, fontWeight: 800 };
 const accountLayout = { display: "grid", gap: 18 };
 const accountHero = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 18, padding: 22, borderRadius: 8, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}` };
