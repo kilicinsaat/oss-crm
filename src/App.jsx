@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, supabaseConfigMissing } from "./lib/supabase";
 
 const COMPANY_MESSAGE = `
@@ -612,6 +612,52 @@ function parseExcelInWorker(buffer, fileName, onProgress) {
 
     worker.postMessage({ buffer, fileName }, [buffer]);
   });
+}
+
+class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("OSS CRM render error", error, info);
+  }
+
+  clearSessionAndReload = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // If sign out fails, still clear local app state and reload.
+    }
+    clearSessionStarted();
+    clearLegacyLocalAuthStorage();
+    window.location.reload();
+  };
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={errorFallbackPage}>
+        <div style={errorFallbackCard}>
+          <div style={brandBadge}>OSS CONTROL CENTER</div>
+          <h1 style={errorFallbackTitle}>Panel güvenli moda geçti</h1>
+          <p style={errorFallbackText}>
+            Sayfa açılırken bir hata yakalandı. Beyaz ekran yerine buradan yenileyebilir veya oturumu sıfırlayıp tekrar giriş yapabilirsin.
+          </p>
+          <code style={errorFallbackCode}>{this.state.error?.message || "Bilinmeyen ekran hatası"}</code>
+          <div style={errorFallbackActions}>
+            <button type="button" style={primaryButton} onClick={() => window.location.reload()}>Sayfayı yenile</button>
+            <button type="button" style={{ ...deleteAllButton, minHeight: 44 }} onClick={this.clearSessionAndReload}>Oturumu sıfırla</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 }
 
 function App() {
@@ -5905,6 +5951,12 @@ const noteMeta = { display: "block", marginTop: 10, color: "#94a3b8", fontSize: 
 const toastStyle = { position: "fixed", top: 18, left: "50%", transform: "translateX(-50%)", zIndex: 1201, padding: "12px 18px", borderRadius: 999, color: "white", fontWeight: 800, boxShadow: "0 18px 40px rgba(0,0,0,0.35)" };
 const toastSuccess = { background: "linear-gradient(135deg,rgba(37,99,235,0.96),rgba(8,145,178,0.92))", border: "1px solid rgba(125,211,252,0.35)" };
 const toastWarning = { background: "linear-gradient(135deg,rgba(180,83,9,0.96),rgba(127,29,29,0.92))", border: "1px solid rgba(251,191,36,0.35)" };
+const errorFallbackPage = { minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "linear-gradient(145deg,#fff7ed,#ffffff)", color: brandRed };
+const errorFallbackCard = { width: "min(560px,100%)", display: "grid", gap: 14, padding: 28, borderRadius: 22, border: `1px solid ${brandRedBorder}`, background: "#ffffff", boxShadow: "0 24px 70px rgba(226,68,7,0.16)" };
+const errorFallbackTitle = { margin: "4px 0 0", fontSize: 30, lineHeight: 1.1, color: brandRed };
+const errorFallbackText = { margin: 0, color: mutedRedText, lineHeight: 1.55 };
+const errorFallbackCode = { display: "block", padding: 12, borderRadius: 10, background: brandRedSoft, color: brandRedDark, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
+const errorFallbackActions = { display: "flex", flexWrap: "wrap", gap: 10, marginTop: 4 };
 const messageNoticeStack = { position: "fixed", top: 18, right: 18, zIndex: 1300, width: "min(390px,calc(100vw - 36px))", display: "grid", gap: 10 };
 const messageNoticeCard = { width: "100%", display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 24px", alignItems: "center", gap: 10, padding: 12, borderRadius: 12, border: "1px solid rgba(103,232,249,0.42)", background: "linear-gradient(135deg,rgba(9,35,72,0.98),rgba(15,76,92,0.98))", color: "white", boxShadow: "0 18px 45px rgba(0,0,0,0.4)", cursor: "pointer", textAlign: "left" };
 const messageNoticeIcon = { width: 42, height: 42, display: "grid", placeItems: "center", borderRadius: 11, background: "rgba(34,211,238,0.16)", color: "#67e8f9", fontSize: 20 };
@@ -5925,4 +5977,12 @@ const presenceDot = { width: 8, height: 8, flexShrink: 0, borderRadius: "50%" };
 const sectionTitle = { marginTop: 0, marginBottom: 6 };
 const mutedText = { margin: 0, opacity: 0.7 };
 
-export default App;
+function RootApp() {
+  return (
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
+  );
+}
+
+export default RootApp;
