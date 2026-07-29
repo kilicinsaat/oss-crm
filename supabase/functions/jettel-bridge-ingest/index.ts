@@ -59,7 +59,7 @@ function asRows(payload: unknown): JsonRecord[] {
 
   if (!isPlainRecord(payload)) return [];
   const record = payload as JsonRecord;
-  for (const key of ["data", "Data", "rows", "Rows", "result", "Result", "records", "Records", "calls", "Calls", "extensions", "Extensions", "extensionStatus", "ExtensionStatus", "list", "List"]) {
+  for (const key of ["success", "Success", "data", "Data", "rows", "Rows", "result", "Result", "records", "Records", "calls", "Calls", "extensions", "Extensions", "extensionStatus", "ExtensionStatus", "list", "List"]) {
     const value = record[key];
     if (Array.isArray(value) || isPlainRecord(value)) {
       const nestedRows = asRows(value);
