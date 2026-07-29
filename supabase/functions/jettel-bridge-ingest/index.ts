@@ -327,9 +327,12 @@ function mapActiveCallRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>
   const mappedExtension = extensionMap.get(extension);
   const customer = customerPhone ? customerMap.get(customerPhone) : null;
   const callUuid = cleanText(getRowValue(row, ["call_uuid", "uuid", "uniqueid", "unique_id"]), 160) || null;
+  const durationSeconds = toNumber(getRowValue(row, ["duration", "duration_seconds", "konusma", "süre", "sure"]));
+  const activeStartedAt = durationSeconds > 0 ? new Date(Date.now() - durationSeconds * 1000).toISOString() : now;
+  const activeStartBucket = activeStartedAt.slice(0, 16);
   const externalCallId = cleanText(getRowValue(row, ["callID", "call_id", "id", "ActionID", "actionID", "linkedid", "linked_id"]), 160)
     || callUuid
-    || `active:${extension || "jettel"}:${customerPhone || "unknown"}`;
+    || `active:${extension || "jettel"}:${customerPhone || "unknown"}:${activeStartBucket}`;
   const status = detectActiveStatus(row);
 
   return {
@@ -339,11 +342,11 @@ function mapActiveCallRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>
     phone: customerPhone || "0000000000",
     direction,
     status,
-    ringing_at: now,
-    answered_at: status === "answered" ? now : null,
-    started_at: status === "answered" ? now : null,
+    ringing_at: activeStartedAt,
+    answered_at: status === "answered" ? activeStartedAt : null,
+    started_at: status === "answered" ? activeStartedAt : null,
     ended_at: null,
-    duration_seconds: toNumber(getRowValue(row, ["duration", "duration_seconds", "konusma", "süre", "sure"])),
+    duration_seconds: durationSeconds,
     waiting_seconds: toNumber(getRowValue(row, ["waiting", "waiting_seconds", "bekleme"])),
     provider: "jettel",
     external_call_id: externalCallId,

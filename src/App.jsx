@@ -695,6 +695,7 @@ function App() {
   const [messageNotices, setMessageNotices] = useState([]);
   const [appointmentCustomers, setAppointmentCustomers] = useState([]);
   const [appointmentNotices, setAppointmentNotices] = useState([]);
+  const [callNotice, setCallNotice] = useState(null);
   const [notificationPermission, setNotificationPermission] = useState(() =>
     typeof Notification === "undefined" ? "unsupported" : Notification.permission
   );
@@ -704,6 +705,8 @@ function App() {
   const customerSmsLogsRequestRef = useRef(0);
   const dismissedAppointmentNoticeIdsRef = useRef(new Set());
   const announcedAppointmentNoticeIdsRef = useRef(new Set());
+  const dismissedCallNoticeIdsRef = useRef(new Set());
+  const announcedCallNoticeIdsRef = useRef(new Set());
   const appointmentAudioContextRef = useRef(null);
   const selectedCustomerRelatedIdsRef = useRef(new Set());
   const usersRef = useRef([]);
@@ -1183,7 +1186,7 @@ function App() {
     if (!profile) return undefined;
     const callChannel = supabase
       .channel(`crm-call-events-${profile.id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "call_sessions" }, (payload) => {
+      .on("postgres_changes", { event: "*", schema: "public", table: "call_sessions" }, async (payload) => {
         const call = payload.new?.id ? payload.new : payload.old;
         const canMonitorAllCalls = ["boss", "manager"].includes(profile.role);
         if (!call?.id || (!canMonitorAllCalls && call.profile_id !== profile.id)) return;
@@ -1200,14 +1203,18 @@ function App() {
         if (selectedCustomerMatches || (payload.eventType === "DELETE" && selectedCustomer)) {
           loadCustomerCalls(selectedCustomer);
         }
-        if (payload.eventType === "INSERT" && call.direction === "incoming" && call.status === "ringing") {
-          showSystemToast(customer
-            ? `Gelen arama: ${customer.first_name || ""} ${customer.last_name || ""}`.trim()
-            : `Gelen arama: ${formatPhoneDisplay(call.phone)}`);
-          if (customer) {
-            setSelectedCustomer(customer);
-            loadCustomerLogs(customer);
-            loadCustomerCalls(customer);
+        if (payload.eventType !== "DELETE" && isLiveCallForNotice(call)) {
+          const noticeId = callNoticeId(call);
+          if (!dismissedCallNoticeIdsRef.current.has(noticeId) && !announcedCallNoticeIdsRef.current.has(noticeId)) {
+            const resolvedCustomer = customer || await fetchCustomerForCall(call);
+            const assignedUser = usersRef.current.find((user) => String(user.id) === String(call.profile_id));
+            const notice = { id: noticeId, call, customer: resolvedCustomer, assignedUser, createdAt: new Date().toISOString() };
+            announcedCallNoticeIdsRef.current.add(noticeId);
+            setCallNotice(notice);
+            playCallNoticeSound();
+            showSystemToast(resolvedCustomer
+              ? `${call.direction === "incoming" ? "Gelen" : "Giden"} çağrı: ${customerFullName(resolvedCustomer)}`
+              : `${call.direction === "incoming" ? "Gelen" : "Giden"} çağrı: ${formatPhoneDisplay(call.phone)}`, "warning");
           }
         }
       })
@@ -1260,6 +1267,71 @@ function App() {
     setSystemToast({ message, tone });
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setSystemToast(null), 2500);
+  }
+
+  function callNoticeId(call) {
+    return String(call?.external_call_id || call?.call_uuid || call?.id || "");
+  }
+
+  function isLiveCallForNotice(call) {
+    if (!call?.id || call.ended_at) return false;
+    return ["ringing", "answered"].includes(call.status);
+  }
+
+  async function fetchCustomerForCall(call) {
+    if (!call) return null;
+    if (call.customer_id) {
+      const cachedById = customersRef.current.find((customer) => String(customer.id) === String(call.customer_id));
+      if (cachedById) return cachedById;
+      const { data } = await runWithRetry(() => supabase
+        .from("customers")
+        .select(CUSTOMER_SELECT_COLUMNS)
+        .eq("id", call.customer_id)
+        .maybeSingle(), 1);
+      if (data) return data;
+    }
+    const callPhone = normalizePhone(call.phone);
+    if (!callPhone) return null;
+    const cachedByPhone = customersRef.current.find((customer) =>
+      [customer.phone, customer.phone_2].some((phone) => normalizePhone(phone) === callPhone)
+    );
+    if (cachedByPhone) return cachedByPhone;
+    return null;
+  }
+
+  function dismissCallNotice(noticeId) {
+    dismissedCallNoticeIdsRef.current.add(noticeId);
+    setCallNotice((current) => current?.id === noticeId ? null : current);
+  }
+
+  function openCallNoticeCustomer(notice) {
+    if (!notice?.customer) return;
+    loadMessageHistoryForCustomer(notice.customer);
+    dismissCallNotice(notice.id);
+  }
+
+  function playCallNoticeSound() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioContext = appointmentAudioContextRef.current || new AudioContextClass();
+      appointmentAudioContextRef.current = audioContext;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "triangle";
+      oscillator.frequency.setValueAtTime(740, audioContext.currentTime);
+      oscillator.frequency.setValueAtTime(980, audioContext.currentTime + 0.12);
+      oscillator.frequency.setValueAtTime(740, audioContext.currentTime + 0.24);
+      gain.gain.setValueAtTime(0.001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.2, audioContext.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.55);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.58);
+    } catch {
+      // Browser audio can be blocked until the user interacts with the page.
+    }
   }
 
   function dismissAppointmentNotice(noticeId) {
@@ -1326,8 +1398,11 @@ function App() {
     setMessageNotices([]);
     setAppointmentCustomers([]);
     setAppointmentNotices([]);
+    setCallNotice(null);
     dismissedAppointmentNoticeIdsRef.current = new Set();
     announcedAppointmentNoticeIdsRef.current = new Set();
+    dismissedCallNoticeIdsRef.current = new Set();
+    announcedCallNoticeIdsRef.current = new Set();
     setMyNotes([]);
     setActivePage("dashboard");
     setCustomerFilter("all");
@@ -3509,6 +3584,14 @@ function App() {
           />
         )}
 
+        {callNotice && (
+          <CallNoticePopup
+            notice={callNotice}
+            onOpenCustomer={() => openCallNoticeCustomer(callNotice)}
+            onDismiss={() => dismissCallNotice(callNotice.id)}
+          />
+        )}
+
         {saleCelebration && (
           <SaleCelebration customerName={saleCelebration.name} onClose={() => setSaleCelebration(null)} />
         )}
@@ -5318,6 +5401,37 @@ function RepDailyOverview({ customers, todayItems, onNavigate }) {
   );
 }
 
+function CallNoticePopup({ notice, onOpenCustomer, onDismiss }) {
+  const call = notice.call || {};
+  const customer = notice.customer;
+  const title = customer ? customerFullName(customer) : formatPhoneDisplay(call.phone);
+  const subtitle = `${call.direction === "incoming" ? "Gelen çağrı" : "Giden çağrı"} · ${callStatusLabel(call)}`;
+  return (
+    <div style={callNoticePopup}>
+      <div style={callNoticeHeader}>
+        <span style={callNoticePulse}>☎</span>
+        <div>
+          <strong>{title || "Bilinmeyen müşteri"}</strong>
+          <small>{subtitle}</small>
+        </div>
+        <button type="button" onClick={onDismiss} style={callNoticeClose} aria-label="Çağrı bildirimini kapat">×</button>
+      </div>
+      <div style={callNoticeMeta}>
+        <span>Numara: {formatPhoneDisplay(call.phone)}</span>
+        <span>Dahili: {call.extension || call.device_id || "-"}</span>
+        <span>Rep: {notice.assignedUser?.full_name || notice.assignedUser?.email || "-"}</span>
+        {call.duration_seconds ? <span>Süre: {call.duration_seconds}s</span> : null}
+      </div>
+      <div style={callNoticeActions}>
+        <button type="button" onClick={onOpenCustomer} disabled={!customer} style={{ ...smallButton, opacity: customer ? 1 : 0.55 }}>
+          {customer ? "Müşteri kartını aç" : "Kart eşleşmedi"}
+        </button>
+        <button type="button" onClick={onDismiss} style={smallGhostButton}>Kapat</button>
+      </div>
+    </div>
+  );
+}
+
 function SaleCelebration({ customerName, onClose }) {
   const colors = ["#38bdf8", "#fbbf24", "#34d399", "#c084fc", "#fb7185", "#60a5fa"];
   return (
@@ -5541,6 +5655,7 @@ const tableWithoutTc = {
 };
 const selectStyle = { width: "100%", padding: 8, borderRadius: 8 };
 const smallButton = { padding: "8px 12px", borderRadius: 8, border: `1px solid ${brandRedBorder}`, cursor: "pointer", fontWeight: 700, background: brandRedSoft, color: brandRed };
+const smallGhostButton = { padding: "8px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.32)", cursor: "pointer", fontWeight: 800, background: "rgba(255,255,255,0.08)", color: "#ffffff" };
 const phoneLink = { color: brandRed, fontWeight: 800, fontSize: 15 };
 const bulkBar = { display: "grid", gridTemplateColumns: "120px 150px 1fr 150px", gap: 10, alignItems: "center", marginBottom: 12, background: brandRedSoft, padding: 12, borderRadius: 12 };
 const paginationBar = { display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "center", gap: 8, marginTop: 16 };
@@ -5675,6 +5790,12 @@ const confettiPiece = { width: 9, height: 20, display: "block", borderRadius: 2 
 const celebrationEyebrow = { color: "#a7f3d0", fontSize: 12, fontWeight: 800, letterSpacing: 1.2 };
 const celebrationTitle = { margin: "12px 0 4px", color: "#f8fafc", fontSize: 32 };
 const celebrationCustomer = { margin: "0 0 10px", color: "#fde68a", fontSize: 18, fontWeight: 700 };
+const callNoticePopup = { position: "fixed", right: 22, bottom: 22, width: 360, maxWidth: "calc(100vw - 32px)", zIndex: 1300, display: "grid", gap: 12, padding: 16, borderRadius: 18, border: "1px solid rgba(253,186,116,0.46)", background: "linear-gradient(145deg,rgba(127,29,29,0.98),rgba(226,68,7,0.96))", color: "#ffffff", boxShadow: "0 22px 60px rgba(0,0,0,0.42)" };
+const callNoticeHeader = { display: "grid", gridTemplateColumns: "42px 1fr 28px", gap: 10, alignItems: "center" };
+const callNoticePulse = { width: 42, height: 42, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", background: "#ffffff", color: brandRed, fontSize: 22, fontWeight: 900, boxShadow: "0 0 0 8px rgba(255,255,255,0.12)" };
+const callNoticeClose = { width: 28, height: 28, border: "none", borderRadius: "50%", background: "rgba(255,255,255,0.16)", color: "#ffffff", cursor: "pointer", fontSize: 20, lineHeight: 1 };
+const callNoticeMeta = { display: "grid", gap: 4, fontSize: 12, color: "rgba(255,255,255,0.84)" };
+const callNoticeActions = { display: "flex", gap: 8, flexWrap: "wrap" };
 const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginTop: 16 };
 const calendarDay = { background: "#ffffff", color: brandRed, padding: 14, borderRadius: 14, border: `1px solid ${brandRedBorder}` };
 const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer" };
