@@ -1,5 +1,21 @@
 import { Component, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, supabaseConfigMissing } from "./lib/supabase";
+import accountIcon from "./assets/sistem-icon/account.png";
+import appointmentIcon from "./assets/sistem-icon/appointment.png";
+import calendarIcon from "./assets/sistem-icon/calendar.png";
+import callbackIcon from "./assets/sistem-icon/callback.png";
+import contractIcon from "./assets/sistem-icon/contract.png";
+import customersIcon from "./assets/sistem-icon/customers.png";
+import dashboardIcon from "./assets/sistem-icon/dashboard.png";
+import messagesIcon from "./assets/sistem-icon/messages.png";
+import newCustomersIcon from "./assets/sistem-icon/new-customers.png";
+import noAnswerIcon from "./assets/sistem-icon/no-answer.png";
+import notApprovedIcon from "./assets/sistem-icon/not-approved.png";
+import notesIcon from "./assets/sistem-icon/notes.png";
+import paidIcon from "./assets/sistem-icon/paid.png";
+import reportsIcon from "./assets/sistem-icon/reports.png";
+import todayWorkIcon from "./assets/sistem-icon/today-work.png";
+import wrongNumberIcon from "./assets/sistem-icon/wrong-number.png";
 
 const COMPANY_MESSAGE = `
 KILIÇ İNŞAAT MİMARLIK
@@ -78,6 +94,27 @@ const APPOINTMENT_DAY_ALERT_MS = 24 * 60 * 60 * 1000;
 const APPOINTMENT_SOON_ALERT_MS = 30 * 60 * 1000;
 const INITIAL_CUSTOMER_PAGES = 1;
 const MAX_PRIORITY_PRELOAD_PAGES = 1;
+const menuIconAssets = {
+  account: accountIcon,
+  appointment: appointmentIcon,
+  calendar: calendarIcon,
+  callback: callbackIcon,
+  contract: contractIcon,
+  customers: customersIcon,
+  dashboard: dashboardIcon,
+  employees: customersIcon,
+  followups: todayWorkIcon,
+  messages: messagesIcon,
+  newCustomers: newCustomersIcon,
+  noAnswer: noAnswerIcon,
+  notApproved: notApprovedIcon,
+  notes: notesIcon,
+  paid: paidIcon,
+  pool: newCustomersIcon,
+  reports: reportsIcon,
+  todayWork: todayWorkIcon,
+  wrongNumber: wrongNumberIcon,
+};
 const SEARCH_DEBOUNCE_MS = 300;
 const CUSTOMER_SEARCH_MIN_LENGTH = 3;
 
@@ -3096,44 +3133,44 @@ function App() {
           </div>
         )}
 
-        <MenuButton icon="♙" title="Hesabım" page="account" tone="account" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="✉" title={`Mesajlar${unreadMessageCount ? ` (${unreadMessageCount})` : ""}`} page="messages" tone="messages" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="▦" title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="♟" title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"} page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
-        <MenuButton icon="✎" title="Notlarım" page="notes" tone="notes" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="♙" iconSrc={menuIconAssets.account} title="Hesabım" page="account" tone="account" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="✉" iconSrc={menuIconAssets.messages} title={`Mesajlar${unreadMessageCount ? ` (${unreadMessageCount})` : ""}`} page="messages" tone="messages" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="▦" iconSrc={menuIconAssets.dashboard} title="Dashboard" page="dashboard" tone="dashboard" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="♟" iconSrc={menuIconAssets.customers} title={profile.role === "employee" ? "Komple Müşteriler" : "Müşteriler"} page="customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} onClickExtra={() => setCustomerFilter("all")} />
+        <MenuButton icon="✎" iconSrc={menuIconAssets.notes} title="Notlarım" page="notes" tone="notes" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
         {profile.role === "employee" && (
           <>
-            <MenuButton icon="✦" title={`Yeni Gelenler (${freshCustomerCount})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="…" title="Ulaşılamadı" page="rep_no_answer" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="◷" title="Randevu" page="rep_appointment" tone="appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="▤" title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="↻" title="Tekrar Aranacak" page="rep_callback" tone="callback" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="⊘" title="Yapmayacak" page="rep_not_approved" tone="closed" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="₺" title="Satış" page="rep_paid" tone="paid" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="✦" iconSrc={menuIconAssets.newCustomers} title={`Yeni Gelenler (${freshCustomerCount})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="…" iconSrc={menuIconAssets.noAnswer} title="Ulaşılamadı" page="rep_no_answer" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="◷" iconSrc={menuIconAssets.appointment} title="Randevu" page="rep_appointment" tone="appointment" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="▤" iconSrc={menuIconAssets.contract} title="Sözleşmeli Randevu" page="rep_contract" tone="contract" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="↻" iconSrc={menuIconAssets.callback} title="Tekrar Aranacak" page="rep_callback" tone="callback" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="⊘" iconSrc={menuIconAssets.notApproved} title="Yapmayacak" page="rep_not_approved" tone="closed" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="₺" iconSrc={menuIconAssets.paid} title="Satış" page="rep_paid" tone="paid" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
           </>
         )}
 
         {profile.role === "manager" && (
-          <MenuButton icon="◉" title={`Müşterilerim (${totalCustomerCount})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+          <MenuButton icon="◉" iconSrc={menuIconAssets.customers} title={`Müşterilerim (${totalCustomerCount})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
         {profile.role === "boss" && (
           <>
-            <MenuButton icon="+" title="Yeni Müşteri Havuzu" page="pool" tone="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-            <MenuButton icon="!" title={`Takip Gerekenler (${followUpCustomerCount})`} page="followups" tone="urgent" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="+" iconSrc={menuIconAssets.pool} title="Yeni Müşteri Havuzu" page="pool" tone="pool" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="!" iconSrc={menuIconAssets.followups} title={`Takip Gerekenler (${followUpCustomerCount})`} page="followups" tone="urgent" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
           </>
         )}
 
-        <MenuButton icon="◷" title={`Bugünkü İşler (${todayWorkCount})`} page="today_work" tone="today" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="▣" title="Takvim" page="calendar" tone="calendar" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
-        <MenuButton icon="!" title="Numara Yanlış" page="wrong_number" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="◷" iconSrc={menuIconAssets.todayWork} title={`Bugünkü İşler (${todayWorkCount})`} page="today_work" tone="today" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="▣" iconSrc={menuIconAssets.calendar} title="Takvim" page="calendar" tone="calendar" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="!" iconSrc={menuIconAssets.wrongNumber} title="Numara Yanlış" page="wrong_number" tone="wrong" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
 
         {profile.role === "boss" && (
-          <MenuButton icon="◎" title="Rep Takip Merkezi" page="employees" tone="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+          <MenuButton icon="◎" iconSrc={menuIconAssets.employees} title="Rep Takip Merkezi" page="employees" tone="employees" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
         )}
 
-        <MenuButton icon="▤" title="Raporlar" page="reports" tone="reports" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+        <MenuButton icon="▤" iconSrc={menuIconAssets.reports} title="Raporlar" page="reports" tone="reports" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
       </aside>
 
       <main style={mainArea}>
@@ -3680,7 +3717,7 @@ function App() {
   );
 }
 
-function MenuButton({ icon, title, page, tone, activePage, setActivePage, onClickExtra, collapsed }) {
+function MenuButton({ icon, iconSrc, title, page, tone, activePage, setActivePage, onClickExtra, collapsed }) {
   const toneMap = menuIconTones[tone] || menuIconTones.default;
   return (
     <button
@@ -3692,7 +3729,9 @@ function MenuButton({ icon, title, page, tone, activePage, setActivePage, onClic
       aria-label={title}
       style={{ ...menuButton, ...(activePage === page ? menuButtonActive : {}), ...(collapsed ? menuButtonCollapsed : {}) }}
     >
-      <span style={{ ...menuIcon, ...toneMap }}>{icon}</span>
+      <span style={{ ...menuIcon, ...toneMap }}>
+        {iconSrc ? <img src={iconSrc} alt="" aria-hidden="true" style={menuIconImage} /> : icon}
+      </span>
       {!collapsed && <span>{title}</span>}
     </button>
   );
@@ -5719,7 +5758,8 @@ const menuToggle = { width: 42, height: 42, flexShrink: 0, display: "grid", plac
 const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, transition: "transform 150ms ease, border-color 150ms ease, background 150ms ease" };
 const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
 const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
-const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: brandRedSoft, color: brandRed, border: `1px solid ${brandRedBorder}`, fontSize: 17, fontWeight: 900, lineHeight: 1 };
+const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
+const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover" };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
 const syncNotice = { margin: "-8px 0 16px", padding: "10px 12px", borderRadius: 8, background: brandRedSoft, border: `1px solid ${brandRedBorder}`, color: brandRed, fontSize: 13, fontWeight: 600 };
 const statsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 16, marginBottom: 24 };
