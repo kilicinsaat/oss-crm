@@ -64,7 +64,7 @@ const FOLLOW_UP_CUSTOMER_STATUSES = ["no_answer", "busy", "appointment", "contra
 const APPOINTMENT_REMINDER_STATUSES = ["appointment", "contract_appointment"];
 const CALENDAR_REMINDER_STATUSES = ["callback", "appointment", "contract_appointment"];
 const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
-const REMOTE_CUSTOMER_COUNT_MODE = "exact";
+const REMOTE_CUSTOMER_COUNT_MODE = "planned";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
 const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
 const SESSION_STARTED_AT_KEY = "oss-crm-session-started-at";
@@ -1254,7 +1254,14 @@ function App() {
           if (!dismissedCallNoticeIdsRef.current.has(noticeId) && !announcedCallNoticeIdsRef.current.has(noticeId)) {
             const resolvedCustomer = customer || await fetchCustomerForCall(call);
             const assignedUser = usersRef.current.find((user) => String(user.id) === String(call.profile_id));
-            const notice = { id: noticeId, call, customer: resolvedCustomer, assignedUser, createdAt: new Date().toISOString() };
+            const ownerUser = resolvedCustomer?.assigned_employee
+              ? usersRef.current.find((user) => String(user.id) === String(resolvedCustomer.assigned_employee))
+              : null;
+            const canOpenCustomer = !resolvedCustomer
+              ? false
+              : ["boss", "manager"].includes(profile.role)
+                || String(resolvedCustomer.assigned_employee || "") === String(profile.id);
+            const notice = { id: noticeId, call, customer: resolvedCustomer, assignedUser, ownerUser, canOpenCustomer, createdAt: new Date().toISOString() };
             announcedCallNoticeIdsRef.current.add(noticeId);
             setCallNotice(notice);
             playCallNoticeSound();
@@ -1321,7 +1328,7 @@ function App() {
 
   function isLiveCallForNotice(call) {
     if (!call?.id || call.ended_at) return false;
-    return ["ringing", "answered"].includes(call.status);
+    return call.direction === "incoming" && ["ringing", "answered"].includes(call.status);
   }
 
   async function fetchCustomerForCall(call) {
@@ -1351,7 +1358,7 @@ function App() {
   }
 
   function openCallNoticeCustomer(notice) {
-    if (!notice?.customer) return;
+    if (!notice?.customer || !notice.canOpenCustomer) return;
     loadMessageHistoryForCustomer(notice.customer);
     dismissCallNotice(notice.id);
   }
@@ -3758,13 +3765,15 @@ function CustomerTable({
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [genderFilter, setGenderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [dataFilter, setDataFilter] = useState("");
+  const [sortMode, setSortMode] = useState("newest");
   const [page, setPage] = useState(1);
   const [hiddenAfterAssignIds, setHiddenAfterAssignIds] = useState([]);
   const [remoteRows, setRemoteRows] = useState([]);
   const [remoteTotal, setRemoteTotal] = useState(0);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState("");
-  const pageSize = 100;
+  const pageSize = 200;
   const isRemote = Boolean(remoteScope);
   const remoteScopeKey = JSON.stringify(remoteScope || {});
   const remoteScopeConfig = useMemo(() => JSON.parse(remoteScopeKey), [remoteScopeKey]);
@@ -3778,7 +3787,7 @@ function CustomerTable({
       setHiddenAfterAssignIds([]);
     }, 0);
     return () => window.clearTimeout(resetTimer);
-  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, remoteScopeKey, page, setSelectedIds, setBulkEmployee]);
+  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, sortMode, remoteScopeKey, page, setSelectedIds, setBulkEmployee]);
 
   useEffect(() => {
     if (!isRemote) return undefined;
@@ -3788,6 +3797,7 @@ function CustomerTable({
       setRemoteLoading(true);
       setRemoteError("");
       const cleanSearch = normalizeCustomerSearch(debouncedSearchTerm);
+      const cleanDataFilter = normalizeCustomerSearch(dataFilter);
       const searchDigits = digitsOnly(debouncedSearchTerm);
       const numericSearch = isNumericCustomerSearch(debouncedSearchTerm);
       const exactPhoneSearch = numericSearch && normalizePhone(debouncedSearchTerm).length === 10;
@@ -3826,6 +3836,7 @@ function CustomerTable({
       }
 
       if (statusFilter !== "all") query = query.eq("status", statusFilter);
+      if (cleanDataFilter) query = query.ilike("batch_name", `%${cleanDataFilter}%`);
 
       if (cleanSearch) {
         if (exactPhoneSearch) {
@@ -3840,7 +3851,21 @@ function CustomerTable({
         }
       }
 
-      if (remoteScopeConfig.orderByAppointment) {
+      if (sortMode === "data_asc") {
+        query = query
+          .order("batch_name", { ascending: true, nullsFirst: false })
+          .order("batch_page", { ascending: true, nullsFirst: false })
+          .order("created_at", { ascending: false });
+      } else if (sortMode === "data_desc") {
+        query = query
+          .order("batch_name", { ascending: false, nullsFirst: true })
+          .order("batch_page", { ascending: true, nullsFirst: false })
+          .order("created_at", { ascending: false });
+      } else if (sortMode === "oldest") {
+        query = query
+          .order("created_at", { ascending: true })
+          .order("id", { ascending: true });
+      } else if (remoteScopeConfig.orderByAppointment) {
         query = query
           .order("appointment_date", { ascending: true, nullsFirst: false })
           .order("created_at", { ascending: false });
@@ -3884,7 +3909,7 @@ function CustomerTable({
       cancelled = true;
       window.clearTimeout(refreshTimer);
     };
-  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, debouncedSearchTerm, dataVersion, canManage]);
+  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, sortMode, debouncedSearchTerm, dataVersion, canManage]);
 
   const searchedData = data
     .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
@@ -3900,14 +3925,30 @@ function CustomerTable({
   const filteredData = statusFilter === "all"
     ? genderFilteredData
     : genderFilteredData.filter((customer) => customer.status === statusFilter);
+  const cleanLocalDataFilter = normalizeCustomerSearch(dataFilter);
+  const dataFilteredData = cleanLocalDataFilter
+    ? filteredData.filter((customer) => normalizeCustomerSearch(customer.batch_name).includes(cleanLocalDataFilter))
+    : filteredData;
+  const sortedData = [...dataFilteredData].sort((first, second) => {
+    if (sortMode === "data_asc" || sortMode === "data_desc") {
+      const direction = sortMode === "data_asc" ? 1 : -1;
+      const dataCompare = String(first.batch_name || "").localeCompare(String(second.batch_name || ""), "tr-TR", { numeric: true, sensitivity: "base" });
+      if (dataCompare !== 0) return dataCompare * direction;
+      const pageCompare = (Number(first.batch_page) || 0) - (Number(second.batch_page) || 0);
+      if (pageCompare !== 0) return pageCompare;
+    }
+    const firstTime = new Date(first.created_at || 0).getTime() || 0;
+    const secondTime = new Date(second.created_at || 0).getTime() || 0;
+    return sortMode === "oldest" ? firstTime - secondTime : secondTime - firstTime;
+  });
   const remoteVisibleRows = remoteRows.filter((customer) => !hiddenAfterAssignSet.has(customer.id));
-  const displayedTotal = isRemote ? remoteTotal : filteredData.length;
+  const displayedTotal = isRemote ? remoteTotal : sortedData.length;
   const pageCount = Math.max(Math.ceil(displayedTotal / pageSize), 1);
   const currentPage = Math.min(page, pageCount);
   const pageData = isRemote
     ? remoteVisibleRows
-    : filteredData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const exportRows = isRemote ? pageData : filteredData;
+    : sortedData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const exportRows = isRemote ? pageData : sortedData;
   const hasDisplayedRows = pageData.length > 0;
 
   function clearAssignmentHiding() {
@@ -3942,7 +3983,7 @@ function CustomerTable({
         <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage(1)}>İlk</button>
         <button type="button" style={paginationButton} disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(value - 1, 1))}>Önceki</button>
         <strong>{currentPage} / {pageCount}</strong>
-        <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(value + 1, pageCount))}>Sonraki 100</button>
+        <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(value + 1, pageCount))}>Sonraki {pageSize}</button>
         <button type="button" style={paginationButton} disabled={currentPage === pageCount} onClick={() => setPage(pageCount)}>Son</button>
       </div>
     );
@@ -3994,6 +4035,22 @@ function CustomerTable({
           <option value="all">Tüm durumlar</option>
           {[...CUSTOMER_STATUSES].map((status) => <option key={status} value={status}>{statusLabel(status)}</option>)}
         </select>
+        <input
+          placeholder="Data filtrele: data100, Hitit Ayaş..."
+          value={dataFilter}
+          onChange={(event) => {
+            setDataFilter(event.target.value);
+            clearAssignmentHiding();
+            setPage(1);
+          }}
+          style={{ ...toolbarSelect, minWidth: 220 }}
+        />
+        <select value={sortMode} onChange={(event) => { setSortMode(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
+          <option value="newest">Sıralama: Yeni eklenenler</option>
+          <option value="oldest">Sıralama: Eski eklenenler</option>
+          <option value="data_asc">Sıralama: Data A-Z</option>
+          <option value="data_desc">Sıralama: Data Z-A</option>
+        </select>
       </div>
 
       <div style={tableSummary}>
@@ -4031,7 +4088,7 @@ function CustomerTable({
               setSelectedIds(allSelected ? [] : ids);
             }}
           >
-            Sayfadakileri Seç
+            Sayfadaki {pageData.length.toLocaleString("tr-TR")} Kişiyi Seç
           </button>
           <select value={bulkEmployee} onChange={(event) => setBulkEmployee(event.target.value)} style={selectStyle}>
             <option value="">Rep / manager seç</option>
@@ -5452,6 +5509,7 @@ function CallNoticePopup({ notice, onOpenCustomer, onDismiss }) {
   const customer = notice.customer;
   const title = customer ? customerFullName(customer) : formatPhoneDisplay(call.phone);
   const subtitle = `${call.direction === "incoming" ? "Gelen çağrı" : "Giden çağrı"} · ${callStatusLabel(call)}`;
+  const lockedCustomer = customer && !notice.canOpenCustomer;
   return (
     <div style={callNoticePopup}>
       <div style={callNoticeHeader}>
@@ -5466,11 +5524,12 @@ function CallNoticePopup({ notice, onOpenCustomer, onDismiss }) {
         <span>Numara: {formatPhoneDisplay(call.phone)}</span>
         <span>Dahili: {call.extension || call.device_id || "-"}</span>
         <span>Rep: {notice.assignedUser?.full_name || notice.assignedUser?.email || "-"}</span>
+        {lockedCustomer ? <span>Müşteri sahibi: {notice.ownerUser?.full_name || notice.ownerUser?.email || "Başka rep"}</span> : null}
         {call.duration_seconds ? <span>Süre: {call.duration_seconds}s</span> : null}
       </div>
       <div style={callNoticeActions}>
-        <button type="button" onClick={onOpenCustomer} disabled={!customer} style={{ ...smallButton, opacity: customer ? 1 : 0.55 }}>
-          {customer ? "Müşteri kartını aç" : "Kart eşleşmedi"}
+        <button type="button" onClick={onOpenCustomer} disabled={!customer || lockedCustomer} style={{ ...smallButton, opacity: customer && !lockedCustomer ? 1 : 0.55 }}>
+          {!customer ? "Kart eşleşmedi" : lockedCustomer ? "Kart başka repte" : "Müşteri kartını aç"}
         </button>
         <button type="button" onClick={onDismiss} style={smallGhostButton}>Kapat</button>
       </div>
