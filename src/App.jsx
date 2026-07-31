@@ -3649,6 +3649,7 @@ function App() {
               bulkAssignCustomers={bulkAssignCustomers}
               remoteScope={todayWorkRemoteScope}
               dataVersion={customerDataVersion}
+              defaultSortMode="appointment_asc"
             />
           </>
         )}
@@ -3796,7 +3797,7 @@ function MenuButton({ icon, iconSrc, title, page, tone, activePage, setActivePag
       aria-label={title}
       style={{ ...menuButton, ...(activePage === page ? menuButtonActive : {}), ...(collapsed ? menuButtonCollapsed : {}) }}
     >
-      <span style={{ ...menuIcon, ...toneMap }}>
+      <span style={{ ...menuIcon, ...(iconSrc ? menuIconWithImage : toneMap), ...(activePage === page ? menuIconActive : {}) }}>
         {iconSrc ? <img src={iconSrc} alt="" aria-hidden="true" style={menuIconImage} /> : icon}
       </span>
       <span style={{ ...menuButtonLabel, ...(collapsed ? menuButtonLabelCollapsed : {}) }}>{title}</span>
@@ -3892,6 +3893,7 @@ function CustomerTable({
   onExport,
   remoteScope,
   dataVersion,
+  defaultSortMode = "newest",
 }) {
   const canManage = ["boss", "manager"].includes(profile.role);
   const canViewTc = profile.role !== "employee";
@@ -3899,7 +3901,7 @@ function CustomerTable({
   const [genderFilter, setGenderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dataFilter, setDataFilter] = useState("");
-  const [sortMode, setSortMode] = useState("newest");
+  const [sortMode, setSortMode] = useState(defaultSortMode);
   const [page, setPage] = useState(1);
   const [hiddenAfterAssignIds, setHiddenAfterAssignIds] = useState([]);
   const [remoteRows, setRemoteRows] = useState([]);
@@ -3984,7 +3986,11 @@ function CustomerTable({
         }
       }
 
-      if (sortMode === "data_asc") {
+      if (sortMode === "appointment_asc" || sortMode === "appointment_desc") {
+        query = query
+          .order("appointment_date", { ascending: sortMode === "appointment_asc", nullsFirst: false })
+          .order("created_at", { ascending: false });
+      } else if (sortMode === "data_asc") {
         query = query
           .order("batch_name", { ascending: true, nullsFirst: false })
           .order("batch_page", { ascending: true, nullsFirst: false })
@@ -4062,7 +4068,17 @@ function CustomerTable({
   const dataFilteredData = cleanLocalDataFilter
     ? filteredData.filter((customer) => normalizeCustomerSearch(customer.batch_name).includes(cleanLocalDataFilter))
     : filteredData;
+  const showAppointmentSortOptions = Boolean(remoteScopeConfig.orderByAppointment)
+    || dataFilteredData.some((customer) => customer.appointment_date);
   const sortedData = [...dataFilteredData].sort((first, second) => {
+    if (sortMode === "appointment_asc" || sortMode === "appointment_desc") {
+      const firstAppointmentTime = new Date(first.appointment_date || 8640000000000000).getTime();
+      const secondAppointmentTime = new Date(second.appointment_date || 8640000000000000).getTime();
+      const appointmentCompare = firstAppointmentTime - secondAppointmentTime;
+      if (appointmentCompare !== 0) {
+        return sortMode === "appointment_asc" ? appointmentCompare : -appointmentCompare;
+      }
+    }
     if (sortMode === "data_asc" || sortMode === "data_desc") {
       const direction = sortMode === "data_asc" ? 1 : -1;
       const dataCompare = String(first.batch_name || "").localeCompare(String(second.batch_name || ""), "tr-TR", { numeric: true, sensitivity: "base" });
@@ -4179,6 +4195,8 @@ function CustomerTable({
           style={{ ...toolbarSelect, minWidth: 220 }}
         />
         <select value={sortMode} onChange={(event) => { setSortMode(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
+          {showAppointmentSortOptions && <option value="appointment_asc">Sıralama: Takip tarihi yakın</option>}
+          {showAppointmentSortOptions && <option value="appointment_desc">Sıralama: Takip tarihi uzak</option>}
           <option value="newest">Sıralama: Yeni eklenenler</option>
           <option value="oldest">Sıralama: Eski eklenenler</option>
           <option value="data_asc">Sıralama: Data A-Z</option>
@@ -5871,9 +5889,11 @@ const menuToggleLineMiddleOpen = { top: 6, opacity: 0, transform: "scaleX(0.4)" 
 const menuToggleLineBottomOpen = { top: 6, transform: "rotate(-45deg)" };
 const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, overflow: "hidden", transition: "transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease" };
 const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
-const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
-const menuIcon = { width: 34, height: 34, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 11, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
-const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover", transform: "scale(1.72)", transformOrigin: "center", filter: "drop-shadow(0 5px 10px rgba(226,68,7,0.12))" };
+const menuButtonCollapsed = { justifyContent: "center", padding: 8, minHeight: 52, gap: 0 };
+const menuIcon = { width: 36, height: 36, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 12, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
+const menuIconWithImage = { background: "transparent", border: "0 solid transparent", boxShadow: "none" };
+const menuIconActive = { filter: "drop-shadow(0 6px 12px rgba(255,255,255,0.16))" };
+const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover", objectPosition: "center", transform: "scale(2.22)", transformOrigin: "center", filter: "drop-shadow(0 5px 10px rgba(226,68,7,0.13))" };
 const menuButtonLabel = { minWidth: 0, whiteSpace: "nowrap", opacity: 1, transform: "translateX(0)", transition: "opacity 180ms ease 60ms, transform 220ms cubic-bezier(0.22, 1, 0.36, 1) 40ms" };
 const menuButtonLabelCollapsed = { opacity: 0, transform: "translateX(-8px)", transitionDelay: "0ms", pointerEvents: "none" };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
