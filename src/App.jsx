@@ -7,7 +7,6 @@ import callbackIcon from "./assets/sistem-icon/callback.png";
 import contractIcon from "./assets/sistem-icon/contract.png";
 import customersIcon from "./assets/sistem-icon/customers.png";
 import dashboardIcon from "./assets/sistem-icon/dashboard.png";
-import managerNewCustomersIcon from "./assets/sistem-icon/manager-new-customers.jpg";
 import messagesIcon from "./assets/sistem-icon/messages.png";
 import newCustomersIcon from "./assets/sistem-icon/new-customers.png";
 import noAnswerIcon from "./assets/sistem-icon/no-answer.png";
@@ -129,8 +128,8 @@ const menuIconAssets = {
   customers: customersIcon,
   dashboard: dashboardIcon,
   employees: customersIcon,
-  managerCustomers: newCustomersIcon,
-  managerNewCustomers: managerNewCustomersIcon,
+  managerCustomers: customersIcon,
+  managerNewCustomers: newCustomersIcon,
   followups: followupsIcon,
   messages: messagesIcon,
   newCustomers: newCustomersIcon,
@@ -1324,7 +1323,8 @@ function App() {
         if (selectedCustomerMatches || (payload.eventType === "DELETE" && selectedCustomer)) {
           loadCustomerCalls(selectedCustomer);
         }
-        if (payload.eventType !== "DELETE" && isLiveCallForNotice(call)) {
+        const callBelongsToCurrentUser = String(call.profile_id || "") === String(profile.id || "");
+        if (payload.eventType !== "DELETE" && callBelongsToCurrentUser && isLiveCallForNotice(call)) {
           const noticeId = callNoticeId(call);
           if (!dismissedCallNoticeIdsRef.current.has(noticeId) && !announcedCallNoticeIdsRef.current.has(noticeId)) {
             const resolvedCustomer = customer || await fetchCustomerForCall(call);
