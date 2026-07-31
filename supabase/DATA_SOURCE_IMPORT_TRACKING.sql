@@ -212,8 +212,8 @@ begin
   from public.profiles
   where id = auth.uid() and is_active = true;
 
-  if actor_role <> 'boss' then
-    raise exception 'Only an active boss can read the live report' using errcode = '42501';
+  if actor_role not in ('boss', 'manager') then
+    raise exception 'Only an active boss or manager can read the live report' using errcode = '42501';
   end if;
 
   select jsonb_build_object(
@@ -259,6 +259,7 @@ begin
       count(customer.id) as total,
       count(customer.id) filter (where customer.status = 'called') as called,
       count(customer.id) filter (where customer.status in ('appointment', 'contract_appointment')) as appointment,
+      count(customer.id) filter (where customer.status in ('no_answer', 'busy', 'not_approved', 'wrong_number')) as negative,
       count(customer.id) filter (where customer.approved = true) as approved,
       count(customer.id) filter (where customer.payment_received = true or customer.status = 'paid') as paid,
       count(customer.id) filter (

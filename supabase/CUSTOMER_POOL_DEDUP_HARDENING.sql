@@ -210,8 +210,8 @@ begin
   from public.profiles
   where id = auth.uid() and is_active = true;
 
-  if actor_role <> 'boss' then
-    raise exception 'Only an active boss can assign customers' using errcode = '42501';
+  if actor_role not in ('boss', 'manager') then
+    raise exception 'Only an active boss or manager can assign customers' using errcode = '42501';
   end if;
 
   if coalesce(array_length(p_customer_ids, 1), 0) = 0 then
@@ -288,8 +288,8 @@ begin
   from public.profiles
   where id = auth.uid() and is_active = true;
 
-  if actor_role <> 'boss' then
-    raise exception 'Only an active boss can release employee customers' using errcode = '42501';
+  if actor_role not in ('boss', 'manager') then
+    raise exception 'Only an active boss or manager can release employee customers' using errcode = '42501';
   end if;
 
   update public.customers customer

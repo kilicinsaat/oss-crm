@@ -1,5 +1,27 @@
--- Run once in the Supabase SQL Editor.
--- Produces exact boss reporting from the full customer table; PostgREST row limits do not apply.
+-- Run once in Supabase SQL Editor.
+-- Fixes manager live-report access and keeps customer search fast on large data.
+
+create extension if not exists pg_trgm with schema extensions;
+
+create index if not exists customers_search_text_trgm_idx
+  on public.customers using gin (search_text extensions.gin_trgm_ops);
+
+create index if not exists customers_phone_key_idx
+  on public.customers (phone_key)
+  where phone_key is not null;
+
+create index if not exists customers_phone_2_key_idx
+  on public.customers (phone_2_key)
+  where phone_2_key is not null;
+
+create index if not exists customers_batch_name_page_created_idx
+  on public.customers (batch_name, batch_page, created_at desc, id desc);
+
+create index if not exists customers_assignee_status_created_fast_idx
+  on public.customers (assigned_employee, status, created_at desc, id desc);
+
+create index if not exists customers_status_created_fast_idx
+  on public.customers (status, created_at desc, id desc);
 
 create or replace function public.crm_live_reporting()
 returns jsonb
@@ -132,21 +154,5 @@ $function$;
 revoke all on function public.crm_live_reporting() from public;
 grant execute on function public.crm_live_reporting() to authenticated;
 
-do $$
-declare
-  target_table text;
-begin
-  foreach target_table in array array['customers', 'customer_logs', 'profiles']
-  loop
-    if not exists (
-      select 1
-      from pg_publication_tables
-      where pubname = 'supabase_realtime'
-        and schemaname = 'public'
-        and tablename = target_table
-    ) then
-      execute format('alter publication supabase_realtime add table public.%I', target_table);
-    end if;
-  end loop;
-end
-$$;
+analyze public.customers;
+analyze public.profiles;

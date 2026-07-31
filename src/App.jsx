@@ -97,6 +97,29 @@ const APPOINTMENT_DAY_ALERT_MS = 24 * 60 * 60 * 1000;
 const APPOINTMENT_SOON_ALERT_MS = 30 * 60 * 1000;
 const INITIAL_CUSTOMER_PAGES = 1;
 const MAX_PRIORITY_PRELOAD_PAGES = 1;
+
+function sortAppointmentCustomers(customers) {
+  return [...customers].sort((first, second) =>
+    new Date(first.appointment_date || 0) - new Date(second.appointment_date || 0)
+  );
+}
+
+function isCalendarCustomer(customer) {
+  return Boolean(customer?.appointment_date && CALENDAR_REMINDER_STATUSES.includes(customer.status));
+}
+
+function mergeCustomersById(...groups) {
+  const customerMap = new Map();
+  groups.flat().forEach((customer) => {
+    if (!customer?.id) return;
+    customerMap.set(String(customer.id), {
+      ...(customerMap.get(String(customer.id)) || {}),
+      ...customer,
+    });
+  });
+  return Array.from(customerMap.values());
+}
+
 const menuIconAssets = {
   account: accountIcon,
   appointment: appointmentIcon,
@@ -719,6 +742,7 @@ function App() {
   const [customerSmsLogsLoading, setCustomerSmsLogsLoading] = useState(false);
   const [users, setUsers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [selectedCustomerAccess, setSelectedCustomerAccess] = useState({ readOnly: false, callId: "", reason: "" });
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkEmployee, setBulkEmployee] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -791,8 +815,13 @@ function App() {
   const selectedCustomerRelatedIdsRef = useRef(new Set());
   const usersRef = useRef([]);
   const customersRef = useRef([]);
+  const selectedCustomerAccessRef = useRef({ readOnly: false, callId: "", reason: "" });
   const [saleCelebration, setSaleCelebration] = useState(null);
   const summaryProfileId = profile?.id || "";
+
+  useEffect(() => {
+    selectedCustomerAccessRef.current = selectedCustomerAccess;
+  }, [selectedCustomerAccess]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1075,7 +1104,7 @@ function App() {
             .not("appointment_date", "is", null)
             .order("appointment_date", { ascending: true, nullsFirst: false })
             .range(from, from + REP_MONITOR_PAGE_SIZE - 1);
-          if (["employee", "manager"].includes(profile.role)) {
+          if (profile.role === "employee") {
             query = query.eq("assigned_employee", profile.id);
           }
           const { data, error } = await runWithRetry(() => query, 3);
@@ -1085,9 +1114,7 @@ function App() {
           if (page.length < REP_MONITOR_PAGE_SIZE) break;
         }
         if (!cancelled) {
-          setAppointmentCustomers(Array.from(
-            new Map(rows.map((customer) => [String(customer.id), customer])).values()
-          ));
+          setAppointmentCustomers(sortAppointmentCustomers(mergeCustomersById(rows)));
         }
       } catch (error) {
         if (!cancelled && showWarnings) {
@@ -1274,6 +1301,16 @@ function App() {
         const call = payload.new?.id ? payload.new : payload.old;
         const canMonitorAllCalls = ["boss", "manager"].includes(profile.role);
         if (!call?.id || (!canMonitorAllCalls && call.profile_id !== profile.id)) return;
+        const callAccess = selectedCustomerAccessRef.current;
+        if (
+          callAccess?.readOnly
+          && callAccess.callId
+          && String(callAccess.callId) === String(call.id)
+          && !isLiveCallForNotice(call)
+        ) {
+          closeCustomerModal();
+          showSystemToast("Çağrı kapandığı için bilgi amaçlı müşteri kartı kapatıldı.", "warning");
+        }
         const customer = customersRef.current.find((item) =>
           item.id === call.customer_id
           || [item.phone, item.phone_2].some((phone) => normalizePhone(phone) === normalizePhone(call.phone))
@@ -1295,11 +1332,20 @@ function App() {
             const ownerUser = resolvedCustomer?.assigned_employee
               ? usersRef.current.find((user) => String(user.id) === String(resolvedCustomer.assigned_employee))
               : null;
-            const canOpenCustomer = !resolvedCustomer
-              ? false
-              : ["boss", "manager"].includes(profile.role)
-                || String(resolvedCustomer.assigned_employee || "") === String(profile.id);
-            const notice = { id: noticeId, call, customer: resolvedCustomer, assignedUser, ownerUser, canOpenCustomer, createdAt: new Date().toISOString() };
+            const canOpenCustomer = Boolean(resolvedCustomer);
+            const readOnlyCustomer = Boolean(resolvedCustomer?.assigned_employee)
+              && String(resolvedCustomer.assigned_employee) !== String(profile.id)
+              && !["boss", "manager"].includes(profile.role);
+            const notice = {
+              id: noticeId,
+              call,
+              customer: resolvedCustomer,
+              assignedUser,
+              ownerUser,
+              canOpenCustomer,
+              readOnlyCustomer,
+              createdAt: new Date().toISOString(),
+            };
             announcedCallNoticeIdsRef.current.add(noticeId);
             setCallNotice(notice);
             playCallNoticeSound();
@@ -1397,7 +1443,13 @@ function App() {
 
   function openCallNoticeCustomer(notice) {
     if (!notice?.customer || !notice.canOpenCustomer) return;
-    loadMessageHistoryForCustomer(notice.customer);
+    loadMessageHistoryForCustomer(notice.customer, {
+      readOnly: notice.readOnlyCustomer,
+      callId: notice.call?.id || "",
+      reason: notice.readOnlyCustomer
+        ? `Bu müşteri ${notice.ownerUser?.full_name || notice.ownerUser?.email || "başka rep"} üzerinde. Çağrı sana düştüğü için kart sadece bu çağrı için bilgi amaçlı açıldı.`
+        : "",
+    });
     dismissCallNotice(notice.id);
   }
 
@@ -1506,6 +1558,7 @@ function App() {
     setCustomerSmsLogs([]);
     setCustomerSmsLogsLoading(false);
     setSelectedCustomer(null);
+    setSelectedCustomerAccess({ readOnly: false, callId: "", reason: "" });
     setSelectedIds([]);
     setBulkEmployee("");
     setMessages([]);
@@ -1535,12 +1588,25 @@ function App() {
         new Date(second.created_at || 0) - new Date(first.created_at || 0)
       );
     });
+    setAppointmentCustomers((current) => {
+      const customerMap = new Map(current.map((customer) => [String(customer.id), customer]));
+      cleanRows.forEach((customer) => {
+        const id = String(customer.id);
+        if (isCalendarCustomer(customer)) {
+          customerMap.set(id, { ...(customerMap.get(id) || {}), ...customer });
+        } else {
+          customerMap.delete(id);
+        }
+      });
+      return sortAppointmentCustomers(Array.from(customerMap.values()));
+    });
   }
 
   function removeCustomerRows(ids) {
     const idSet = new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean).map(String));
     if (idSet.size === 0) return;
     setCustomers((current) => current.filter((customer) => !idSet.has(String(customer.id))));
+    setAppointmentCustomers((current) => current.filter((customer) => !idSet.has(String(customer.id))));
   }
 
   async function enableMessageNotifications() {
@@ -1557,7 +1623,7 @@ function App() {
     const pageSize = CUSTOMER_PRELOAD_PAGE_SIZE;
     const initialPages = INITIAL_CUSTOMER_PAGES;
     const priorityStatuses = IMPORTANT_CUSTOMER_STATUSES;
-    const shouldPreloadFollowUps = ["employee", "manager"].includes(activeProfile?.role);
+    const shouldPreloadFollowUps = activeProfile?.role === "employee";
 
     try {
       const pageResults = [];
@@ -1856,9 +1922,7 @@ function App() {
 
     const updatedCustomerMap = new Map(refreshedCustomers.map((customer) => [String(customer.id), customer]));
 
-    setCustomers((current) => current.map((customer) =>
-      updatedCustomerMap.get(String(customer.id)) || customer
-    ));
+    upsertCustomerRows(refreshedCustomers);
     setSelectedIds((current) => current.filter((id) => !updateIdSet.has(String(id))));
     setSelectedCustomer((current) => {
       if (!current || !updateIdSet.has(String(current.id))) return current;
@@ -2863,7 +2927,7 @@ function App() {
     setMyNotes((current) => current.filter((note) => note.id !== noteId));
   }
 
-  async function loadMessageHistoryForCustomer(customerOrId) {
+  async function loadMessageHistoryForCustomer(customerOrId, accessOptions = {}) {
     const customerId = typeof customerOrId === "object" ? customerOrId?.id : customerOrId;
     const customer = typeof customerOrId === "object"
       ? customerOrId
@@ -2875,6 +2939,11 @@ function App() {
     setCustomerCalls([]);
     setCustomerSmsLogs([]);
     setSelectedCustomer(customer);
+    setSelectedCustomerAccess({
+      readOnly: Boolean(accessOptions.readOnly),
+      callId: accessOptions.callId || "",
+      reason: accessOptions.reason || "",
+    });
     await Promise.all([loadCustomerLogs(customer), loadCustomerCalls(customer), loadCustomerSmsLogs(customer)]);
   }
 
@@ -2890,6 +2959,7 @@ function App() {
     setCustomerSmsLogsLoading(false);
     setCustomerSmsLogs([]);
     setSelectedCustomer(null);
+    setSelectedCustomerAccess({ readOnly: false, callId: "", reason: "" });
   }
 
   const profileRole = profile?.role || "employee";
@@ -2933,11 +3003,10 @@ function App() {
   const welcomeName = profileFullName || profileEmail || "Kullanıcı";
   const today = new Date();
   const reminderCustomers = visibleCustomers
-    .filter((customer) => customer.appointment_date && ["callback", "appointment", "contract_appointment"].includes(customer.status))
-    .sort((a, b) => new Date(a.appointment_date) - new Date(b.appointment_date));
-  const calendarCustomers = (appointmentCustomers.length ? appointmentCustomers : reminderCustomers)
-    .filter((customer) => customer.appointment_date && CALENDAR_REMINDER_STATUSES.includes(customer.status))
-    .sort((a, b) => new Date(a.appointment_date) - new Date(b.appointment_date));
+    .filter(isCalendarCustomer);
+  const calendarCustomers = sortAppointmentCustomers(
+    mergeCustomersById(appointmentCustomers, reminderCustomers).filter(isCalendarCustomer)
+  );
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const overdueReminders = calendarCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
   const todayWorkItems = calendarCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
@@ -3694,6 +3763,8 @@ function App() {
             users={users}
             customers={visibleCustomers}
             profile={profile}
+            readOnly={selectedCustomerAccess.readOnly}
+            accessReason={selectedCustomerAccess.reason}
           />
         )}
 
@@ -3904,10 +3975,10 @@ function CustomerTable({
         if (exactPhoneSearch) {
           const phoneKey = normalizePhone(debouncedSearchTerm);
           const phoneFilters = [`phone_key.eq.${phoneKey}`, `phone_2_key.eq.${phoneKey}`];
-          if (searchDigits.length >= 11) phoneFilters.push(`tc_no.ilike.%${searchDigits}%`);
+          if (searchDigits.length >= 11) phoneFilters.push(`search_text.ilike.%${searchDigits}%`);
           query = query.or(phoneFilters.join(","));
         } else if (numericSearch) {
-          query = query.or(`phone.ilike.%${searchDigits}%,phone_2.ilike.%${searchDigits}%,tc_no.ilike.%${searchDigits}%`);
+          query = query.ilike("search_text", `%${searchDigits}%`);
         } else {
           query = query.ilike("search_text", `%${cleanSearch}%`);
         }
@@ -4231,7 +4302,7 @@ function CustomerTable({
   );
 }
 
-function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, customerCalls, customerCallsLoading, customerSmsLogs, customerSmsLogsLoading, reloadCustomerSmsLogs, updateCustomer, users, customers, profile }) {
+function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, customerLogsLoading, customerCalls, customerCallsLoading, customerSmsLogs, customerSmsLogsLoading, reloadCustomerSmsLogs, updateCustomer, users, customers, profile, readOnly = false, accessReason = "" }) {
   const [detailStatus, setDetailStatus] = useState(selectedCustomer.status || "assigned");
   const [detailNote, setDetailNote] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
@@ -4246,8 +4317,13 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   const callTone = customerCallStatusTone(customerCalls);
   const duplicateCustomer = findDuplicateCustomer(customers, selectedCustomer.phone, selectedCustomer.id);
   const hasRelatedPhoneLogs = customerLogs.some((log) => String(log.customer_id) !== String(selectedCustomer.id));
+  const showSmsComposer = smsComposerOpen && !readOnly;
 
   async function sendCustomerSms() {
+    if (readOnly) {
+      alert("Bu müşteri kartı sadece bilgi amaçlı açıldı. SMS göndermek için müşteri sahibi rep işlem yapmalı.");
+      return;
+    }
     if (sendingSms) return;
     const phone = normalizePhone(selectedCustomer.phone);
     const message = smsMessage.trim();
@@ -4282,6 +4358,10 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   }
 
   async function saveCustomer() {
+    if (readOnly) {
+      alert("Bu müşteri kartı sadece bilgi amaçlı açıldı. Durum/not değişikliği müşteri sahibi rep tarafından yapılmalı.");
+      return;
+    }
     if (savingCustomer) return;
     if (!CUSTOMER_STATUSES.has(detailStatus)) {
       alert("Geçersiz müşteri durumu seçildi. Sayfayı yenileyip tekrar dene.");
@@ -4327,6 +4407,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   }
 
   function handleSaveShortcut(event) {
+    if (readOnly) return;
     if (event.key !== "Enter" || savingCustomer) return;
     const tagName = event.target?.tagName?.toLowerCase();
     const isTextarea = tagName === "textarea";
@@ -4389,21 +4470,28 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
         </div>
 
         <div style={quickActions}>
-          <a href={`tel:${phoneDialValue(selectedCustomer.phone)}`} style={quickActionButton}>Ara</a>
-          <button type="button" style={quickActionButton} onClick={() => setSmsComposerOpen((value) => !value)}>
+          {readOnly
+            ? <span style={{ ...quickActionButton, opacity: 0.55, cursor: "not-allowed" }}>Ara</span>
+            : <a href={`tel:${phoneDialValue(selectedCustomer.phone)}`} style={quickActionButton}>Ara</a>}
+          <button type="button" disabled={readOnly} style={{ ...quickActionButton, opacity: readOnly ? 0.55 : 1 }} onClick={() => setSmsComposerOpen((value) => !value)}>
             SMS Gönder
           </button>
-          <a
-            href={`https://wa.me/${whatsappPhone(selectedCustomer.phone)}`}
-            target="_blank"
-            rel="noreferrer"
-            style={quickActionButton}
-          >
-            WhatsApp
-          </a>
+          {readOnly
+            ? <span style={{ ...quickActionButton, opacity: 0.55, cursor: "not-allowed" }}>WhatsApp</span>
+            : (
+              <a
+                href={`https://wa.me/${whatsappPhone(selectedCustomer.phone)}`}
+                target="_blank"
+                rel="noreferrer"
+                style={quickActionButton}
+              >
+                WhatsApp
+              </a>
+            )}
           <button
             type="button"
-            style={quickActionButton}
+            disabled={readOnly}
+            style={{ ...quickActionButton, opacity: readOnly ? 0.55 : 1 }}
             onClick={() => {
               const phone = normalizePhone(selectedCustomer.phone);
               window.open(`https://wa.me/90${phone}?text=${encodeURIComponent(COMPANY_MESSAGE)}`, "_blank");
@@ -4412,12 +4500,18 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             Bilgileri Gönder
           </button>
           <a href={COMPANY_LOCATION_URL} target="_blank" rel="noreferrer" style={quickActionButton}>Konum</a>
-          <button type="button" onClick={() => setDetailStatus("wrong_number")} style={{ ...quickActionButton, ...wrongNumberButton }}>
+          <button type="button" disabled={readOnly} onClick={() => setDetailStatus("wrong_number")} style={{ ...quickActionButton, ...wrongNumberButton, opacity: readOnly ? 0.55 : 1 }}>
             Numara yanlış
           </button>
         </div>
 
-        {smsComposerOpen && (
+        {readOnly && accessReason && (
+          <div style={messageSetupNotice}>
+            {accessReason}
+          </div>
+        )}
+
+        {showSmsComposer && (
           <div style={{ ...panelCard, margin: "0 0 18px", padding: 16 }}>
             <label style={fieldLabel}>SMS — {formatPhoneDisplay(selectedCustomer.phone)}</label>
             <textarea
@@ -4449,8 +4543,9 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
                 key={value}
                 type="button"
                 aria-pressed={detailStatus === value}
+                disabled={readOnly}
                 onClick={() => setDetailStatus(value)}
-                style={{ ...statusMenuButton, ...statusMenuTone[tone], ...(detailStatus === value ? statusMenuActive : {}) }}
+                style={{ ...statusMenuButton, ...statusMenuTone[tone], ...(detailStatus === value ? statusMenuActive : {}), opacity: readOnly ? 0.58 : 1 }}
               >
                 {label}
               </button>
@@ -4461,7 +4556,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             {detailStatus === "not_approved" && (
               <>
                 <label style={fieldLabel}>Yapmama nedeni (zorunlu)</label>
-                <select value={notApprovedReason} onChange={(event) => setNotApprovedReason(event.target.value)} style={inputStyle}>
+                <select value={notApprovedReason} onChange={(event) => setNotApprovedReason(event.target.value)} disabled={readOnly} style={{ ...inputStyle, opacity: readOnly ? 0.7 : 1 }}>
                   <option value="">Neden seçin</option>
                   <option value="Satılmış">Satılmış</option>
                   <option value="Davalı / Avukatlık">Davalı / Avukatlık</option>
@@ -4476,8 +4571,9 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
             <textarea
               value={detailNote}
               onChange={(event) => setDetailNote(event.target.value)}
+              disabled={readOnly}
               placeholder={detailStatus === "not_approved" ? "Gerekirse kısa bir açıklama ekleyin..." : "Bu işlem için yeni not bırakın..."}
-              style={{ ...inputStyle, minHeight: 140, resize: "vertical" }}
+              style={{ ...inputStyle, minHeight: 140, resize: "vertical", opacity: readOnly ? 0.7 : 1 }}
             />
 
             {needsFollowUpDate && (
@@ -4488,19 +4584,20 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
                   type="datetime-local"
                   value={appointmentDate}
                   onChange={(event) => setAppointmentDate(event.target.value)}
+                  disabled={readOnly}
                   required={needsFollowUpDate}
-                  style={{ ...inputStyle, borderColor: "#fbbf24" }}
+                  style={{ ...inputStyle, borderColor: "#fbbf24", opacity: readOnly ? 0.7 : 1 }}
                 />
               </>
             )}
 
             <button
               type="button"
-              disabled={savingCustomer}
-              style={{ ...primaryButton, opacity: savingCustomer ? 0.65 : 1, marginTop: 8 }}
+              disabled={savingCustomer || readOnly}
+              style={{ ...primaryButton, opacity: savingCustomer || readOnly ? 0.65 : 1, marginTop: 8 }}
               onClick={saveCustomer}
             >
-              {savingCustomer ? "Kaydediliyor..." : "Kaydet"}
+              {readOnly ? "Sadece görüntüleme" : savingCustomer ? "Kaydediliyor..." : "Kaydet"}
             </button>
           </div>
         </div>
@@ -5577,7 +5674,7 @@ function CallNoticePopup({ notice, onOpenCustomer, onDismiss }) {
   const customer = notice.customer;
   const title = customer ? customerFullName(customer) : formatPhoneDisplay(call.phone);
   const subtitle = `${call.direction === "incoming" ? "Gelen çağrı" : "Giden çağrı"} · ${callStatusLabel(call)}`;
-  const lockedCustomer = customer && !notice.canOpenCustomer;
+  const foreignCustomer = customer && notice.readOnlyCustomer;
   return (
     <div style={callNoticePopup}>
       <div style={callNoticeHeader}>
@@ -5592,12 +5689,12 @@ function CallNoticePopup({ notice, onOpenCustomer, onDismiss }) {
         <span>Numara: {formatPhoneDisplay(call.phone)}</span>
         <span>Dahili: {call.extension || call.device_id || "-"}</span>
         <span>Rep: {notice.assignedUser?.full_name || notice.assignedUser?.email || "-"}</span>
-        {lockedCustomer ? <span>Müşteri sahibi: {notice.ownerUser?.full_name || notice.ownerUser?.email || "Başka rep"}</span> : null}
+        {foreignCustomer ? <span>Müşteri sahibi: {notice.ownerUser?.full_name || notice.ownerUser?.email || "Başka rep"}</span> : null}
         {call.duration_seconds ? <span>Süre: {call.duration_seconds}s</span> : null}
       </div>
       <div style={callNoticeActions}>
-        <button type="button" onClick={onOpenCustomer} disabled={!customer || lockedCustomer} style={{ ...smallButton, opacity: customer && !lockedCustomer ? 1 : 0.55 }}>
-          {!customer ? "Kart eşleşmedi" : lockedCustomer ? "Kart başka repte" : "Müşteri kartını aç"}
+        <button type="button" onClick={onOpenCustomer} disabled={!customer} style={{ ...smallButton, opacity: customer ? 1 : 0.55 }}>
+          {!customer ? "Kart eşleşmedi" : foreignCustomer ? "Bilgi kartını aç" : "Müşteri kartını aç"}
         </button>
         <button type="button" onClick={onDismiss} style={smallGhostButton}>Kapat</button>
       </div>
@@ -5775,8 +5872,8 @@ const menuToggleLineBottomOpen = { top: 6, transform: "rotate(-45deg)" };
 const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, overflow: "hidden", transition: "transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease" };
 const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
 const menuButtonCollapsed = { justifyContent: "center", padding: 10 };
-const menuIcon = { width: 32, height: 32, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
-const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover" };
+const menuIcon = { width: 34, height: 34, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 11, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
+const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover", transform: "scale(1.72)", transformOrigin: "center", filter: "drop-shadow(0 5px 10px rgba(226,68,7,0.12))" };
 const menuButtonLabel = { minWidth: 0, whiteSpace: "nowrap", opacity: 1, transform: "translateX(0)", transition: "opacity 180ms ease 60ms, transform 220ms cubic-bezier(0.22, 1, 0.36, 1) 40ms" };
 const menuButtonLabelCollapsed = { opacity: 0, transform: "translateX(-8px)", transitionDelay: "0ms", pointerEvents: "none" };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
