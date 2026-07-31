@@ -5773,7 +5773,9 @@ function AssignmentOverview({ employees, customers, exactPoolCount, exactRepStat
 }
 
 function CalendarView({ customers, users, profile, setSelectedCustomer }) {
+  const [sortMode, setSortMode] = useState("date_asc");
   const userMap = new Map((users || []).map((user) => [user.id, user]));
+  const sortDirection = sortMode === "date_desc" ? -1 : 1;
   const grouped = customers.reduce((acc, customer) => {
     const key = formatDate(customer.appointment_date);
     if (!acc[key]) acc[key] = [];
@@ -5781,18 +5783,26 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
     return acc;
   }, {});
   const days = Object.entries(grouped).sort(([, firstDayCustomers], [, secondDayCustomers]) =>
-    new Date(firstDayCustomers[0].appointment_date) - new Date(secondDayCustomers[0].appointment_date)
+    (new Date(firstDayCustomers[0].appointment_date) - new Date(secondDayCustomers[0].appointment_date)) * sortDirection
   );
 
   return (
     <div style={panelCard}>
-      <h2 style={sectionTitle}>Takvim</h2>
+      <div style={tableTitleRow}>
+        <h2 style={sectionTitle}>Takvim</h2>
+        <select value={sortMode} onChange={(event) => setSortMode(event.target.value)} style={{ ...toolbarSelect, maxWidth: 260 }}>
+          <option value="date_asc">Tarih sıralaması: Yakın tarih</option>
+          <option value="date_desc">Tarih sıralaması: Uzak tarih</option>
+        </select>
+      </div>
       {days.length === 0 && <p style={mutedText}>Planlanmış geri arama veya randevu yok.</p>}
       <div style={calendarGrid}>
         {days.map(([day, dayCustomers]) => (
           <div key={day} style={calendarDay}>
             <h3>{day}</h3>
-            {dayCustomers.map((customer) => (
+            {[...dayCustomers].sort((first, second) =>
+              (new Date(first.appointment_date) - new Date(second.appointment_date)) * sortDirection
+            ).map((customer) => (
               <button
                 key={customer.id}
                 type="button"
@@ -5801,7 +5811,7 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
               >
                 <strong>{customer.first_name} {customer.last_name}</strong>
                 <span>{formatTime(customer.appointment_date)} - {statusLabel(customer.status)}</span>
-                {profile?.role === "boss" && (
+                {["boss", "manager"].includes(profile?.role) && (
                   <small style={calendarItemMeta}>
                     Alan rep: {userMap.get(customer.assigned_employee)?.full_name || userMap.get(customer.assigned_employee)?.email || "Atanmamis"}
                   </small>
@@ -5890,10 +5900,10 @@ const menuToggleLineBottomOpen = { top: 6, transform: "rotate(-45deg)" };
 const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, overflow: "hidden", transition: "transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease" };
 const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
 const menuButtonCollapsed = { justifyContent: "center", padding: 8, minHeight: 52, gap: 0 };
-const menuIcon = { width: 36, height: 36, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 12, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "hidden" };
+const menuIcon = { width: 38, height: 38, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 12, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "visible" };
 const menuIconWithImage = { background: "transparent", border: "0 solid transparent", boxShadow: "none" };
 const menuIconActive = { filter: "drop-shadow(0 6px 12px rgba(255,255,255,0.16))" };
-const menuIconImage = { width: "100%", height: "100%", display: "block", objectFit: "cover", objectPosition: "center", transform: "scale(2.22)", transformOrigin: "center", filter: "drop-shadow(0 5px 10px rgba(226,68,7,0.13))" };
+const menuIconImage = { width: 30, height: 30, display: "block", objectFit: "contain", objectPosition: "center", transform: "none", transformOrigin: "center", filter: "drop-shadow(0 4px 8px rgba(226,68,7,0.12))" };
 const menuButtonLabel = { minWidth: 0, whiteSpace: "nowrap", opacity: 1, transform: "translateX(0)", transition: "opacity 180ms ease 60ms, transform 220ms cubic-bezier(0.22, 1, 0.36, 1) 40ms" };
 const menuButtonLabelCollapsed = { opacity: 0, transform: "translateX(-8px)", transitionDelay: "0ms", pointerEvents: "none" };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
