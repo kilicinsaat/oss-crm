@@ -82,7 +82,7 @@ const REP_NEGATIVE_CUSTOMER_STATUSES = new Set(["no_answer", "busy", "not_approv
 const APPOINTMENT_REMINDER_STATUSES = ["appointment", "contract_appointment"];
 const CALENDAR_REMINDER_STATUSES = ["callback", "appointment", "contract_appointment"];
 const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
-const REMOTE_CUSTOMER_COUNT_MODE = "planned";
+const REMOTE_CUSTOMER_COUNT_MODE = "exact";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
 const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
 const SESSION_STARTED_AT_KEY = "oss-crm-session-started-at";
@@ -4059,9 +4059,7 @@ function CustomerTable({
         ? rows || []
         : (rows || []).filter((customer) => inferCustomerGender(customer) === genderFilter);
       setRemoteRows(visibleRows);
-      setRemoteTotal(cleanSearch && visibleRows.length < pageSize
-        ? from + visibleRows.length
-        : Number.isFinite(count) ? count : from + visibleRows.length);
+      setRemoteTotal(Number.isFinite(count) ? count : from + visibleRows.length);
     }
 
     const refreshTimer = window.setTimeout(loadRemotePage, 120);
