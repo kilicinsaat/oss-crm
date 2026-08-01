@@ -3787,6 +3787,7 @@ function App() {
 
 function MenuButton({ icon, iconSrc, title, page, tone, activePage, setActivePage, onClickExtra, collapsed }) {
   const toneMap = menuIconTones[tone] || menuIconTones.default;
+  const isActive = activePage === page;
   return (
     <button
       onClick={() => {
@@ -3795,10 +3796,10 @@ function MenuButton({ icon, iconSrc, title, page, tone, activePage, setActivePag
       }}
       title={title}
       aria-label={title}
-      style={{ ...menuButton, ...(activePage === page ? menuButtonActive : {}), ...(collapsed ? menuButtonCollapsed : {}) }}
+      style={{ ...menuButton, ...(isActive ? menuButtonActive : {}), ...(collapsed ? menuButtonCollapsed : {}) }}
     >
-      <span style={{ ...menuIcon, ...(iconSrc ? menuIconWithImage : toneMap), ...(activePage === page ? menuIconActive : {}) }}>
-        {iconSrc ? <img src={iconSrc} alt="" aria-hidden="true" style={menuIconImage} /> : icon}
+      <span style={{ ...menuIcon, ...(iconSrc ? menuIconWithImage : toneMap), ...(isActive ? menuIconActive : {}) }}>
+        {iconSrc ? <img src={iconSrc} alt="" aria-hidden="true" style={{ ...menuIconImage, ...(isActive ? menuIconImageActive : {}) }} /> : icon}
       </span>
       <span style={{ ...menuButtonLabel, ...(collapsed ? menuButtonLabelCollapsed : {}) }}>{title}</span>
     </button>
@@ -5899,11 +5900,12 @@ const menuToggleLineMiddleOpen = { top: 6, opacity: 0, transform: "scaleX(0.4)" 
 const menuToggleLineBottomOpen = { top: 6, transform: "rotate(-45deg)" };
 const menuButton = { width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", marginBottom: 9, background: "#ffffff", color: brandRed, border: `1px solid ${brandRedBorder}`, borderRadius: 12, cursor: "pointer", textAlign: "left", fontWeight: 700, overflow: "hidden", transition: "transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease" };
 const menuButtonActive = { ...menuButton, background: brandRed, color: "#ffffff", border: `1px solid ${brandRed}`, boxShadow: "0 8px 22px rgba(226,68,7,0.24)" };
-const menuButtonCollapsed = { justifyContent: "center", padding: 7, minHeight: 54, gap: 0 };
-const menuIcon = { width: 44, height: 44, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 12, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "visible" };
+const menuButtonCollapsed = { justifyContent: "center", padding: 6, minHeight: 58, gap: 0 };
+const menuIcon = { width: 50, height: 50, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: 12, background: "transparent", color: brandRed, border: "1px solid transparent", fontSize: 17, fontWeight: 900, lineHeight: 1, overflow: "visible" };
 const menuIconWithImage = { background: "transparent", border: "0 solid transparent", boxShadow: "none" };
 const menuIconActive = { filter: "drop-shadow(0 6px 12px rgba(255,255,255,0.16))" };
-const menuIconImage = { width: 42, height: 42, display: "block", objectFit: "contain", objectPosition: "center", transform: "none", transformOrigin: "center", filter: "drop-shadow(0 4px 8px rgba(226,68,7,0.12))" };
+const menuIconImage = { width: 48, height: 48, display: "block", objectFit: "contain", objectPosition: "center", transform: "none", transformOrigin: "center", filter: "drop-shadow(0 4px 8px rgba(226,68,7,0.12))" };
+const menuIconImageActive = { filter: "brightness(0) invert(1) drop-shadow(0 4px 8px rgba(255,255,255,0.18))" };
 const menuButtonLabel = { minWidth: 0, whiteSpace: "nowrap", opacity: 1, transform: "translateX(0)", transition: "opacity 180ms ease 60ms, transform 220ms cubic-bezier(0.22, 1, 0.36, 1) 40ms" };
 const menuButtonLabelCollapsed = { opacity: 0, transform: "translateX(-8px)", transitionDelay: "0ms", pointerEvents: "none" };
 const logoutButton = { padding: "12px 22px", borderRadius: 10, border: `1px solid ${brandRed}`, cursor: "pointer", fontWeight: 700, background: brandRed, color: "#ffffff" };
