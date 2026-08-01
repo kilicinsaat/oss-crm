@@ -1005,9 +1005,16 @@ function App() {
       if (cancelled) return;
       if (error) {
         console.error("Musteri ozeti okunamadi:", error);
+        if (["employee", "manager"].includes(profile?.role)) {
+          setOwnCustomerSummaryError("Rep rapor özeti okunamadı: " + (error?.message || "Bilinmeyen hata"));
+        }
         return;
       }
       setCustomerSummary(data || {});
+      if (["employee", "manager"].includes(profile?.role)) {
+        setOwnCustomerSummary(data || {});
+        setOwnCustomerSummaryError("");
+      }
     }
 
     const timer = window.setTimeout(refreshCustomerSummary, 250);
@@ -1017,112 +1024,7 @@ function App() {
       window.clearTimeout(timer);
       window.clearInterval(reconcileTimer);
     };
-  }, [summaryProfileId, customerDataVersion]);
-
-  useEffect(() => {
-    if (!profile?.id || !["employee", "manager"].includes(profile.role)) {
-      const resetTimer = window.setTimeout(() => {
-        setOwnCustomerSummary(null);
-        setOwnCustomerSummaryError("");
-      }, 0);
-      return () => window.clearTimeout(resetTimer);
-    }
-
-    let cancelled = false;
-
-    async function refreshOwnCustomerSummary() {
-      const profileIdForQuery = profile.id;
-      const now = new Date();
-      const tomorrowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-
-      async function exactCount(configureQuery) {
-        const result = await runWithRetry(() => {
-          const baseQuery = supabase
-            .from("customers")
-            .select("id", { count: "exact", head: true })
-            .eq("assigned_employee", profileIdForQuery);
-          return configureQuery ? configureQuery(baseQuery) : baseQuery;
-        }, 2);
-        if (result.error) throw result.error;
-        return Number(result.count) || 0;
-      }
-
-      try {
-        const [
-          total,
-          assigned,
-          freshAssigned,
-          noAnswer,
-          busy,
-          callback,
-          appointment,
-          contractAppointment,
-          meetingDone,
-          notApproved,
-          wrongNumber,
-          usingCount,
-          approvedStatus,
-          approvedFlag,
-          paid,
-          followups,
-          todayWork,
-        ] = await Promise.all([
-          exactCount(),
-          exactCount((query) => query.eq("status", "assigned")),
-          exactCount((query) => query.eq("status", "assigned").or(`last_action_by.is.null,last_action_by.neq.${profileIdForQuery}`)),
-          exactCount((query) => query.eq("status", "no_answer")),
-          exactCount((query) => query.eq("status", "busy")),
-          exactCount((query) => query.eq("status", "callback")),
-          exactCount((query) => query.eq("status", "appointment")),
-          exactCount((query) => query.eq("status", "contract_appointment")),
-          exactCount((query) => query.eq("status", "meeting_done")),
-          exactCount((query) => query.eq("status", "not_approved")),
-          exactCount((query) => query.eq("status", "wrong_number")),
-          exactCount((query) => query.eq("status", "using")),
-          exactCount((query) => query.eq("status", "approved")),
-          exactCount((query) => query.eq("approved", true)),
-          exactCount((query) => query.or("payment_received.eq.true,status.eq.paid")),
-          exactCount((query) => query.in("status", FOLLOW_UP_CUSTOMER_STATUSES)),
-          exactCount((query) => query.in("status", CALENDAR_REMINDER_STATUSES).lt("appointment_date", tomorrowStart.toISOString())),
-        ]);
-
-        if (cancelled) return;
-        setOwnCustomerSummary({
-          total,
-          assigned_total: total,
-          assigned,
-          fresh_assigned: freshAssigned,
-          no_answer: noAnswer,
-          busy,
-          callback,
-          appointment,
-          contract_appointment: contractAppointment,
-          meeting_done: meetingDone,
-          not_approved: notApproved,
-          wrong_number: wrongNumber,
-          using: usingCount,
-          approved: Math.max(approvedStatus, approvedFlag),
-          paid,
-          followups,
-          today_work: todayWork,
-          generated_at: new Date().toISOString(),
-        });
-        setOwnCustomerSummaryError("");
-      } catch (error) {
-        if (cancelled) return;
-        console.error("Rep musteri ozeti okunamadi:", error);
-        setOwnCustomerSummaryError("Rep rapor özeti okunamadı: " + (error?.message || "Bilinmeyen hata"));
-      }
-    }
-
-    const timer = window.setTimeout(refreshOwnCustomerSummary, 200);
-    const reconcileTimer = window.setInterval(refreshOwnCustomerSummary, REP_MONITOR_RECONCILE_INTERVAL);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-      window.clearInterval(reconcileTimer);
-    };
-  }, [profile?.id, profile?.role, customerDataVersion]);
+  }, [summaryProfileId, profile?.role, customerDataVersion]);
 
   useEffect(() => {
     if (!["boss", "manager"].includes(profile?.role)) return undefined;
