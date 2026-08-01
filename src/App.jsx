@@ -521,7 +521,7 @@ function statusBadge(status) {
     assigned: "#2563eb",
     called: "#f97316",
     no_answer: "#64748b",
-    busy: "#f59e0b",
+    busy: "#c2410c",
     callback: "#a855f7",
     appointment: "#eab308",
     contract_appointment: "#06b6d4",
@@ -549,7 +549,7 @@ function customerHeat(status) {
     assigned: { label: "Soğuk müşteri", color: "#60a5fa", background: "rgba(96,165,250,0.14)" },
     called: { label: "Ilık müşteri", color: "#fb923c", background: "rgba(251,146,60,0.14)" },
     no_answer: { label: "Ulaşılamadı", color: "#94a3b8", background: "rgba(148,163,184,0.14)" },
-    busy: { label: "Meşgul", color: "#fbbf24", background: "rgba(251,191,36,0.14)" },
+    busy: { label: "Meşgul", color: "#c2410c", background: "rgba(194,65,12,0.18)" },
     callback: { label: "Ilık müşteri", color: "#c084fc", background: "rgba(192,132,252,0.14)" },
     appointment: { label: "Sıcak müşteri", color: "#fbbf24", background: "rgba(251,191,36,0.14)" },
     contract_appointment: { label: "Çok sıcak", color: "#f97316", background: "rgba(249,115,22,0.14)" },
@@ -6034,7 +6034,7 @@ const statusMenuTone = {
   new: { background: "rgba(37,99,235,0.4)" },
   called: { background: "rgba(251,146,60,0.28)" },
   muted: { background: "rgba(71,85,105,0.35)" },
-  warn: { background: "rgba(245,158,11,0.3)" },
+  warn: { background: "rgba(194,65,12,0.32)" },
   using: { background: "rgba(20,184,166,0.28)" },
   callback: { background: "rgba(168,85,247,0.28)" },
   appointment: { background: "rgba(234,179,8,0.3)" },
@@ -6242,7 +6242,7 @@ const appointmentNoticeIcon = { width: 42, height: 42, display: "grid", placeIte
 const messageSetupNotice = { alignSelf: "center", justifySelf: "center", margin: 24, padding: 16, borderRadius: 8, background: "rgba(180,83,9,0.2)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", textAlign: "center" };
 const presenceVisuals = {
   online: { label: "Çevrimiçi", color: "#34d399" },
-  busy: { label: "Meşgul", color: "#fb923c" },
+  busy: { label: "Meşgul", color: "#c2410c" },
   offline: { label: "Çevrimdışı", color: "#64748b" },
 };
 const presenceBadge = { display: "inline-flex", alignItems: "center", gap: 6, marginTop: 6, color: "#cbd5e1", fontSize: 12, fontWeight: 700 };
