@@ -355,6 +355,16 @@ function formatTime(value) {
   return date.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatDateInputValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function formatLongDate(value) {
   if (!value) return "-";
   const date = new Date(value);
@@ -3902,6 +3912,7 @@ function CustomerTable({
   const [genderFilter, setGenderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dataFilter, setDataFilter] = useState("");
+  const [appointmentDateFilter, setAppointmentDateFilter] = useState("");
   const [sortMode, setSortMode] = useState(defaultSortMode);
   const [page, setPage] = useState(1);
   const [hiddenAfterAssignIds, setHiddenAfterAssignIds] = useState([]);
@@ -3923,7 +3934,7 @@ function CustomerTable({
       setHiddenAfterAssignIds([]);
     }, 0);
     return () => window.clearTimeout(resetTimer);
-  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, sortMode, remoteScopeKey, page, setSelectedIds, setBulkEmployee]);
+  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, page, setSelectedIds, setBulkEmployee]);
 
   useEffect(() => {
     if (!isRemote) return undefined;
@@ -3973,6 +3984,14 @@ function CustomerTable({
 
       if (statusFilter !== "all") query = query.eq("status", statusFilter);
       if (cleanDataFilter) query = query.ilike("batch_name", `%${cleanDataFilter}%`);
+      if (appointmentDateFilter) {
+        const selectedStart = new Date(`${appointmentDateFilter}T00:00:00`);
+        const selectedEnd = new Date(selectedStart);
+        selectedEnd.setDate(selectedStart.getDate() + 1);
+        query = query
+          .gte("appointment_date", selectedStart.toISOString())
+          .lt("appointment_date", selectedEnd.toISOString());
+      }
 
       if (cleanSearch) {
         if (exactPhoneSearch) {
@@ -4049,7 +4068,7 @@ function CustomerTable({
       cancelled = true;
       window.clearTimeout(refreshTimer);
     };
-  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, sortMode, debouncedSearchTerm, dataVersion, canManage]);
+  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, debouncedSearchTerm, dataVersion, canManage]);
 
   const searchedData = data
     .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
@@ -4071,7 +4090,10 @@ function CustomerTable({
     : filteredData;
   const showAppointmentSortOptions = Boolean(remoteScopeConfig.orderByAppointment)
     || dataFilteredData.some((customer) => customer.appointment_date);
-  const sortedData = [...dataFilteredData].sort((first, second) => {
+  const appointmentDateFilteredData = appointmentDateFilter
+    ? dataFilteredData.filter((customer) => formatDateInputValue(customer.appointment_date) === appointmentDateFilter)
+    : dataFilteredData;
+  const sortedData = [...appointmentDateFilteredData].sort((first, second) => {
     if (sortMode === "appointment_asc" || sortMode === "appointment_desc") {
       const firstAppointmentTime = new Date(first.appointment_date || 8640000000000000).getTime();
       const secondAppointmentTime = new Date(second.appointment_date || 8640000000000000).getTime();
@@ -4195,6 +4217,19 @@ function CustomerTable({
           }}
           style={{ ...toolbarSelect, minWidth: 220 }}
         />
+        {showAppointmentSortOptions && (
+          <input
+            type="date"
+            value={appointmentDateFilter}
+            onChange={(event) => {
+              setAppointmentDateFilter(event.target.value);
+              clearAssignmentHiding();
+              setPage(1);
+            }}
+            title="Takip / randevu tarihi seç"
+            style={{ ...toolbarSelect, minWidth: 170 }}
+          />
+        )}
         <select value={sortMode} onChange={(event) => { setSortMode(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
           {showAppointmentSortOptions && <option value="appointment_asc">Sıralama: Takip tarihi yakın</option>}
           {showAppointmentSortOptions && <option value="appointment_desc">Sıralama: Takip tarihi uzak</option>}
@@ -5758,14 +5793,20 @@ function AssignmentOverview({ employees, customers, exactPoolCount, exactRepStat
       </div>
       {employees.map((employee) => {
         const exactStats = exactRepStats?.get(employee.id);
-        const load = exactStats
+        const employeeCustomers = customers.filter((customer) => customer.assigned_employee === employee.id);
+        const totalLoad = exactStats
           ? Number(exactStats.total) || 0
-          : customers.filter((customer) => customer.assigned_employee === employee.id).length;
-        const isLight = load < suggestedLoad;
+          : employeeCustomers.length;
+        const freshLoad = exactStats
+          ? Number(exactStats.untouched) || 0
+          : employeeCustomers.filter(isFreshAssignedCustomer).length;
+        const isLight = totalLoad < suggestedLoad;
         return (
           <div key={employee.id} style={workloadRow}>
             <strong>{employee.full_name || employee.email}</strong>
-            <span style={isLight ? workloadAvailable : workloadBusy}>{load.toLocaleString("tr-TR")} müşteri {isLight ? "- uygun" : "- yoğun"}</span>
+            <span style={isLight ? workloadAvailable : workloadBusy}>
+              Yeni gelenler: {freshLoad.toLocaleString("tr-TR")} | Komple: {totalLoad.toLocaleString("tr-TR")} müşteri {isLight ? "- uygun" : "- yoğun"}
+            </span>
           </div>
         );
       })}
@@ -5775,9 +5816,13 @@ function AssignmentOverview({ employees, customers, exactPoolCount, exactRepStat
 
 function CalendarView({ customers, users, profile, setSelectedCustomer }) {
   const [sortMode, setSortMode] = useState("date_asc");
+  const [selectedDate, setSelectedDate] = useState("");
   const userMap = new Map((users || []).map((user) => [user.id, user]));
   const sortDirection = sortMode === "date_desc" ? -1 : 1;
-  const grouped = customers.reduce((acc, customer) => {
+  const visibleCustomers = selectedDate
+    ? customers.filter((customer) => formatDateInputValue(customer.appointment_date) === selectedDate)
+    : customers;
+  const grouped = visibleCustomers.reduce((acc, customer) => {
     const key = formatDate(customer.appointment_date);
     if (!acc[key]) acc[key] = [];
     acc[key].push(customer);
@@ -5791,10 +5836,19 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
     <div style={panelCard}>
       <div style={tableTitleRow}>
         <h2 style={sectionTitle}>Takvim</h2>
-        <select value={sortMode} onChange={(event) => setSortMode(event.target.value)} style={{ ...toolbarSelect, maxWidth: 260 }}>
-          <option value="date_asc">Tarih sıralaması: Yakın tarih</option>
-          <option value="date_desc">Tarih sıralaması: Uzak tarih</option>
-        </select>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(event) => setSelectedDate(event.target.value)}
+            title="Takvim tarihi seç"
+            style={{ ...toolbarSelect, maxWidth: 190 }}
+          />
+          <select value={sortMode} onChange={(event) => setSortMode(event.target.value)} style={{ ...toolbarSelect, maxWidth: 260 }}>
+            <option value="date_asc">Tarih sıralaması: Yakın tarih</option>
+            <option value="date_desc">Tarih sıralaması: Uzak tarih</option>
+          </select>
+        </div>
       </div>
       {days.length === 0 && <p style={mutedText}>Planlanmış geri arama veya randevu yok.</p>}
       <div style={calendarGrid}>
