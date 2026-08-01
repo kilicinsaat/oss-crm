@@ -759,6 +759,8 @@ function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [customerSummary, setCustomerSummary] = useState(null);
+  const [ownCustomerSummary, setOwnCustomerSummary] = useState(null);
+  const [ownCustomerSummaryError, setOwnCustomerSummaryError] = useState("");
   const [bossLiveReport, setBossLiveReport] = useState(null);
   const [bossLiveReportError, setBossLiveReportError] = useState("");
   const [customerDataVersion, setCustomerDataVersion] = useState(0);
@@ -1016,6 +1018,111 @@ function App() {
       window.clearInterval(reconcileTimer);
     };
   }, [summaryProfileId, customerDataVersion]);
+
+  useEffect(() => {
+    if (!profile?.id || !["employee", "manager"].includes(profile.role)) {
+      const resetTimer = window.setTimeout(() => {
+        setOwnCustomerSummary(null);
+        setOwnCustomerSummaryError("");
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
+    }
+
+    let cancelled = false;
+
+    async function refreshOwnCustomerSummary() {
+      const profileIdForQuery = profile.id;
+      const now = new Date();
+      const tomorrowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+      async function exactCount(configureQuery) {
+        const result = await runWithRetry(() => {
+          const baseQuery = supabase
+            .from("customers")
+            .select("id", { count: "exact", head: true })
+            .eq("assigned_employee", profileIdForQuery);
+          return configureQuery ? configureQuery(baseQuery) : baseQuery;
+        }, 2);
+        if (result.error) throw result.error;
+        return Number(result.count) || 0;
+      }
+
+      try {
+        const [
+          total,
+          assigned,
+          freshAssigned,
+          noAnswer,
+          busy,
+          callback,
+          appointment,
+          contractAppointment,
+          meetingDone,
+          notApproved,
+          wrongNumber,
+          usingCount,
+          approvedStatus,
+          approvedFlag,
+          paid,
+          followups,
+          todayWork,
+        ] = await Promise.all([
+          exactCount(),
+          exactCount((query) => query.eq("status", "assigned")),
+          exactCount((query) => query.eq("status", "assigned").or(`last_action_by.is.null,last_action_by.neq.${profileIdForQuery}`)),
+          exactCount((query) => query.eq("status", "no_answer")),
+          exactCount((query) => query.eq("status", "busy")),
+          exactCount((query) => query.eq("status", "callback")),
+          exactCount((query) => query.eq("status", "appointment")),
+          exactCount((query) => query.eq("status", "contract_appointment")),
+          exactCount((query) => query.eq("status", "meeting_done")),
+          exactCount((query) => query.eq("status", "not_approved")),
+          exactCount((query) => query.eq("status", "wrong_number")),
+          exactCount((query) => query.eq("status", "using")),
+          exactCount((query) => query.eq("status", "approved")),
+          exactCount((query) => query.eq("approved", true)),
+          exactCount((query) => query.or("payment_received.eq.true,status.eq.paid")),
+          exactCount((query) => query.in("status", FOLLOW_UP_CUSTOMER_STATUSES)),
+          exactCount((query) => query.in("status", CALENDAR_REMINDER_STATUSES).lt("appointment_date", tomorrowStart.toISOString())),
+        ]);
+
+        if (cancelled) return;
+        setOwnCustomerSummary({
+          total,
+          assigned_total: total,
+          assigned,
+          fresh_assigned: freshAssigned,
+          no_answer: noAnswer,
+          busy,
+          callback,
+          appointment,
+          contract_appointment: contractAppointment,
+          meeting_done: meetingDone,
+          not_approved: notApproved,
+          wrong_number: wrongNumber,
+          using: usingCount,
+          approved: Math.max(approvedStatus, approvedFlag),
+          paid,
+          followups,
+          today_work: todayWork,
+          generated_at: new Date().toISOString(),
+        });
+        setOwnCustomerSummaryError("");
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Rep musteri ozeti okunamadi:", error);
+        setOwnCustomerSummaryError("Rep rapor özeti okunamadı: " + (error?.message || "Bilinmeyen hata"));
+      }
+    }
+
+    const timer = window.setTimeout(refreshOwnCustomerSummary, 200);
+    const reconcileTimer = window.setInterval(refreshOwnCustomerSummary, REP_MONITOR_RECONCILE_INTERVAL);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.clearInterval(reconcileTimer);
+    };
+  }, [profile?.id, profile?.role, customerDataVersion]);
 
   useEffect(() => {
     if (!["boss", "manager"].includes(profile?.role)) return undefined;
@@ -1584,6 +1691,8 @@ function App() {
     setActivePage("dashboard");
     setCustomerFilter("all");
     setCustomerSummary(null);
+    setOwnCustomerSummary(null);
+    setOwnCustomerSummaryError("");
     setBossLiveReport(null);
     setBossLiveReportError("");
   }
@@ -2977,9 +3086,14 @@ function App() {
   const profileFullName = profile?.full_name || "";
   const profileEmail = profile?.email || "";
   const isManagementProfile = ["boss", "manager"].includes(profileRole);
-  const customersStillLoading = customerSummary === null;
+  const metricSummary = profileRole === "employee" ? ownCustomerSummary || customerSummary : customerSummary;
+  const customersStillLoading = metricSummary === null;
   const customerMetric = (key, fallback = 0) => {
-    const value = customerSummary?.[key];
+    const value = metricSummary?.[key];
+    return value === null || value === undefined ? fallback : Number(value) || 0;
+  };
+  const ownCustomerMetric = (key, fallback = 0) => {
+    const value = ownCustomerSummary?.[key];
     return value === null || value === undefined ? fallback : Number(value) || 0;
   };
   const employees = users.filter((user) => ["employee", "manager"].includes(user.role));
@@ -3022,6 +3136,11 @@ function App() {
   const todayWorkItems = calendarCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
   const reportCustomers = isManagementProfile ? customers : visibleCustomers;
   const bossReportSummary = isManagementProfile ? bossLiveReport?.summary : null;
+  const reportSummary = isManagementProfile ? bossReportSummary : metricSummary;
+  const reportMetric = (key, fallback = 0) => {
+    const value = reportSummary?.[key];
+    return value === null || value === undefined ? fallback : Number(value) || 0;
+  };
   const liveRepStatsById = new Map((bossLiveReport?.rep_stats || []).map((item) => [item.id, item]));
   const repStats = users
     .filter((user) => user.role === "employee")
@@ -3042,16 +3161,34 @@ function App() {
       };
     })
     .sort((a, b) => b.stats.paid - a.stats.paid || b.stats.appointment - a.stats.appointment);
-  const reportStats = [
-    { key: "pool", title: "Havuz", value: bossReportSummary ? Number(bossReportSummary.pool) || 0 : reportCustomers.filter((customer) => customer.status === "pool").length },
-    { key: "no_answer", title: "Ulaşılamadı", value: bossReportSummary ? Number(bossReportSummary.no_answer) || 0 : reportCustomers.filter((customer) => customer.status === "no_answer").length },
-    { key: "callback", title: "Tekrar Aranacak", value: bossReportSummary ? Number(bossReportSummary.callback) || 0 : reportCustomers.filter((customer) => customer.status === "callback").length },
-    { key: "appointment", title: "Randevu", value: bossReportSummary ? Number(bossReportSummary.appointment) || 0 : reportCustomers.filter((customer) => customer.status === "appointment").length },
-    { key: "contract_appointment", title: "Sözleşmeli Randevu", value: bossReportSummary ? Number(bossReportSummary.contract_appointment) || 0 : reportCustomers.filter((customer) => customer.status === "contract_appointment").length },
-    { key: "not_approved", title: "Yapmayacak", value: bossReportSummary ? Number(bossReportSummary.not_approved) || 0 : reportCustomers.filter((customer) => customer.status === "not_approved").length },
-    { key: "wrong_number", title: "Numara yanlış", value: bossReportSummary ? Number(bossReportSummary.wrong_number) || 0 : reportCustomers.filter((customer) => customer.status === "wrong_number").length },
-    { key: "using", title: "Kullanıyor", value: bossReportSummary ? Number(bossReportSummary.using) || 0 : reportCustomers.filter((customer) => customer.status === "using").length },
-    { key: "paid", title: "Satış", value: bossReportSummary ? Number(bossReportSummary.paid) || 0 : reportCustomers.filter((customer) => customer.status === "paid").length },
+  const reportStats = isManagementProfile ? [
+    { key: "pool", title: "Havuz", value: reportMetric("pool", reportCustomers.filter((customer) => customer.status === "pool").length) },
+    { key: "assigned", title: "Atanmış", value: reportMetric("assigned_total", reportCustomers.filter((customer) => customer.assigned_employee).length) },
+    { key: "no_answer", title: "Ulaşılamadı", value: reportMetric("no_answer", reportCustomers.filter((customer) => customer.status === "no_answer").length) },
+    { key: "busy", title: "Meşgul", value: reportMetric("busy", reportCustomers.filter((customer) => customer.status === "busy").length) },
+    { key: "callback", title: "Tekrar Aranacak", value: reportMetric("callback", reportCustomers.filter((customer) => customer.status === "callback").length) },
+    { key: "appointment", title: "Randevu", value: reportMetric("appointment", reportCustomers.filter((customer) => customer.status === "appointment").length) },
+    { key: "contract_appointment", title: "Sözleşmeli Randevu", value: reportMetric("contract_appointment", reportCustomers.filter((customer) => customer.status === "contract_appointment").length) },
+    { key: "not_approved", title: "Yapmayacak", value: reportMetric("not_approved", reportCustomers.filter((customer) => customer.status === "not_approved").length) },
+    { key: "wrong_number", title: "Numara yanlış", value: reportMetric("wrong_number", reportCustomers.filter((customer) => customer.status === "wrong_number").length) },
+    { key: "using", title: "Kullanıyor", value: reportMetric("using", reportCustomers.filter((customer) => customer.status === "using").length) },
+    { key: "approved", title: "Onaylandı", value: reportMetric("approved", reportCustomers.filter((customer) => customer.approved).length) },
+    { key: "paid", title: "Satış", value: reportMetric("paid", reportCustomers.filter((customer) => customer.payment_received).length) },
+  ] : [
+    { key: "total", title: "Komple Müşterilerim", value: reportMetric("total", reportCustomers.length) },
+    { key: "fresh_assigned", title: "Yeni Gelenler", value: reportMetric("fresh_assigned", reportCustomers.filter(isFreshAssignedCustomer).length) },
+    { key: "followups", title: "Takip Gerekenler", value: reportMetric("followups", followUps.length) },
+    { key: "today_work", title: "Bugünkü İşler", value: reportMetric("today_work", todayWorkItems.length) },
+    { key: "no_answer", title: "Ulaşılamadı", value: reportMetric("no_answer", reportCustomers.filter((customer) => customer.status === "no_answer").length) },
+    { key: "busy", title: "Meşgul", value: reportMetric("busy", reportCustomers.filter((customer) => customer.status === "busy").length) },
+    { key: "callback", title: "Tekrar Aranacak", value: reportMetric("callback", reportCustomers.filter((customer) => customer.status === "callback").length) },
+    { key: "appointment", title: "Randevu", value: reportMetric("appointment", reportCustomers.filter((customer) => customer.status === "appointment").length) },
+    { key: "contract_appointment", title: "Sözleşmeli Randevu", value: reportMetric("contract_appointment", reportCustomers.filter((customer) => customer.status === "contract_appointment").length) },
+    { key: "not_approved", title: "Yapmayacak", value: reportMetric("not_approved", reportCustomers.filter((customer) => customer.status === "not_approved").length) },
+    { key: "wrong_number", title: "Numara yanlış", value: reportMetric("wrong_number", reportCustomers.filter((customer) => customer.status === "wrong_number").length) },
+    { key: "using", title: "Kullanıyor", value: reportMetric("using", reportCustomers.filter((customer) => customer.status === "using").length) },
+    { key: "approved", title: "Onaylandı", value: reportMetric("approved", reportCustomers.filter((customer) => customer.approved).length) },
+    { key: "paid", title: "Satış", value: reportMetric("paid", reportCustomers.filter((customer) => customer.payment_received).length) },
   ];
   const dataStats = isManagementProfile && bossLiveReport?.data_stats
     ? bossLiveReport.data_stats.map((item) => ({
@@ -3064,8 +3201,9 @@ function App() {
     : getDataStats(reportCustomers);
   const totalCustomerCount = customerMetric("total", completeCustomers.length);
   const freshCustomerCount = profileRole === "manager"
-    ? ownNewIncomingCustomers.length
+    ? ownCustomerMetric("fresh_assigned", ownNewIncomingCustomers.length)
     : customerMetric("fresh_assigned", newIncomingCustomers.length);
+  const managerCustomerCount = ownCustomerMetric("total", managerCustomers.length);
   const assignedCustomerCount = customerMetric("assigned_total", visibleCustomers.filter((customer) => customer.assigned_employee).length);
   const poolCustomerCount = customerMetric("pool", visibleCustomers.filter((customer) => customer.status === "pool").length);
   const approvedCustomerCount = customerMetric("approved", visibleCustomers.filter((customer) => customer.approved).length);
@@ -3236,7 +3374,7 @@ function App() {
 
         {profile.role === "manager" && (
           <>
-            <MenuButton icon="◉" iconSrc={menuIconAssets.managerCustomers} title={`Müşterilerim (${managerCustomers.length.toLocaleString("tr-TR")})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
+            <MenuButton icon="◉" iconSrc={menuIconAssets.managerCustomers} title={`Müşterilerim (${managerCustomerCount.toLocaleString("tr-TR")})`} page="manager_customers" tone="customers" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
             <MenuButton icon="✦" iconSrc={menuIconAssets.managerNewCustomers} title={`Yeni Gelenler (${freshCustomerCount})`} page="rep_new" tone="new" activePage={activePage} setActivePage={setActivePage} collapsed={sidebarCollapsed} />
           </>
         )}
@@ -3313,7 +3451,7 @@ function App() {
             </div>
 
             {profile.role === "employee" && (
-              <RepDailyOverview customers={visibleCustomers} todayItems={todayWorkItems} onNavigate={setActivePage} />
+              <RepDailyOverview customers={visibleCustomers} todayItems={todayWorkItems} summary={metricSummary} onNavigate={setActivePage} />
             )}
 
             {profile.role === "employee" && (
@@ -3712,8 +3850,8 @@ function App() {
             repStats={repStats}
             dataStats={dataStats}
             totalCustomers={customerMetric("total", reportCustomers.length)}
-            liveReportError={bossLiveReportError}
-            generatedAt={bossLiveReport?.generated_at}
+            liveReportError={isManagementProfile ? bossLiveReportError : ownCustomerSummaryError}
+            generatedAt={isManagementProfile ? bossLiveReport?.generated_at : ownCustomerSummary?.generated_at}
           />
         )}
 
@@ -5100,7 +5238,7 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
             {generatedAt && <p style={mutedText}>Canlı özet: {formatDateTime(generatedAt)}</p>}
           </div>
         </div>
-        {liveReportError && isManagementProfile && <div style={messageSetupNotice}>{liveReportError}</div>}
+        {liveReportError && <div style={messageSetupNotice}>{liveReportError}</div>}
 
         <div style={chartList}>
           {reportStats.map((item) => {
@@ -5771,13 +5909,21 @@ function TodayWorkView({ todayItems, overdueItems }) {
   );
 }
 
-function RepDailyOverview({ customers, todayItems, onNavigate }) {
-  const noAnswer = customers.filter((customer) => customer.status === "no_answer").length;
-  const appointments = customers.filter((customer) => ["appointment", "contract_appointment"].includes(customer.status)).length;
-  const paid = customers.filter((customer) => customer.status === "paid").length;
-  const maxValue = Math.max(noAnswer, appointments, paid, todayItems.length, 1);
+function RepDailyOverview({ customers, todayItems, summary, onNavigate }) {
+  const exactMetric = (key, fallback = 0) => {
+    const value = summary?.[key];
+    return value === null || value === undefined ? fallback : Number(value) || 0;
+  };
+  const todayTotal = exactMetric("today_work", todayItems.length);
+  const noAnswer = exactMetric("no_answer", customers.filter((customer) => customer.status === "no_answer").length);
+  const appointments = exactMetric(
+    "appointment",
+    customers.filter((customer) => ["appointment", "contract_appointment"].includes(customer.status)).length
+  ) + exactMetric("contract_appointment", 0);
+  const paid = exactMetric("paid", customers.filter((customer) => customer.payment_received || customer.status === "paid").length);
+  const maxValue = Math.max(noAnswer, appointments, paid, todayTotal, 1);
   const metrics = [
-    { label: "Bugün sırada", value: todayItems.length, color: brandRed, page: "today_work", background: brandRedSoft },
+    { label: "Bugün sırada", value: todayTotal, color: brandRed, page: "today_work", background: brandRedSoft },
     { label: "Ulaşılamadı", value: noAnswer, color: brandRed, page: "rep_no_answer", background: brandRedSoft },
     { label: "Randevu", value: appointments, color: brandRed, page: "rep_appointment", background: brandRedSoft },
     { label: "Satış", value: paid, color: brandRed, page: "rep_paid", background: brandRedSoft },
@@ -5790,7 +5936,7 @@ function RepDailyOverview({ customers, todayItems, onNavigate }) {
           <h2 style={sectionTitle}>Günlük Görünüm</h2>
           <p style={mutedText}>Bugünkü iş yoğunluğun ve müşteri durumların.</p>
         </div>
-        <span style={dailyFocusBadge}>{todayItems.length ? "Öncelik: takipler" : "Planın temiz"}</span>
+        <span style={dailyFocusBadge}>{todayTotal ? "Öncelik: takipler" : "Planın temiz"}</span>
       </div>
       <div style={dailyMetricGrid}>
         {metrics.map((metric) => (
@@ -6209,15 +6355,22 @@ const reportIcon = { width: 34, height: 34, display: "grid", placeItems: "center
 const reportChartTitle = { flex: 1, minWidth: 0, color: brandRed };
 const reportFigure = { minWidth: 52, textAlign: "right", fontSize: 22, fontWeight: 900 };
 const reportVisuals = {
+  total: { icon: "◎", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   pool: { icon: "+", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  assigned: { icon: "→", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  fresh_assigned: { icon: "+", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  followups: { icon: "!", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  today_work: { icon: "☑", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   called: { icon: "✓", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   no_answer: { icon: "…", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  busy: { icon: "●", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   callback: { icon: "↶", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   appointment: { icon: "◦", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   contract_appointment: { icon: "▢", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   not_approved: { icon: "×", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   wrong_number: { icon: "!", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   using: { icon: "✓", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
+  approved: { icon: "✓", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
   paid: { icon: "₺", color: brandRed, background: brandRedSoft, border: brandRedBorder, iconBackground: "#ffffff", bar: brandRed },
 };
 const leaderRow = { display: "grid", gridTemplateColumns: "1fr 110px 110px 90px 90px", gap: 10, alignItems: "center", background: "#ffffff", color: brandRed, padding: 12, borderRadius: 8, marginTop: 10, border: `1px solid ${brandRedBorder}` };
