@@ -3692,6 +3692,7 @@ function App() {
             users={users}
             customers={customers}
             customerSummary={customerSummary}
+            customerDataVersion={customerDataVersion}
             liveReport={bossLiveReport}
             liveReportError={bossLiveReportError}
             onlineUserIds={onlineUserIds}
@@ -5158,7 +5159,7 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
   );
 }
 
-function EmployeesView({ profile, users, customers, customerSummary, liveReport, liveReportError, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff, showSystemToast }) {
+function EmployeesView({ profile, users, customers, customerSummary, customerDataVersion, liveReport, liveReportError, onlineUserIds, staffForm, setStaffForm, addStaff, deleteStaff, showSystemToast }) {
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedRep, setSelectedRep] = useState("all");
   const [datePreset, setDatePreset] = useState("today");
@@ -5167,6 +5168,9 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
   const [activityError, setActivityError] = useState("");
   const [repCustomers, setRepCustomers] = useState(() => customers.filter((customer) => customer.assigned_employee));
   const [availableCustomerCount, setAvailableCustomerCount] = useState(null);
+  const [distributionStats, setDistributionStats] = useState(new Map());
+  const [distributionStatsLoading, setDistributionStatsLoading] = useState(false);
+  const [distributionStatsError, setDistributionStatsError] = useState("");
   const [repCustomersLoading, setRepCustomersLoading] = useState(true);
   const [repCustomersError, setRepCustomersError] = useState("");
   const [clockNow, setClockNow] = useState(() => Date.now());
@@ -5177,6 +5181,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
   const [jettelSyncing, setJettelSyncing] = useState(false);
   const reps = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
   const liveRepStats = useMemo(() => new Map((liveReport?.rep_stats || []).map((item) => [item.id, item])), [liveReport]);
+  const exactDistributionStats = distributionStats.size ? distributionStats : liveRepStats;
   const customerMap = useMemo(() => new Map([...customers, ...repCustomers].map((customer) => [String(customer.id), customer])), [customers, repCustomers]);
   const userMap = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
 
@@ -5221,6 +5226,84 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
       supabase.removeChannel(channel);
     };
   }, [profile.id, profile.role]);
+
+  useEffect(() => {
+    if (!["boss", "manager"].includes(profile.role)) return undefined;
+    if (reps.length === 0) {
+      const resetTimer = window.setTimeout(() => {
+        setDistributionStats(new Map());
+        setDistributionStatsLoading(false);
+        setDistributionStatsError("");
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
+    }
+
+    let cancelled = false;
+
+    async function loadDistributionStats(showLoading = false) {
+      if (showLoading) setDistributionStatsLoading(true);
+      setDistributionStatsError("");
+
+      const nextStats = new Map();
+      const { count: availableCount, error: availableCountError } = await runWithRetry(() => supabase
+        .from("customers")
+        .select("id", { count: "exact", head: true })
+        .or("status.eq.pool,assigned_employee.is.null"), 3);
+
+      if (cancelled) return;
+      if (availableCountError) {
+        setDistributionStatsError("Dengeli dağıtım havuzu eksiksiz sayılamadı: " + (availableCountError.message || "Bağlantı hatası"));
+        if (showLoading) setDistributionStatsLoading(false);
+        return;
+      }
+      setAvailableCustomerCount(Number(availableCount) || 0);
+
+      const results = await Promise.all(reps.map(async (rep) => {
+        const [totalResult, freshResult] = await Promise.all([
+          runWithRetry(() => supabase
+            .from("customers")
+            .select("id", { count: "exact", head: true })
+            .eq("assigned_employee", rep.id), 3),
+          runWithRetry(() => supabase
+            .from("customers")
+            .select("id", { count: "exact", head: true })
+            .eq("assigned_employee", rep.id)
+            .eq("status", "assigned")
+            .or(`last_action_by.is.null,last_action_by.neq.${rep.id}`), 3),
+        ]);
+        return { rep, totalResult, freshResult };
+      }));
+
+      if (cancelled) return;
+
+      const failed = results.find((item) => item.totalResult.error || item.freshResult.error);
+      if (failed) {
+        const error = failed.totalResult.error || failed.freshResult.error;
+        setDistributionStatsError("Dengeli dağıtım rep yükleri eksiksiz sayılamadı: " + (error.message || "Bağlantı hatası"));
+        if (showLoading) setDistributionStatsLoading(false);
+        return;
+      }
+
+      results.forEach(({ rep, totalResult, freshResult }) => {
+        nextStats.set(rep.id, {
+          id: rep.id,
+          total: Number(totalResult.count) || 0,
+          untouched: Number(freshResult.count) || 0,
+        });
+      });
+      setDistributionStats(nextStats);
+      setDistributionStatsError("");
+      if (showLoading) setDistributionStatsLoading(false);
+    }
+
+    const refreshTimer = window.setTimeout(() => loadDistributionStats(true), 180);
+    const reconcileTimer = window.setInterval(() => loadDistributionStats(false), REP_MONITOR_RECONCILE_INTERVAL);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(refreshTimer);
+      window.clearInterval(reconcileTimer);
+    };
+  }, [profile.role, reps, customerDataVersion]);
 
   async function syncJettelExtensionStatus() {
     if (profile.role !== "boss" || jettelSyncing) return;
@@ -5494,10 +5577,12 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
 
         {activityError && <div style={messageSetupNotice}>{activityError}</div>}
         {repCustomersError && <div style={messageSetupNotice}>{repCustomersError}</div>}
+        {distributionStatsError && <div style={messageSetupNotice}>{distributionStatsError}</div>}
         {jettelExtensionsError && <div style={messageSetupNotice}>{jettelExtensionsError}</div>}
         {liveReportError && activeTab !== "extensions" && <div style={messageSetupNotice}>{liveReportError}</div>}
         {activityLoading && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
         {repCustomersLoading && <div style={syncNotice}>Tüm rep müşteri yükleri eksiksiz sayılıyor...</div>}
+        {distributionStatsLoading && <div style={syncNotice}>Dengeli dağıtım sayaçları canlı okunuyor...</div>}
 
         {activeTab === "overview" && (
           <>
@@ -5641,7 +5726,7 @@ function EmployeesView({ profile, users, customers, customerSummary, liveReport,
                 <div style={staffActions}><span style={roleBadge}>{roleName(user.role)}</span>{profile.role === "boss" && user.role === "employee" && <button type="button" onClick={() => deleteStaff(user)} style={deleteStaffButton}>Rep Sil</button>}</div>
               </div>
             ))}
-            <AssignmentOverview employees={reps} customers={repCustomers} exactPoolCount={liveReport?.summary?.available ?? availableCustomerCount ?? customerSummary?.pool} exactRepStats={liveRepStats} />
+            <AssignmentOverview employees={reps} customers={repCustomers} exactPoolCount={availableCustomerCount ?? liveReport?.summary?.available ?? customerSummary?.pool} exactRepStats={exactDistributionStats} />
           </>
         )}
       </section>
