@@ -6037,10 +6037,12 @@ const menuIconTones = {
 const appShell = {
   width: "100%",
   minWidth: 0,
+  height: "100vh",
   minHeight: "100vh",
   background: "#ffffff",
   color: appTextColor,
   display: "flex",
+  overflow: "hidden",
 };
 const sidebar = {
   background: "#ffffff",
@@ -6049,7 +6051,11 @@ const sidebar = {
   transition: "width 280ms cubic-bezier(0.22, 1, 0.36, 1), padding 280ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 280ms ease",
   flexShrink: 0,
   boxShadow: "10px 0 30px rgba(226,68,7,0.08)",
-  overflow: "hidden",
+  height: "100vh",
+  boxSizing: "border-box",
+  overflowX: "hidden",
+  overflowY: "auto",
+  overscrollBehavior: "contain",
   willChange: "width, padding",
 };
 const sidebarExpandedStyle = { width: 260, padding: 24, boxShadow: "14px 0 38px rgba(226,68,7,0.10)" };
@@ -6061,7 +6067,7 @@ const brandLogo = { display: "block", width: "100%", height: "auto" };
 const brandMarkFrame = { width: 46, height: 48, display: "grid", placeItems: "center", margin: "-4px auto 14px" };
 const brandMark = { display: "block", width: 42, height: "auto" };
 const sideEmail = { fontSize: 12, color: mutedRedText, margin: "6px 0 16px" };
-const mainArea = { flex: 1, minWidth: 0, minHeight: "100vh", padding: "24px 32px", overflowX: "hidden", background: "#ffffff" };
+const mainArea = { flex: 1, minWidth: 0, height: "100vh", minHeight: "100vh", padding: "24px 32px", boxSizing: "border-box", overflowX: "hidden", overflowY: "auto", background: "#ffffff" };
 const topbar = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 18, marginBottom: 24, padding: "15px 18px", borderRadius: 16, background: "#ffffff", border: `1px solid ${brandRedBorder}`, boxShadow: "0 12px 30px rgba(226,68,7,0.08)" };
 const topbarActions = { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" };
 const notificationButton = { padding: "10px 13px", borderRadius: 9, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer", fontWeight: 800 };
