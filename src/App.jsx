@@ -3232,7 +3232,7 @@ function App() {
         ))}
       </div>
 
-      <aside style={{ ...sidebar, ...(sidebarCollapsed ? sidebarCollapsedStyle : sidebarExpandedStyle) }}>
+      <aside className="app-sidebar-scroll" style={{ ...sidebar, ...(sidebarCollapsed ? sidebarCollapsedStyle : sidebarExpandedStyle) }}>
         <div style={sidebarTopRow}>
           <div style={{ ...brandBlock, ...(sidebarCollapsed ? brandBlockCollapsed : {}) }}>
             <img src="/oss-center-logo.png" alt="OSS Center" style={brandLogo} />
@@ -6056,6 +6056,8 @@ const sidebar = {
   overflowX: "hidden",
   overflowY: "auto",
   overscrollBehavior: "contain",
+  scrollbarWidth: "none",
+  msOverflowStyle: "none",
   willChange: "width, padding",
 };
 const sidebarExpandedStyle = { width: 260, padding: 24, boxShadow: "14px 0 38px rgba(226,68,7,0.10)" };
