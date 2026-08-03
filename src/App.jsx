@@ -82,7 +82,8 @@ const REP_NEGATIVE_CUSTOMER_STATUSES = new Set(["no_answer", "busy", "not_approv
 const APPOINTMENT_REMINDER_STATUSES = ["appointment", "contract_appointment"];
 const CALENDAR_REMINDER_STATUSES = ["callback", "appointment", "contract_appointment"];
 const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
-const REMOTE_CUSTOMER_COUNT_MODE = "exact";
+const REMOTE_CUSTOMER_COUNT_MODE = "planned";
+const CUSTOMER_STATUS_SETUP_HINT = "Supabase SQL Editor'da CUSTOMER_STATUS_LOG_SAVE_HARDENING.sql dosyasini bir kez calistir.";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
 const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
 const SESSION_STARTED_AT_KEY = "oss-crm-session-started-at";
@@ -275,15 +276,52 @@ function normalizePhone(value) {
   return digits.length >= 10 ? digits.slice(-10) : digits;
 }
 
+const TURKISH_SEARCH_CHAR_MAP = {
+  ç: "c",
+  ğ: "g",
+  ı: "i",
+  i: "i",
+  ö: "o",
+  ş: "s",
+  ü: "u",
+};
+
+function normalizeCustomerSearchText(value, { foldTurkish = true } = {}) {
+  const lowered = String(value || "")
+    .trim()
+    .toLocaleLowerCase("tr-TR")
+    .replace(/[%_,]/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!foldTurkish) return lowered.slice(0, 120);
+
+  return lowered
+    .replace(/[çğıiöşü]/g, (char) => TURKISH_SEARCH_CHAR_MAP[char] || char)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 120);
+}
+
 function normalizeCustomerSearch(value) {
   const rawValue = String(value || "").trim();
   if (!rawValue) return "";
   if (/^[\d\s()+-]+$/.test(rawValue)) return normalizePhone(rawValue);
-  return rawValue
-    .toLocaleLowerCase("tr-TR")
-    .replace(/[%_,]/g, " ")
-    .replace(/\s+/g, " ")
-    .slice(0, 80);
+  return normalizeCustomerSearchText(rawValue).slice(0, 80);
+}
+
+function customerSearchTokens(value) {
+  return normalizeCustomerSearch(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
+
+function remoteTextSearchTerms(value) {
+  const folded = normalizeCustomerSearchText(value).slice(0, 80);
+  const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
+  const tokens = folded.split(" ").filter((token) => token.length >= 2);
+  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2)));
 }
 
 function digitsOnly(value) {
@@ -322,6 +360,27 @@ function toDateTimeInputValue(value) {
   if (Number.isNaN(date.getTime())) return "";
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return offsetDate.toISOString().slice(0, 16);
+}
+
+function parseDateTimeInputValue(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return { iso: null, error: "Randevu tarihi ve saati zorunlu." };
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(rawValue)) {
+    return { iso: null, error: "Randevu tarihi/saat formati gecersiz. Tarih ve saat alanini yeniden sec." };
+  }
+  const [datePart, timePart] = rawValue.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour, minute] = timePart.split(":").map(Number);
+  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+  const isValid = date.getFullYear() === year
+    && date.getMonth() === month - 1
+    && date.getDate() === day
+    && date.getHours() === hour
+    && date.getMinutes() === minute;
+  if (!isValid || Number.isNaN(date.getTime())) {
+    return { iso: null, error: "Randevu tarihi veya saati gecersiz. Lutfen tekrar sec." };
+  }
+  return { iso: date.toISOString(), error: "" };
 }
 
 function formatDateTime(value) {
@@ -525,6 +584,31 @@ function statusLabel(status) {
   return labels[status] || status || "-";
 }
 
+function isMissingRpc(error, functionName) {
+  const message = error?.message || "";
+  return error?.code === "PGRST202"
+    || error?.code === "42883"
+    || message.includes(functionName)
+    || message.includes("Could not find the function");
+}
+
+function isCustomerStatusSetupError(error) {
+  const message = error?.message || "";
+  return error?.code === "23514"
+    || error?.code === "22P02"
+    || message.includes("invalid input value for enum")
+    || message.includes("customers_status_check")
+    || message.includes("customer_status");
+}
+
+function customerSaveErrorMessage(error, fallback = "Musteri kaydedilemedi.") {
+  if (!error) return fallback;
+  if (isCustomerStatusSetupError(error)) {
+    return `Musteri durumu veritabani tarafinda hazir degil. ${CUSTOMER_STATUS_SETUP_HINT}`;
+  }
+  return `${fallback} ${error.message || error.details || "Bilinmeyen hata"}`;
+}
+
 function statusBadge(status) {
   const colors = {
     pool: "#64748b",
@@ -632,9 +716,19 @@ function customerMatchesSearch(customer, term) {
       || digitsOnly(customer.tc_no).includes(rawDigits);
   }
 
-  return `${customer.first_name || ""} ${customer.last_name || ""} ${customer.email || ""} ${customer.phone || ""} ${customer.phone_2 || ""} ${customer.tc_no || ""} ${customer.batch_name || ""}`
-    .toLocaleLowerCase("tr-TR")
-    .includes(query);
+  const haystack = normalizeCustomerSearchText([
+    customer.first_name,
+    customer.last_name,
+    customer.last_name,
+    customer.first_name,
+    customer.email,
+    customer.phone,
+    customer.phone_2,
+    customer.tc_no,
+    customer.batch_name,
+  ].filter(Boolean).join(" "));
+  const tokens = customerSearchTokens(term);
+  return haystack.includes(query) || tokens.every((token) => haystack.includes(token));
 }
 
 function getDataStats(customers) {
@@ -1881,6 +1975,14 @@ function App() {
 
   async function updateCustomer(customerId, updates) {
     if (!profile) return false;
+    if (!customerId) {
+      alert("Musteri kaydedilemedi: secili musteri id bulunamadi.");
+      return false;
+    }
+    if (updates.status && !CUSTOMER_STATUSES.has(updates.status)) {
+      alert("Gecersiz musteri durumu secildi. Sayfayi yenileyip tekrar dene.");
+      return false;
+    }
     const targetCustomer = selectedCustomer && String(selectedCustomer.id) === String(customerId)
       ? selectedCustomer
       : customers.find((customer) => String(customer.id) === String(customerId));
@@ -1901,35 +2003,91 @@ function App() {
     const updateIdSet = new Set(customerIdsToUpdate.map(String));
     const beforeStatus = targetCustomer?.status || null;
     const becamePaid = updates.status === "paid" && beforeStatus !== "paid";
+    const hasInfoNote = Object.prototype.hasOwnProperty.call(updates, "info_note");
+    const logRows = customerIdsToUpdate.map((id) => {
+      const beforeCustomer = customers.find((customer) => String(customer.id) === String(id)) || (String(targetCustomer?.id) === String(id) ? targetCustomer : null);
+      return {
+        customer_id: id,
+        user_id: profile.id,
+        old_status: beforeCustomer?.status || null,
+        new_status: updates.status || beforeCustomer?.status || null,
+        note: hasInfoNote ? updates.info_note || "" : "",
+      };
+    });
 
-    const { count: updatedCount, error } = await runWithRetry(() =>
-      supabase
-        .from("customers")
-        .update({ ...updates, last_action_by: profile.id }, { count: "exact" })
-        .in("id", customerIdsToUpdate)
-    );
+    let updatedCustomers = [];
+    let logError = null;
+    let atomicSaveUsed = false;
 
-    if (error) {
-      const statusRuleError = error.code === "23514"
-        || error.message?.includes("invalid input value for enum")
-        || error.message?.includes("customers_status_check");
-      alert(statusRuleError
-        ? "Supabase musteri durumlari guncel degil. SQL Editor'da CUSTOMER_STATUS_UPGRADE.sql dosyasini bir kez calistir."
-        : "Musteri guncellenemedi: " + error.message);
-      return false;
+    if (updates.status) {
+      const { data: rpcCustomers, error: rpcError } = await runWithRetry(() =>
+        supabase.rpc("crm_save_customer_status", {
+          p_customer_ids: customerIdsToUpdate,
+          p_status: updates.status,
+          p_appointment_date: updates.appointment_date || null,
+          p_approved: Boolean(updates.approved),
+          p_payment_received: Boolean(updates.payment_received),
+          p_info_note: hasInfoNote ? updates.info_note || "" : null,
+          p_has_info_note: hasInfoNote,
+        }),
+        2
+      );
+
+      if (!rpcError) {
+        atomicSaveUsed = true;
+        updatedCustomers = rpcCustomers || [];
+      } else if (!isMissingRpc(rpcError, "crm_save_customer_status")) {
+        alert(customerSaveErrorMessage(rpcError));
+        return false;
+      }
     }
 
-    if (updatedCount === 0) {
-      alert("Musteri guncellenemedi: kayit bulunamadi veya bu islem icin yetki yok.");
-      return false;
-    }
+    if (!atomicSaveUsed) {
+      const { count: updatedCount, error } = await runWithRetry(() =>
+        supabase
+          .from("customers")
+          .update({ ...updates, last_action_by: profile.id }, { count: "exact" })
+          .in("id", customerIdsToUpdate)
+      );
 
-    const { data: updatedCustomers } = await runWithRetry(() =>
-      supabase
-        .from("customers")
-        .select(CUSTOMER_SELECT_COLUMNS)
-        .in("id", customerIdsToUpdate)
-    );
+      if (error) {
+        alert(customerSaveErrorMessage(error, "Musteri guncellenemedi."));
+        return false;
+      }
+
+      if (updatedCount === 0) {
+        alert("Musteri guncellenemedi: kayit bulunamadi veya bu islem icin yetki yok.");
+        return false;
+      }
+
+      try {
+        ({ error: logError } = await runWithRetry(() =>
+          supabase
+            .from("customer_logs")
+            .insert(logRows),
+          3
+        ));
+      } catch (requestError) {
+        logError = requestError;
+      }
+
+      if (logError) {
+        showSystemToast("Musteri kaydedildi, ancak gecmis yazilamadi. SQL patch gerekli olabilir.", "warning");
+      }
+
+      const { data: selectedRows, error: refreshError } = await runWithRetry(() =>
+        supabase
+          .from("customers")
+          .select(CUSTOMER_SELECT_COLUMNS)
+          .in("id", customerIdsToUpdate),
+        2
+      );
+
+      if (refreshError) {
+        showSystemToast("Musteri kaydedildi, ancak guncel kart yeniden okunamadi.", "warning");
+      }
+      updatedCustomers = selectedRows || [];
+    }
 
     const refreshedCustomers = updatedCustomers?.length
       ? updatedCustomers
@@ -1950,26 +2108,6 @@ function App() {
       return updatedCustomerMap.get(String(current.id)) || { ...current, ...updates, last_action_by: profile.id };
     });
 
-    let logError;
-    const logRows = customerIdsToUpdate.map((id) => {
-      const beforeCustomer = customers.find((customer) => String(customer.id) === String(id)) || (String(targetCustomer?.id) === String(id) ? targetCustomer : null);
-      return {
-        customer_id: id,
-        user_id: profile.id,
-        old_status: beforeCustomer?.status || null,
-        new_status: updates.status || beforeCustomer?.status || null,
-        note: updates.info_note || "",
-      };
-    });
-
-    try {
-      ({ error: logError } = await supabase
-        .from("customer_logs")
-        .insert(logRows));
-    } catch (requestError) {
-      logError = requestError;
-    }
-
     if (!logError) {
       const createdAt = new Date().toISOString();
       const visibleLogRows = logRows.map((row, index) => ({
@@ -1987,9 +2125,6 @@ function App() {
     }
 
     showSystemToast("Kaydedildi");
-    if (logError) {
-      showSystemToast("Musteri kaydedildi, ancak gecmis yazilamadi.", "warning");
-    }
     setCustomerDataVersion((version) => version + 1);
     return true;
   }
@@ -4043,7 +4178,14 @@ function CustomerTable({
         } else if (numericSearch) {
           query = query.ilike("search_text", `%${searchDigits}%`);
         } else {
-          query = query.ilike("search_text", `%${cleanSearch}%`);
+          const textFilters = remoteTextSearchTerms(debouncedSearchTerm).flatMap((term) => [
+            `search_text.ilike.%${term}%`,
+            `first_name.ilike.%${term}%`,
+            `last_name.ilike.%${term}%`,
+            `email.ilike.%${term}%`,
+            `batch_name.ilike.%${term}%`,
+          ]);
+          query = query.or(textFilters.join(","));
         }
       }
 
@@ -4473,8 +4615,16 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
       return;
     }
 
+    const parsedAppointment = needsFollowUpDate
+      ? parseDateTimeInputValue(appointmentDate)
+      : { iso: null, error: "" };
+    if (needsFollowUpDate && parsedAppointment.error) {
+      alert(parsedAppointment.error);
+      return;
+    }
+
     const updates = {
-      appointment_date: needsFollowUpDate ? appointmentDate || null : null,
+      appointment_date: needsFollowUpDate ? parsedAppointment.iso : null,
       status: detailStatus,
       approved: ["approved", "paid"].includes(detailStatus),
       payment_received: detailStatus === "paid",
@@ -4494,6 +4644,8 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
         setDetailNote("");
         closeCustomerModal();
       }
+    } catch (error) {
+      alert(customerSaveErrorMessage(error, "Musteri kaydedilemedi."));
     } finally {
       setSavingCustomer(false);
     }
