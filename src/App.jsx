@@ -4105,12 +4105,13 @@ function CustomerTable({
 
   useEffect(() => {
     const resetTimer = window.setTimeout(() => {
+      setPage(1);
       setSelectedIds([]);
       setBulkEmployee("");
       setHiddenAfterAssignIds([]);
     }, 0);
     return () => window.clearTimeout(resetTimer);
-  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, page, setSelectedIds, setBulkEmployee]);
+  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, setSelectedIds, setBulkEmployee]);
 
   useEffect(() => {
     if (!isRemote) return undefined;
@@ -4295,11 +4296,14 @@ function CustomerTable({
     return sortMode === "oldest" ? firstTime - secondTime : secondTime - firstTime;
   });
   const remoteVisibleRows = remoteRows.filter((customer) => !hiddenAfterAssignSet.has(customer.id));
-  const displayedTotal = isRemote ? remoteTotal : sortedData.length;
+  const useLocalFallbackRows = isRemote && Boolean(remoteError) && remoteVisibleRows.length === 0 && sortedData.length > 0;
+  const displayedTotal = isRemote && !useLocalFallbackRows ? remoteTotal : sortedData.length;
   const pageCount = Math.max(Math.ceil(displayedTotal / pageSize), 1);
   const currentPage = Math.min(page, pageCount);
   const pageData = isRemote
-    ? remoteVisibleRows
+    ? useLocalFallbackRows
+      ? sortedData.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+      : remoteVisibleRows
     : sortedData.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const exportRows = isRemote ? pageData : sortedData;
   const hasDisplayedRows = pageData.length > 0;
@@ -5668,6 +5672,14 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
     const appointments = logs.filter((log) => ["appointment", "contract_appointment"].includes(log.new_status)).length;
     const sales = logs.filter((log) => log.new_status === "paid").length;
     const untouched = assigned.filter(isFreshAssignedCustomer).length;
+    const delayed = assigned.filter((customer) => {
+      const reminderLate = customer.appointment_date
+        && ["callback", "appointment", "contract_appointment"].includes(customer.status)
+        && new Date(customer.appointment_date).getTime() < clockNow;
+      const assignedAt = customer.assigned_at ? new Date(customer.assigned_at) : null;
+      const untouchedLate = isFreshAssignedCustomer(customer) && assignedAt && clockNow - assignedAt.getTime() > 24 * 60 * 60 * 1000;
+      return reminderLate || untouchedLate;
+    }).length;
     const lastLog = logs[0];
     return {
       rep,
@@ -5678,10 +5690,11 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
       appointments,
       sales,
       untouched: exactStats ? Number(exactStats.untouched) || 0 : untouched,
+      delayed: exactStats ? Number(exactStats.delayed) || 0 : delayed,
       conversion: callActions ? Math.round((appointments / callActions) * 100) : 0,
       lastAction: lastLog?.created_at || null,
     };
-  }).sort((a, b) => b.logs.length - a.logs.length), [reps, activityLogs, repCustomers, liveRepStats]);
+  }).sort((a, b) => b.logs.length - a.logs.length), [reps, activityLogs, repCustomers, liveRepStats, clockNow]);
 
   const delayedCustomers = useMemo(() => repCustomers
     .filter((customer) => selectedRep === "all" || customer.assigned_employee === selectedRep)
@@ -5781,16 +5794,18 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
               <RepMetric label="Randevu" value={totalAppointments} tone="#fbbf24" />
               <RepMetric label="Negatif" value={totalNegative} tone="#f87171" />
               <RepMetric label="Satış" value={totalSales} tone="#34d399" />
-              <RepMetric label="İşlem bekleyen" value={totalUntouched} tone="#f87171" />
+              <RepMetric label="Yeni gelenler" value={totalUntouched} tone="#f87171" />
+              <RepMetric label="Geciken" value={totalDelayed} tone="#fb7185" />
             </div>
             <div style={repComparisonTable}>
               <div style={repComparisonHeader}>
-                <span>Çalışan</span><span>İşlem</span><span>Üzerindeki</span><span>Arama</span><span>Randevu</span><span>Negatif</span><span>Satış</span><span>Dönüşüm</span><span>Bekleyen</span><span>Son işlem</span>
+                <span>Çalışan</span><span>İşlem</span><span>Üzerindeki</span><span>Arama</span><span>Randevu</span><span>Negatif</span><span>Satış</span><span>Dönüşüm</span><span>Yeni gelen</span><span>Son işlem</span>
+                <span>Geciken</span>
               </div>
               {repRows.filter((row) => selectedRep === "all" || row.rep.id === selectedRep).map((row) => (
                 <button key={row.rep.id} type="button" style={repComparisonRow} onClick={() => { setSelectedRep(row.rep.id); setActiveTab("stream"); }}>
                   <span style={repTableIdentity}><ProfileAvatar user={row.rep} size={34} /><span><strong>{row.rep.full_name || row.rep.email}</strong><PresenceBadge user={row.rep} onlineUserIds={onlineUserIds} compact /></span></span>
-                  <strong>{row.logs.length}</strong><span>{row.assigned.toLocaleString("tr-TR")}</span><span>{row.callActions}</span><span>{row.appointments}</span><span style={{ color: row.negative ? "#fca5a5" : "#86efac" }}>{row.negative}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched}</span><small>{formatDateTime(row.lastAction)}</small>
+                  <strong>{row.logs.length}</strong><span>{row.assigned.toLocaleString("tr-TR")}</span><span>{row.callActions}</span><span>{row.appointments}</span><span style={{ color: row.negative ? "#fca5a5" : "#86efac" }}>{row.negative}</span><span>{row.sales}</span><span>%{row.conversion}</span><span style={{ color: row.untouched ? "#fca5a5" : "#86efac" }}>{row.untouched.toLocaleString("tr-TR")}</span><small>{formatDateTime(row.lastAction)}</small><span style={{ color: row.delayed ? "#fca5a5" : "#86efac" }}>{row.delayed.toLocaleString("tr-TR")}</span>
                 </button>
               ))}
             </div>
@@ -6100,11 +6115,23 @@ function AssignmentOverview({ employees, customers, exactPoolCount, exactRepStat
 function CalendarView({ customers, users, profile, setSelectedCustomer }) {
   const [sortMode, setSortMode] = useState("date_asc");
   const [selectedDate, setSelectedDate] = useState("");
+  const [statusFilter, setStatusFilter] = useState("appointments");
+  const [repFilter, setRepFilter] = useState("all");
   const userMap = new Map((users || []).map((user) => [user.id, user]));
+  const reps = (users || []).filter((user) => ["employee", "manager"].includes(user.role));
   const sortDirection = sortMode === "date_desc" ? -1 : 1;
-  const visibleCustomers = selectedDate
-    ? customers.filter((customer) => formatDateInputValue(customer.appointment_date) === selectedDate)
-    : customers;
+  const visibleCustomers = customers.filter((customer) => {
+    if (selectedDate && formatDateInputValue(customer.appointment_date) !== selectedDate) return false;
+    if (statusFilter === "appointments" && !APPOINTMENT_REMINDER_STATUSES.includes(customer.status)) return false;
+    if (statusFilter === "appointment" && customer.status !== "appointment") return false;
+    if (statusFilter === "contract_appointment" && customer.status !== "contract_appointment") return false;
+    if (statusFilter === "callback" && customer.status !== "callback") return false;
+    if (repFilter !== "all" && customer.assigned_employee !== repFilter) return false;
+    return true;
+  });
+  const appointmentTotal = visibleCustomers.filter((customer) => customer.status === "appointment").length;
+  const contractAppointmentTotal = visibleCustomers.filter((customer) => customer.status === "contract_appointment").length;
+  const callbackTotal = visibleCustomers.filter((customer) => customer.status === "callback").length;
   const grouped = visibleCustomers.reduce((acc, customer) => {
     const key = formatDate(customer.appointment_date);
     if (!acc[key]) acc[key] = [];
@@ -6118,7 +6145,10 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
   return (
     <div style={panelCard}>
       <div style={tableTitleRow}>
-        <h2 style={sectionTitle}>Takvim</h2>
+        <div>
+          <h2 style={sectionTitle}>Randevu Takvimi</h2>
+          <p style={mutedText}>Rep'lerin randevu olarak kaydettiği müşterileri tarih, saat ve rep bilgisiyle takip et.</p>
+        </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <input
             type="date"
@@ -6127,6 +6157,21 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
             title="Takvim tarihi seç"
             style={{ ...toolbarSelect, maxWidth: 190 }}
           />
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} style={{ ...toolbarSelect, maxWidth: 230 }}>
+            <option value="appointments">Randevular: Tümü</option>
+            <option value="appointment">Sadece Randevu</option>
+            <option value="contract_appointment">Sözleşmeli Randevu</option>
+            <option value="callback">Geri arama</option>
+            <option value="all">Tüm takipler</option>
+          </select>
+          {["boss", "manager"].includes(profile?.role) && (
+            <select value={repFilter} onChange={(event) => setRepFilter(event.target.value)} style={{ ...toolbarSelect, maxWidth: 230 }}>
+              <option value="all">Tüm repler</option>
+              {reps.map((rep) => (
+                <option key={rep.id} value={rep.id}>{rep.full_name || rep.email}</option>
+              ))}
+            </select>
+          )}
           <select value={sortMode} onChange={(event) => setSortMode(event.target.value)} style={{ ...toolbarSelect, maxWidth: 260 }}>
             <option value="date_asc">Tarih sıralaması: Yakın tarih</option>
             <option value="date_desc">Tarih sıralaması: Uzak tarih</option>
@@ -6134,6 +6179,12 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
         </div>
       </div>
       {days.length === 0 && <p style={mutedText}>Planlanmış geri arama veya randevu yok.</p>}
+      <div style={calendarSummaryGrid}>
+        <RepMetric label="Toplam randevu" value={appointmentTotal + contractAppointmentTotal} tone="#fbbf24" />
+        <RepMetric label="Randevu" value={appointmentTotal} tone="#fbbf24" />
+        <RepMetric label="Sözleşmeli" value={contractAppointmentTotal} tone="#06b6d4" />
+        <RepMetric label="Geri arama" value={callbackTotal} tone="#c084fc" />
+      </div>
       <div style={calendarGrid}>
         {days.map(([day, dayCustomers]) => (
           <div key={day} style={calendarDay}>
@@ -6149,11 +6200,13 @@ function CalendarView({ customers, users, profile, setSelectedCustomer }) {
               >
                 <strong>{customer.first_name} {customer.last_name}</strong>
                 <span>{formatTime(customer.appointment_date)} - {statusLabel(customer.status)}</span>
+                <small style={calendarItemMeta}>{formatPhoneDisplay(customer.phone)}</small>
                 {["boss", "manager"].includes(profile?.role) && (
                   <small style={calendarItemMeta}>
                     Alan rep: {userMap.get(customer.assigned_employee)?.full_name || userMap.get(customer.assigned_employee)?.email || "Atanmamis"}
                   </small>
                 )}
+                {customer.info_note && <small style={calendarItemMeta}>{String(customer.info_note).slice(0, 110)}</small>}
               </button>
             ))}
           </div>
@@ -6345,8 +6398,8 @@ const repTabActive = { ...repTabButton, background: brandRed, color: "white", bo
 const repMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12, marginBottom: 18 };
 const repMetricCard = { display: "grid", gap: 7, minHeight: 92, alignContent: "center", padding: 15, borderRadius: 12, border: "1px solid", background: "#ffffff" };
 const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
-const repComparisonHeader = { minWidth: 1120, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(8,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 11, fontWeight: 800 };
-const repComparisonRow = { width: "100%", minWidth: 1120, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(8,minmax(72px,.65fr)) minmax(135px,1fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", textAlign: "left" };
+const repComparisonHeader = { minWidth: 1210, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(8,minmax(72px,.65fr)) minmax(135px,1fr) minmax(78px,.65fr)", gap: 8, padding: "11px 13px", background: brandRed, color: "#ffffff", fontSize: 11, fontWeight: 800 };
+const repComparisonRow = { width: "100%", minWidth: 1210, display: "grid", gridTemplateColumns: "minmax(210px,1.6fr) repeat(8,minmax(72px,.65fr)) minmax(135px,1fr) minmax(78px,.65fr)", gap: 8, alignItems: "center", padding: "11px 13px", border: 0, borderBottom: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", textAlign: "left" };
 const repTableIdentity = { display: "flex", alignItems: "center", gap: 9, minWidth: 0 };
 const activityStream = { display: "grid", gap: 8, maxHeight: "68vh", overflowY: "auto", paddingRight: 4 };
 const activityStreamRow = { display: "grid", gridTemplateColumns: "145px minmax(140px,.8fr) minmax(180px,1fr) 150px minmax(180px,1.2fr)", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, border: `1px solid ${brandRedBorder}`, borderLeft: "4px solid", background: "#ffffff", minWidth: 830 };
@@ -6469,6 +6522,7 @@ const callNoticeClose = { width: 28, height: 28, border: "none", borderRadius: "
 const callNoticeMeta = { display: "grid", gap: 4, fontSize: 12, color: "rgba(255,255,255,0.84)" };
 const callNoticeActions = { display: "flex", gap: 8, flexWrap: "wrap" };
 const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginTop: 16 };
+const calendarSummaryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, margin: "14px 0 6px" };
 const calendarDay = { background: "#ffffff", color: brandRed, padding: 14, borderRadius: 14, border: `1px solid ${brandRedBorder}` };
 const calendarItem = { width: "100%", display: "grid", gap: 4, textAlign: "left", marginTop: 10, padding: 10, borderRadius: 10, border: `1px solid ${brandRedBorder}`, background: brandRedSoft, color: brandRed, cursor: "pointer" };
 const calendarItemMeta = { color: mutedRedText, fontSize: 12, opacity: 0.86 };
