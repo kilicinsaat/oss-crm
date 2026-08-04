@@ -23,12 +23,34 @@ create index if not exists customers_assignee_status_created_fast_idx
 create index if not exists customers_status_created_fast_idx
   on public.customers (status, created_at desc, id desc);
 
+create index if not exists customers_live_report_status_idx
+  on public.customers (status);
+
+create index if not exists customers_live_report_assignee_status_idx
+  on public.customers (assigned_employee, status);
+
+create index if not exists customers_live_report_appointment_idx
+  on public.customers (appointment_date, status)
+  where appointment_date is not null;
+
+create index if not exists customers_live_report_batch_idx
+  on public.customers (batch_name)
+  where batch_name is not null;
+
+create index if not exists customer_data_sources_customer_id_idx
+  on public.customer_data_sources (customer_id);
+
+create index if not exists customer_data_sources_batch_name_idx
+  on public.customer_data_sources (batch_name)
+  where batch_name is not null;
+
 create or replace function public.crm_live_reporting()
 returns jsonb
 language plpgsql
 stable
 security definer
 set search_path = public, pg_temp
+set statement_timeout = '45s'
 as $function$
 declare
   actor_role text;

@@ -83,6 +83,7 @@ const APPOINTMENT_REMINDER_STATUSES = ["appointment", "contract_appointment"];
 const CALENDAR_REMINDER_STATUSES = ["callback", "appointment", "contract_appointment"];
 const CUSTOMER_SELECT_COLUMNS = "id,first_name,last_name,email,phone,appointment_date,info_note,status,approved,payment_received,assigned_manager,assigned_employee,created_by,created_at,updated_at,batch_name,batch_page,assigned_at,last_action_by,website,address,tc_no,phone_2";
 const REMOTE_CUSTOMER_COUNT_MODE = "planned";
+const REMOTE_TEXT_SEARCH_COUNT_MODE = "estimated";
 const CUSTOMER_STATUS_SETUP_HINT = "Supabase SQL Editor'da CUSTOMER_STATUS_LOG_SAVE_HARDENING.sql dosyasini bir kez calistir.";
 const APP_VERSION_CHECK_INTERVAL = 60_000;
 const APP_VERSION_STORAGE_KEY = "oss-crm-app-version";
@@ -241,6 +242,30 @@ async function runWithRetry(operation, attempts = 3) {
   return { data: null, error: lastError };
 }
 
+function isStatementTimeoutError(error) {
+  const message = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`.toLocaleLowerCase("tr-TR");
+  return message.includes("statement timeout") || message.includes("canceling statement") || message.includes("query timeout");
+}
+
+function liveReportErrorMessage(error, hasSnapshot) {
+  const message = error?.message || "Bilinmeyen hata";
+  const setupMissing = error?.code === "PGRST202" || message.includes("crm_live_reporting");
+
+  if (setupMissing) {
+    return "Eksiksiz canlı rapor için Supabase SQL Editor'da LIVE_REPORTING.sql dosyasını bir kez çalıştır.";
+  }
+
+  if (isStatementTimeoutError(error)) {
+    return hasSnapshot
+      ? "Canlı rapor yenilemesi yoğunlukta gecikti; son başarılı özet korunuyor, arka planda tekrar denenecek."
+      : "Canlı rapor hazırlanıyor; veri yoğun olduğu için ilk okuma biraz uzun sürebilir.";
+  }
+
+  return hasSnapshot
+    ? `Canlı rapor yenilenemedi; son başarılı özet korunuyor. ${message}`
+    : `Canlı rapor özeti okunamadı: ${message}`;
+}
+
 async function loadUserNotes({
   userId,
   setMyNotes,
@@ -322,6 +347,17 @@ function remoteTextSearchTerms(value) {
   const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
   const tokens = folded.split(" ").filter((token) => token.length >= 2).slice(0, 3);
   return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 5);
+}
+
+function remoteNameSearchTerms(value) {
+  const folded = normalizeCustomerSearchText(value).slice(0, 80);
+  const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
+  const tokens = folded.split(" ").filter((token) => token.length >= 2).slice(0, 2);
+  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 4);
+}
+
+function postgrestIlikeValue(value) {
+  return String(value || "").replace(/[%,]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function digitsOnly(value) {
@@ -745,23 +781,35 @@ function inferCustomerGender(customer) {
   return "unknown";
 }
 
-function customerMatchesSearch(customer, term) {
+function customerMatchesSearch(customer, term, mode = "smart") {
   const query = normalizeCustomerSearch(term);
   if (!query) return true;
 
   const numericQuery = isNumericCustomerSearch(term);
-  if (numericQuery) {
+  if (mode === "phone" || numericQuery) {
     const rawDigits = digitsOnly(term);
+    if (rawDigits.length < 2) return false;
     const phoneQuery = normalizePhone(term);
     return [customer.phone, customer.phone_2].some((phone) => normalizePhone(phone).includes(phoneQuery))
       || digitsOnly(customer.tc_no).includes(rawDigits);
   }
 
+  const nameHaystack = normalizeCustomerSearchText([
+    customer.first_name,
+    customer.last_name,
+    customer.last_name,
+    customer.first_name,
+  ].filter(Boolean).join(" "));
+  if (mode === "name") {
+    const tokens = customerSearchTokens(term);
+    return nameHaystack.includes(query) || tokens.every((token) => nameHaystack.includes(token));
+  }
+
+  const dataHaystack = normalizeCustomerSearchText(customer.batch_name);
+  if (mode === "data") return dataHaystack.includes(query);
+
   const haystack = normalizeCustomerSearchText([
-    customer.first_name,
-    customer.last_name,
-    customer.last_name,
-    customer.first_name,
+    nameHaystack,
     customer.email,
     customer.phone,
     customer.phone_2,
@@ -961,6 +1009,7 @@ function App() {
   const selectedCustomerRelatedIdsRef = useRef(new Set());
   const usersRef = useRef([]);
   const customersRef = useRef([]);
+  const bossLiveReportRef = useRef(null);
   const selectedCustomerAccessRef = useRef({ readOnly: false, callId: "", reason: "" });
   const [saleCelebration, setSaleCelebration] = useState(null);
   const summaryProfileId = profile?.id || "";
@@ -1131,6 +1180,10 @@ function App() {
   }, [customers]);
 
   useEffect(() => {
+    bossLiveReportRef.current = bossLiveReport;
+  }, [bossLiveReport]);
+
+  useEffect(() => {
     if (!summaryProfileId) return undefined;
 
     let cancelled = false;
@@ -1166,8 +1219,12 @@ function App() {
 
     let cancelled = false;
     async function refreshBossLiveReport() {
-      const { data, error } = await runWithRetry(() => supabase.rpc("crm_live_reporting"), 2);
+      const { data, error } = await runWithRetry(() => supabase.rpc("crm_live_reporting"), 3);
       if (cancelled) return;
+      if (error) {
+        setBossLiveReportError(liveReportErrorMessage(error, Boolean(bossLiveReportRef.current?.generated_at)));
+        return;
+      }
       if (error) {
         const setupMissing = error.code === "PGRST202" || error.message?.includes("crm_live_reporting");
         setBossLiveReportError(setupMissing
@@ -4129,6 +4186,7 @@ function CustomerTable({
   const [genderFilter, setGenderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dataFilter, setDataFilter] = useState("");
+  const [searchMode, setSearchMode] = useState("smart");
   const [appointmentDateFilter, setAppointmentDateFilter] = useState("");
   const [sortMode, setSortMode] = useState(defaultSortMode);
   const [page, setPage] = useState(1);
@@ -4152,7 +4210,7 @@ function CustomerTable({
       setHiddenAfterAssignIds([]);
     }, 0);
     return () => window.clearTimeout(resetTimer);
-  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, setSelectedIds, setBulkEmployee]);
+  }, [searchTerm, searchMode, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, setSelectedIds, setBulkEmployee]);
 
   useEffect(() => {
     if (!isRemote) return undefined;
@@ -4164,7 +4222,7 @@ function CustomerTable({
       const cleanSearch = normalizeCustomerSearch(debouncedSearchTerm);
       const cleanDataFilter = normalizeCustomerSearch(dataFilter);
       const searchDigits = digitsOnly(debouncedSearchTerm);
-      const numericSearch = isNumericCustomerSearch(debouncedSearchTerm);
+      const numericSearch = searchMode === "phone" || isNumericCustomerSearch(debouncedSearchTerm);
       const exactPhoneSearch = numericSearch && normalizePhone(debouncedSearchTerm).length === 10;
 
       if (cleanSearch && cleanSearch.length < CUSTOMER_SEARCH_MIN_LENGTH) {
@@ -4175,9 +4233,17 @@ function CustomerTable({
         return;
       }
 
+      if (searchMode === "phone" && searchDigits.length < CUSTOMER_SEARCH_MIN_LENGTH) {
+        setRemoteRows([]);
+        setRemoteTotal(0);
+        setRemoteLoading(false);
+        setRemoteError("Telefon / TC araması için en az 3 rakam gir.");
+        return;
+      }
+
       let query = supabase
         .from("customers")
-        .select(CUSTOMER_SELECT_COLUMNS, { count: cleanSearch && !exactPhoneSearch ? "planned" : REMOTE_CUSTOMER_COUNT_MODE });
+        .select(CUSTOMER_SELECT_COLUMNS, { count: cleanSearch && !exactPhoneSearch ? REMOTE_TEXT_SEARCH_COUNT_MODE : REMOTE_CUSTOMER_COUNT_MODE });
 
       if (remoteScopeConfig.fixedAssignee) query = query.eq("assigned_employee", remoteScopeConfig.fixedAssignee);
       if (remoteScopeConfig.assignmentScope === "pool") query = query.is("assigned_employee", null);
@@ -4212,21 +4278,34 @@ function CustomerTable({
       }
 
       if (cleanSearch) {
-        if (exactPhoneSearch) {
+        if (searchMode === "data") {
+          query = query.ilike("batch_name", `%${postgrestIlikeValue(cleanSearch)}%`);
+        } else if (exactPhoneSearch) {
           const phoneKey = normalizePhone(debouncedSearchTerm);
           const phoneFilters = [`phone_key.eq.${phoneKey}`, `phone_2_key.eq.${phoneKey}`];
           if (searchDigits.length >= 11) phoneFilters.push(`search_text.ilike.%${searchDigits}%`);
           query = query.or(phoneFilters.join(","));
         } else if (numericSearch) {
           query = query.ilike("search_text", `%${searchDigits}%`);
+        } else if (searchMode === "name") {
+          const nameFilters = remoteNameSearchTerms(debouncedSearchTerm).flatMap((term) => {
+            const safeTerm = postgrestIlikeValue(term);
+            return [
+              `first_name.ilike.%${safeTerm}%`,
+              `last_name.ilike.%${safeTerm}%`,
+              `search_text.ilike.%${safeTerm}%`,
+            ];
+          });
+          query = query.or(nameFilters.join(","));
         } else {
-          const textFilters = remoteTextSearchTerms(debouncedSearchTerm).flatMap((term) => [
-            `search_text.ilike.%${term}%`,
-            `first_name.ilike.%${term}%`,
-            `last_name.ilike.%${term}%`,
-            `email.ilike.%${term}%`,
-            `batch_name.ilike.%${term}%`,
-          ]);
+          const textFilters = remoteTextSearchTerms(debouncedSearchTerm).flatMap((term) => {
+            const safeTerm = postgrestIlikeValue(term);
+            return [
+              `search_text.ilike.%${safeTerm}%`,
+              `first_name.ilike.%${safeTerm}%`,
+              `last_name.ilike.%${safeTerm}%`,
+            ];
+          });
           query = query.or(textFilters.join(","));
         }
       }
@@ -4289,11 +4368,11 @@ function CustomerTable({
       cancelled = true;
       window.clearTimeout(refreshTimer);
     };
-  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, debouncedSearchTerm, dataVersion, canManage]);
+  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, searchMode, debouncedSearchTerm, dataVersion, canManage]);
 
   const searchedData = data
     .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
-    .filter((customer) => customerMatchesSearch(customer, searchTerm));
+    .filter((customer) => customerMatchesSearch(customer, searchTerm, searchMode));
   const assigneeFilteredData = assigneeFilter === "all"
     ? searchedData
     : assigneeFilter === "pool"
@@ -4412,6 +4491,21 @@ function CustomerTable({
           }}
           style={{ ...searchInput, marginBottom: 0 }}
         />
+        <select
+          value={searchMode}
+          onChange={(event) => {
+            setSearchMode(event.target.value);
+            clearAssignmentHiding();
+            setPage(1);
+          }}
+          title="Arama tipini seç"
+          style={toolbarSelect}
+        >
+          <option value="smart">Arama tipi: Akıllı</option>
+          <option value="name">Arama tipi: İsim</option>
+          <option value="phone">Arama tipi: Telefon / TC</option>
+          <option value="data">Arama tipi: Data</option>
+        </select>
         {canManage && (
           <select value={assigneeFilter} onChange={(event) => { setAssigneeFilter(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
             <option value="all">Tüm sorumlular</option>
@@ -5402,6 +5496,7 @@ function MessagingView({ profile, users, messages, messageTarget, selectConversa
 function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers, liveReportError, generatedAt }) {
   const maxValue = Math.max(...reportStats.map((item) => item.value), 1);
   const isManagementProfile = ["boss", "manager"].includes(profile.role);
+  const hasLiveSnapshot = Boolean(generatedAt);
   return (
     <div style={reportsLayout}>
       <section style={panelCard}>
@@ -5413,7 +5508,7 @@ function ReportsView({ profile, reportStats, repStats, dataStats, totalCustomers
             {generatedAt && <p style={mutedText}>Canlı özet: {formatDateTime(generatedAt)}</p>}
           </div>
         </div>
-        {liveReportError && <div style={messageSetupNotice}>{liveReportError}</div>}
+        {liveReportError && <div style={hasLiveSnapshot ? liveReportSoftNotice : messageSetupNotice}>{liveReportError}</div>}
 
         <div style={chartList}>
           {reportStats.map((item) => {
@@ -5484,6 +5579,9 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
   const [distributionStatsError, setDistributionStatsError] = useState("");
   const [repCustomersLoading, setRepCustomersLoading] = useState(true);
   const [repCustomersError, setRepCustomersError] = useState("");
+  const [repCustomersSyncedAt, setRepCustomersSyncedAt] = useState(null);
+  const [activitySyncedAt, setActivitySyncedAt] = useState(null);
+  const [distributionStatsSyncedAt, setDistributionStatsSyncedAt] = useState(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [jettelExtensions, setJettelExtensions] = useState([]);
   const [jettelExtensionsLoading, setJettelExtensionsLoading] = useState(false);
@@ -5492,6 +5590,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
   const [jettelSyncing, setJettelSyncing] = useState(false);
   const reps = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
   const liveRepStats = useMemo(() => new Map((liveReport?.rep_stats || []).map((item) => [item.id, item])), [liveReport]);
+  const hasLiveReportSnapshot = Boolean(liveReport?.generated_at);
   const exactDistributionStats = distributionStats.size ? distributionStats : liveRepStats;
   const customerMap = useMemo(() => new Map([...customers, ...repCustomers].map((customer) => [String(customer.id), customer])), [customers, repCustomers]);
   const userMap = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
@@ -5564,7 +5663,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
       if (cancelled) return;
       if (availableCountError) {
         setDistributionStatsError("Dengeli dağıtım havuzu eksiksiz sayılamadı: " + (availableCountError.message || "Bağlantı hatası"));
-        if (showLoading) setDistributionStatsLoading(false);
+        setDistributionStatsLoading(false);
         return;
       }
       setAvailableCustomerCount(Number(availableCount) || 0);
@@ -5591,7 +5690,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
       if (failed) {
         const error = failed.totalResult.error || failed.freshResult.error;
         setDistributionStatsError("Dengeli dağıtım rep yükleri eksiksiz sayılamadı: " + (error.message || "Bağlantı hatası"));
-        if (showLoading) setDistributionStatsLoading(false);
+        setDistributionStatsLoading(false);
         return;
       }
 
@@ -5604,7 +5703,8 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
       });
       setDistributionStats(nextStats);
       setDistributionStatsError("");
-      if (showLoading) setDistributionStatsLoading(false);
+      setDistributionStatsSyncedAt(new Date().toISOString());
+      setDistributionStatsLoading(false);
     }
 
     const refreshTimer = window.setTimeout(() => loadDistributionStats(true), 180);
@@ -5657,6 +5757,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
         updated[existingIndex] = next;
         return updated;
       });
+      setRepCustomersSyncedAt(new Date().toISOString());
     }
 
     async function loadAllRepCustomers(showLoading = false) {
@@ -5689,6 +5790,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
           const uniqueRows = Array.from(new Map(rows.map((customer) => [String(customer.id), customer])).values());
           setRepCustomers(uniqueRows);
           setAvailableCustomerCount(Number(availableCount) || 0);
+          setRepCustomersSyncedAt(new Date().toISOString());
         }
       } catch (error) {
         if (!cancelled) setRepCustomersError("Rep müşteri yükleri eksiksiz okunamadı: " + (error.message || "Bağlantı hatası"));
@@ -5713,6 +5815,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
 
   useEffect(() => {
     let cancelled = false;
+    let activityRequestRunning = false;
     const liveLogs = [];
     const now = new Date();
     let start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -5722,6 +5825,8 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
     const end = datePreset === "yesterday" ? new Date(start.getTime() + 24 * 60 * 60 * 1000) : null;
 
     async function loadRepActivity() {
+      if (activityRequestRunning) return;
+      activityRequestRunning = true;
       setActivityLoading(true);
       setActivityError("");
       const allLogs = [];
@@ -5748,19 +5853,24 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
         beforeId = page[page.length - 1].id;
       }
 
-      if (cancelled) return;
+      if (cancelled) {
+        activityRequestRunning = false;
+        return;
+      }
       setActivityLoading(false);
+      activityRequestRunning = false;
       if (loadError) {
         setActivityError("Rep işlem kayıtları eksiksiz okunamadı: " + loadError.message);
-        setActivityLogs([]);
         return;
       }
       setActivityLogs(Array.from(
         new Map([...liveLogs, ...allLogs].map((log) => [String(log.id), log])).values()
       ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
+      setActivitySyncedAt(new Date().toISOString());
     }
 
     loadRepActivity();
+    const reconcileTimer = window.setInterval(loadRepActivity, REP_MONITOR_RECONCILE_INTERVAL);
     const activityChannel = supabase
       .channel(`rep-activity-${datePreset}`)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "customer_logs" }, (payload) => {
@@ -5768,10 +5878,12 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
         if (logTime < start || (end && logTime >= end)) return;
         liveLogs.push(payload.new);
         setActivityLogs((current) => [payload.new, ...current.filter((log) => log.id !== payload.new.id)]);
+        setActivitySyncedAt(new Date().toISOString());
       })
       .subscribe();
     return () => {
       cancelled = true;
+      window.clearInterval(reconcileTimer);
       supabase.removeChannel(activityChannel);
     };
   }, [datePreset]);
@@ -5836,6 +5948,11 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
       ? Array.from(liveRepStats.values()).reduce((sum, stats) => sum + (Number(stats.delayed) || 0), 0)
       : Number(liveRepStats.get(selectedRep)?.delayed) || 0
     : delayedCustomers.length;
+  const repMonitorSyncItems = [
+    ["İşlem akışı", activitySyncedAt, activityLoading],
+    ["Müşteri yükleri", repCustomersSyncedAt, repCustomersLoading],
+    ["Dağıtım sayaçları", distributionStatsSyncedAt, distributionStatsLoading],
+  ];
 
   async function updateJettelExtension(extension, profileId) {
     if (profile.role !== "boss") return;
@@ -5899,10 +6016,17 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
         {repCustomersError && <div style={messageSetupNotice}>{repCustomersError}</div>}
         {distributionStatsError && <div style={messageSetupNotice}>{distributionStatsError}</div>}
         {jettelExtensionsError && <div style={messageSetupNotice}>{jettelExtensionsError}</div>}
-        {liveReportError && activeTab !== "extensions" && <div style={messageSetupNotice}>{liveReportError}</div>}
-        {activityLoading && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
-        {repCustomersLoading && <div style={syncNotice}>Tüm rep müşteri yükleri eksiksiz sayılıyor...</div>}
-        {distributionStatsLoading && <div style={syncNotice}>Dengeli dağıtım sayaçları canlı okunuyor...</div>}
+        {liveReportError && activeTab !== "extensions" && <div style={hasLiveReportSnapshot ? liveReportSoftNotice : messageSetupNotice}>{liveReportError}</div>}
+        <div style={repMonitorStatusGrid}>
+          {repMonitorSyncItems.map(([label, syncedAt, loading]) => (
+            <span key={label} style={repMonitorStatusPill}>
+              {label}: {loading ? (syncedAt ? "arka planda yenileniyor" : "ilk okuma") : syncedAt ? `son okuma ${formatTime(syncedAt)}` : "sync bekleniyor"}
+            </span>
+          ))}
+        </div>
+        {activityLoading && activityLogs.length === 0 && <div style={syncNotice}>Rep işlem kayıtları yükleniyor...</div>}
+        {repCustomersLoading && repCustomers.length === 0 && <div style={syncNotice}>Tüm rep müşteri yükleri eksiksiz sayılıyor...</div>}
+        {distributionStatsLoading && distributionStats.size === 0 && <div style={syncNotice}>Dengeli dağıtım sayaçları canlı okunuyor...</div>}
 
         {activeTab === "overview" && (
           <>
@@ -6512,6 +6636,8 @@ const repCenterFilters = { display: "grid", gridTemplateColumns: "minmax(200px,1
 const repCenterTabs = { display: "flex", gap: 8, flexWrap: "wrap", margin: "22px 0 18px", paddingBottom: 12, borderBottom: `1px solid ${brandRedBorder}` };
 const repTabButton = { padding: "9px 13px", borderRadius: 9, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", fontWeight: 700 };
 const repTabActive = { ...repTabButton, background: brandRed, color: "white", borderColor: brandRed, boxShadow: "0 8px 20px rgba(226,68,7,0.22)" };
+const repMonitorStatusGrid = { display: "flex", flexWrap: "wrap", gap: 8, margin: "-4px 0 14px" };
+const repMonitorStatusPill = { padding: "7px 10px", borderRadius: 999, background: "#ffffff", border: `1px solid ${brandRedBorder}`, color: mutedRedText, fontSize: 12, fontWeight: 800 };
 const repMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12, marginBottom: 18 };
 const repMetricCard = { display: "grid", gap: 7, minHeight: 92, alignContent: "center", padding: 15, borderRadius: 12, border: "1px solid", background: "#ffffff" };
 const repComparisonTable = { overflowX: "auto", borderRadius: 12, border: `1px solid ${brandRedBorder}`, background: "#ffffff" };
@@ -6769,6 +6895,7 @@ const appointmentNoticeStack = { position: "fixed", right: 18, bottom: 18, zInde
 const appointmentNoticeCard = (level) => ({ width: "100%", display: "grid", gridTemplateColumns: "42px minmax(0,1fr) 24px", alignItems: "center", gap: 10, padding: 12, borderRadius: 12, border: level === "soon" ? "1px solid rgba(252,165,165,0.62)" : "1px solid rgba(251,191,36,0.5)", background: level === "soon" ? "linear-gradient(135deg,rgba(127,29,29,0.98),rgba(194,65,12,0.96))" : "linear-gradient(135deg,rgba(120,53,15,0.98),rgba(217,119,6,0.94))", color: "white", boxShadow: "0 18px 45px rgba(0,0,0,0.38)", cursor: "pointer", textAlign: "left" });
 const appointmentNoticeIcon = { width: 42, height: 42, display: "grid", placeItems: "center", borderRadius: 11, background: "rgba(255,255,255,0.16)", color: "#fff7ed", fontSize: 20, fontWeight: 900 };
 const messageSetupNotice = { alignSelf: "center", justifySelf: "center", margin: 24, padding: 16, borderRadius: 8, background: "rgba(180,83,9,0.2)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", textAlign: "center" };
+const liveReportSoftNotice = { alignSelf: "center", justifySelf: "center", margin: "16px 0 10px", padding: "10px 14px", borderRadius: 999, background: "rgba(255,247,237,0.92)", border: "1px solid rgba(251,146,60,0.3)", color: brandRedDark, textAlign: "center", fontWeight: 800, fontSize: 13 };
 const presenceVisuals = {
   online: { label: "Çevrimiçi", color: "#34d399" },
   busy: { label: "Meşgul", color: "#c2410c" },
