@@ -320,8 +320,8 @@ function customerSearchTokens(value) {
 function remoteTextSearchTerms(value) {
   const folded = normalizeCustomerSearchText(value).slice(0, 80);
   const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
-  const tokens = folded.split(" ").filter((token) => token.length >= 2);
-  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2)));
+  const tokens = folded.split(" ").filter((token) => token.length >= 2).slice(0, 3);
+  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 5);
 }
 
 function digitsOnly(value) {
@@ -582,6 +582,47 @@ function statusLabel(status) {
     paid: "Para Alındı",
   };
   return labels[status] || status || "-";
+}
+
+function extractCustomerTaggedInfo(note, label) {
+  const normalizedLabel = String(label || "").trim().toLocaleLowerCase("tr-TR");
+  const line = String(note || "").split(/\r?\n/).find((item) => {
+    const [key] = item.split(":");
+    return String(key || "").trim().toLocaleLowerCase("tr-TR") === normalizedLabel;
+  });
+  return line ? line.slice(line.indexOf(":") + 1).trim() : "";
+}
+
+function upsertCustomerTaggedInfo(note, entries = []) {
+  const cleanEntries = entries
+    .map(([label, value]) => [String(label || "").trim(), String(value || "").trim()])
+    .filter(([label]) => Boolean(label));
+  const labels = new Set(cleanEntries.map(([label]) => label.toLocaleLowerCase("tr-TR")));
+  const baseLines = String(note || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      const [key] = line.split(":");
+      return !labels.has(String(key || "").trim().toLocaleLowerCase("tr-TR"));
+    });
+  const taggedLines = cleanEntries
+    .filter(([, value]) => Boolean(value))
+    .map(([label, value]) => `${label}: ${value}`);
+  return [...baseLines, ...taggedLines].join("\n").trim();
+}
+
+function prependCustomerNoteLine(note, line) {
+  const cleanLine = String(line || "").trim();
+  const cleanNote = String(note || "").trim();
+  return [cleanLine, cleanNote].filter(Boolean).join("\n");
+}
+
+function nextBusinessAppointmentValue() {
+  const next = new Date();
+  next.setDate(next.getDate() + 1);
+  next.setHours(10, 0, 0, 0);
+  return toDateTimeInputValue(next.toISOString());
 }
 
 function isMissingRpc(error, functionName) {
@@ -4229,12 +4270,10 @@ function CustomerTable({
       setRemoteLoading(false);
 
       if (error) {
-        setRemoteRows([]);
-        setRemoteTotal(0);
         const timedOut = error.message?.includes("statement timeout") || error.message?.includes("canceling statement");
         setRemoteError(timedOut
-          ? "Arama zaman aşımına uğradı. Lütfen daha ayrıntılı bir arama yap."
-          : (error.message || "Müşteriler yüklenemedi."));
+          ? "Canlı liste yavaşladı; son iyi müşteri listesi korunuyor. Daha dar arama/filtre ile tekrar dene."
+          : `${error.message || "Müşteriler yüklenemedi."} Son iyi liste korunuyor.`);
         return;
       }
 
@@ -4546,11 +4585,13 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
   const [detailNote, setDetailNote] = useState("");
   const [notApprovedReason, setNotApprovedReason] = useState("");
   const [appointmentDate, setAppointmentDate] = useState(toDateTimeInputValue(selectedCustomer.appointment_date));
+  const [customerOccupation, setCustomerOccupation] = useState(extractCustomerTaggedInfo(selectedCustomer.info_note, "Meslek"));
+  const [customerResidence, setCustomerResidence] = useState(extractCustomerTaggedInfo(selectedCustomer.info_note, "Oturduğu yer"));
   const [savingCustomer, setSavingCustomer] = useState(false);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const [smsMessage, setSmsMessage] = useState(DEFAULT_SMS_MESSAGE);
   const [sendingSms, setSendingSms] = useState(false);
-  const needsAppointment = detailStatus === "appointment";
+  const needsAppointment = ["appointment", "contract_appointment"].includes(detailStatus);
   const needsFollowUpDate = needsAppointment;
   const heat = customerHeat(detailStatus);
   const callTone = customerCallStatusTone(customerCalls);
@@ -4639,8 +4680,15 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
       : detailStatus === "wrong_number"
         ? "Numara yanlış"
         : detailNote.trim();
+    const enrichedInfoNote = upsertCustomerTaggedInfo(
+      note || selectedCustomer.info_note || "",
+      [
+        ["Meslek", customerOccupation],
+        ["Oturduğu yer", customerResidence],
+      ]
+    );
 
-    if (note) updates.info_note = note;
+    if (enrichedInfoNote) updates.info_note = enrichedInfoNote;
     setSavingCustomer(true);
     try {
       const saved = await updateCustomer(selectedCustomer.id, updates);
@@ -4667,6 +4715,34 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
     saveCustomer();
   }
 
+  function prepareAppointmentAction(action) {
+    if (readOnly) return;
+    const nowText = formatDateTime(new Date().toISOString());
+    if (action === "reschedule") {
+      setDetailStatus(selectedCustomer.status === "contract_appointment" ? "contract_appointment" : "appointment");
+      setAppointmentDate(appointmentDate || nextBusinessAppointmentValue());
+      setDetailNote((value) => prependCustomerNoteLine(value, `Randevu ileri tarihe alındı - ${nowText}`));
+      return;
+    }
+    if (action === "cancel") {
+      setDetailStatus("callback");
+      setAppointmentDate("");
+      setDetailNote((value) => prependCustomerNoteLine(value, `Randevu iptal edildi - ${nowText}`));
+      return;
+    }
+    if (action === "arrived") {
+      setDetailStatus("meeting_done");
+      setAppointmentDate("");
+      setDetailNote((value) => prependCustomerNoteLine(value, `Randevu sonucu: müşteri geldi - ${nowText}`));
+      return;
+    }
+    if (action === "no_show") {
+      setDetailStatus("callback");
+      setAppointmentDate("");
+      setDetailNote((value) => prependCustomerNoteLine(value, `Randevu sonucu: müşteri gelmedi - ${nowText}`));
+    }
+  }
+
   const statusButtons = [
     ["assigned", "Yeni", "new"],
     ["no_answer", "Ulaşılamadı", "muted"],
@@ -4679,7 +4755,7 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
     ["using", "Kullanıyor", "using"],
     ["approved", "Onaylandı", "success"],
     ["paid", "Satış", "paid"],
-  ];
+  ].filter(([value]) => value !== "approved");
 
   return (
     <div
@@ -4824,6 +4900,47 @@ function CustomerModal({ selectedCustomer, closeCustomerModal, customerLogs, cus
               placeholder={detailStatus === "not_approved" ? "Gerekirse kısa bir açıklama ekleyin..." : "Bu işlem için yeni not bırakın..."}
               style={{ ...inputStyle, minHeight: 140, resize: "vertical", opacity: readOnly ? 0.7 : 1 }}
             />
+
+            <div style={customerInfoAutomationBox}>
+              <div>
+                <label style={fieldLabel}>Meslek</label>
+                <input
+                  type="text"
+                  value={customerOccupation}
+                  onChange={(event) => setCustomerOccupation(event.target.value)}
+                  disabled={readOnly}
+                  placeholder="Örn: Esnaf, memur, emekli..."
+                  style={{ ...inputStyle, marginBottom: 0, opacity: readOnly ? 0.7 : 1 }}
+                />
+              </div>
+              <div>
+                <label style={fieldLabel}>Oturduğu yer</label>
+                <input
+                  type="text"
+                  value={customerResidence}
+                  onChange={(event) => setCustomerResidence(event.target.value)}
+                  disabled={readOnly}
+                  placeholder="Örn: Sultanbeyli, Gebze..."
+                  style={{ ...inputStyle, marginBottom: 0, opacity: readOnly ? 0.7 : 1 }}
+                />
+              </div>
+            </div>
+
+            {(selectedCustomer.appointment_date || needsAppointment || ["callback", "meeting_done"].includes(detailStatus)) && (
+              <div style={appointmentActionBox}>
+                <div style={appointmentActionHeader}>
+                  <strong>Randevu işlemleri</strong>
+                  <span>{selectedCustomer.appointment_date ? `Mevcut: ${formatDateTime(selectedCustomer.appointment_date)}` : "Yeni randevu / takip"}</span>
+                </div>
+                <div style={appointmentActionGrid}>
+                  <button type="button" disabled={readOnly} onClick={() => prepareAppointmentAction("reschedule")} style={appointmentActionButton}>İleri tarihe al</button>
+                  <button type="button" disabled={readOnly} onClick={() => prepareAppointmentAction("cancel")} style={appointmentActionButton}>Randevu iptal</button>
+                  <button type="button" disabled={readOnly} onClick={() => prepareAppointmentAction("arrived")} style={appointmentActionButton}>Müşteri geldi</button>
+                  <button type="button" disabled={readOnly} onClick={() => prepareAppointmentAction("no_show")} style={appointmentActionButton}>Müşteri gelmedi</button>
+                </div>
+                <small style={appointmentActionHint}>Butonlar işlem notunu ve durumu hazırlar; kesin kayıt için Kaydet'e bas.</small>
+              </div>
+            )}
 
             {needsFollowUpDate && (
               <>
@@ -6443,6 +6560,12 @@ const statusMenuTone = {
 };
 const statusMenuActive = { outline: `2px solid ${brandRed}`, outlineOffset: 2 };
 const detailFormColumn = { background: "#ffffff", borderRadius: 14, border: `1px solid ${brandRedBorder}`, padding: 16 };
+const customerInfoAutomationBox = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 10, margin: "2px 0 12px" };
+const appointmentActionBox = { margin: "4px 0 12px", padding: 12, borderRadius: 12, background: brandRedSoft, border: `1px solid ${brandRedBorder}` };
+const appointmentActionHeader = { display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 10, color: brandRed };
+const appointmentActionGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 8 };
+const appointmentActionButton = { minHeight: 38, padding: "9px 10px", borderRadius: 9, border: `1px solid ${brandRedBorder}`, background: "#ffffff", color: brandRed, cursor: "pointer", fontWeight: 800 };
+const appointmentActionHint = { display: "block", marginTop: 9, color: mutedRedText, lineHeight: 1.4 };
 const duplicateWarning = { marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.38)", color: "#fde68a", fontSize: 13, lineHeight: 1.45 };
 const customerHeatBar = { height: 4, borderRadius: 999, marginBottom: 16, opacity: 0.95 };
 const customerSummary = { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 9, margin: "-4px 0 16px" };
