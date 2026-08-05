@@ -345,15 +345,23 @@ function customerSearchTokens(value) {
 function remoteTextSearchTerms(value) {
   const folded = normalizeCustomerSearchText(value).slice(0, 80);
   const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
-  const tokens = folded.split(" ").filter((token) => token.length >= 2).slice(0, 3);
-  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 5);
+  const tokens = [folded, original]
+    .flatMap((term) => term.split(" "))
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .slice(0, 6);
+  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 8);
 }
 
 function remoteNameSearchTerms(value) {
   const folded = normalizeCustomerSearchText(value).slice(0, 80);
   const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
-  const tokens = folded.split(" ").filter((token) => token.length >= 2).slice(0, 2);
-  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 4);
+  const tokens = [folded, original]
+    .flatMap((term) => term.split(" "))
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .slice(0, 6);
+  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 8);
 }
 
 function postgrestIlikeValue(value) {
