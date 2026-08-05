@@ -1010,6 +1010,9 @@ function App() {
   const usersRef = useRef([]);
   const customersRef = useRef([]);
   const bossLiveReportRef = useRef(null);
+  const customerRealtimeRowsRef = useRef([]);
+  const customerRealtimeDeleteIdsRef = useRef([]);
+  const customerRealtimeFlushTimerRef = useRef(null);
   const selectedCustomerAccessRef = useRef({ readOnly: false, callId: "", reason: "" });
   const [saleCelebration, setSaleCelebration] = useState(null);
   const summaryProfileId = profile?.id || "";
@@ -1260,10 +1263,29 @@ function App() {
     const canSeeAllCustomers = ["boss", "manager"].includes(profile.role);
     const channel = supabase.channel(`crm-customers-${profile.id}`);
 
+    function flushCustomerChanges() {
+      customerRealtimeFlushTimerRef.current = null;
+      const deleteIds = customerRealtimeDeleteIdsRef.current;
+      const rows = customerRealtimeRowsRef.current;
+      customerRealtimeDeleteIdsRef.current = [];
+      customerRealtimeRowsRef.current = [];
+
+      if (deleteIds.length > 0) removeCustomerRows(deleteIds);
+      if (rows.length > 0) upsertCustomerRows(rows);
+      if (deleteIds.length > 0 || rows.length > 0) setCustomerDataVersion((version) => version + 1);
+    }
+
+    function queueCustomerChanges({ rows = [], deleteIds = [] }) {
+      if (deleteIds.length > 0) customerRealtimeDeleteIdsRef.current.push(...deleteIds);
+      if (rows.length > 0) customerRealtimeRowsRef.current.push(...rows);
+      if (!customerRealtimeFlushTimerRef.current) {
+        customerRealtimeFlushTimerRef.current = window.setTimeout(flushCustomerChanges, 350);
+      }
+    }
+
     function handleCustomerChange(payload) {
       if (payload.eventType === "DELETE") {
-        removeCustomerRows(payload.old?.id);
-        setCustomerDataVersion((version) => version + 1);
+        queueCustomerChanges({ deleteIds: [payload.old?.id].filter(Boolean) });
         return;
       }
 
@@ -1271,13 +1293,12 @@ function App() {
       if (!customer?.id) return;
 
       if (canSeeAllCustomers || customer.assigned_employee === profile.id) {
-        upsertCustomerRows(customer);
-        setCustomerDataVersion((version) => version + 1);
+        queueCustomerChanges({ rows: [customer] });
         if (!canSeeAllCustomers && customer.assigned_employee === profile.id && customer.last_action_by !== profile.id) {
           showSystemToast("Yeni mÃ¼ÅŸteri atandÄ±");
         }
       } else {
-        removeCustomerRows(customer.id);
+        queueCustomerChanges({ deleteIds: [customer.id] });
       }
     }
 
@@ -1295,6 +1316,12 @@ function App() {
     channel.subscribe();
 
     return () => {
+      if (customerRealtimeFlushTimerRef.current) {
+        window.clearTimeout(customerRealtimeFlushTimerRef.current);
+        customerRealtimeFlushTimerRef.current = null;
+      }
+      customerRealtimeRowsRef.current = [];
+      customerRealtimeDeleteIdsRef.current = [];
       supabase.removeChannel(channel);
     };
   }, [profile]);
@@ -1781,6 +1808,12 @@ function App() {
     announcedAppointmentNoticeIdsRef.current = new Set();
     dismissedCallNoticeIdsRef.current = new Set();
     announcedCallNoticeIdsRef.current = new Set();
+    customerRealtimeRowsRef.current = [];
+    customerRealtimeDeleteIdsRef.current = [];
+    if (customerRealtimeFlushTimerRef.current) {
+      window.clearTimeout(customerRealtimeFlushTimerRef.current);
+      customerRealtimeFlushTimerRef.current = null;
+    }
     setMyNotes([]);
     setActivePage("dashboard");
     setCustomerFilter("all");
@@ -1795,6 +1828,17 @@ function App() {
     const cleanRows = (Array.isArray(rows) ? rows : [rows]).filter(Boolean);
     if (cleanRows.length === 0) return;
     setCustomers((current) => {
+      if (cleanRows.length === 1) {
+        const nextCustomer = cleanRows[0];
+        const nextId = String(nextCustomer.id);
+        const existingIndex = current.findIndex((customer) => String(customer.id) === nextId);
+        if (existingIndex >= 0) {
+          const nextRows = [...current];
+          nextRows[existingIndex] = { ...nextRows[existingIndex], ...nextCustomer };
+          return nextRows;
+        }
+        return [nextCustomer, ...current];
+      }
       const customerMap = new Map(current.map((customer) => [String(customer.id), customer]));
       cleanRows.forEach((customer) => customerMap.set(String(customer.id), customer));
       return Array.from(customerMap.values()).sort((first, second) =>
@@ -4224,7 +4268,7 @@ function CustomerTable({
   const [remoteTotal, setRemoteTotal] = useState(0);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState("");
-  const pageSize = 200;
+  const pageSize = 100;
   const isRemote = Boolean(remoteScope);
   const remoteScopeKey = JSON.stringify(remoteScope || {});
   const remoteScopeConfig = useMemo(() => JSON.parse(remoteScopeKey), [remoteScopeKey]);
