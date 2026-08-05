@@ -192,6 +192,7 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
     }).filter(({ matrix }) => matrix.some((row) => row.some((cell) => String(cell || "").trim())));
 
     const totalRows = sheets.reduce((sum, sheet) => sum + sheet.matrix.length, 0);
+    const sheetStats = [];
 
     const addCustomer = ({
       fullName,
@@ -240,6 +241,8 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
     sheets.forEach(({ sheetName, matrix }) => {
       const headerRowIndex = matrix.slice(0, 30).findIndex((row) => row.some(isPhoneHeader) && row.some(isNameHeader));
       let extractedFromSheet = 0;
+      let rejectedBeforeSheet = rejectedRows;
+      let duplicateBeforeSheet = duplicateRows;
 
       if (headerRowIndex >= 0) {
         const headers = matrix[headerRowIndex];
@@ -302,6 +305,14 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
       }
 
       if (extractedFromSheet > 0) processedSheets.push(sheetName);
+      sheetStats.push({
+        sheet_name: sheetName,
+        rows_seen: matrix.length,
+        cleaned: extractedFromSheet,
+        rejected: rejectedRows - rejectedBeforeSheet,
+        duplicates: duplicateRows - duplicateBeforeSheet,
+        header_mode: headerRowIndex >= 0 ? "header" : "headerless",
+      });
     });
 
     self.postMessage({ type: "progress", current: totalRows, total: totalRows });
@@ -310,6 +321,10 @@ self.onmessage = ({ data: { buffer, fileName } }) => {
       result: {
         rows: preparedRows,
         sheetName: processedSheets.join(", ") || workbook.SheetNames[0],
+        totalSheets: workbook.SheetNames.length,
+        nonEmptySheets: sheets.length,
+        processedSheets,
+        sheetStats,
         rejectedRows,
         duplicateRows,
       },

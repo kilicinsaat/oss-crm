@@ -2567,6 +2567,10 @@ function App() {
         fileName: file.name,
         outputName,
         sheetName: parsed.sheetName,
+        totalSheets: parsed.totalSheets || 1,
+        nonEmptySheets: parsed.nonEmptySheets || 1,
+        processedSheets: parsed.processedSheets || [],
+        sheetStats: parsed.sheetStats || [],
         cleaned: cleanedRows.length,
         rejectedRows: parsed.rejectedRows,
         duplicateRows: parsed.duplicateRows || 0,
@@ -3231,19 +3235,40 @@ function App() {
     const value = ownCustomerSummary?.[key];
     return value === null || value === undefined ? fallback : Number(value) || 0;
   };
-  const employees = users.filter((user) => ["employee", "manager"].includes(user.role));
-  const ownAssignedCustomers = ["employee", "manager"].includes(profileRole)
+  const employees = useMemo(() => users.filter((user) => ["employee", "manager"].includes(user.role)), [users]);
+  const ownAssignedCustomers = useMemo(() => ["employee", "manager"].includes(profileRole)
     ? customers.filter((customer) => customer.assigned_employee === profileId)
-    : customers;
-  const managerCustomers = profileRole === "manager" ? ownAssignedCustomers : [];
-  const visibleCustomers = isManagementProfile ? customers : ownAssignedCustomers;
-  const newIncomingCustomers = visibleCustomers.filter(isFreshAssignedCustomer);
-  const ownNewIncomingCustomers = ownAssignedCustomers.filter(isFreshAssignedCustomer);
+    : customers, [customers, profileId, profileRole]);
+  const managerCustomers = useMemo(() => profileRole === "manager" ? ownAssignedCustomers : [], [ownAssignedCustomers, profileRole]);
+  const visibleCustomers = useMemo(() => isManagementProfile ? customers : ownAssignedCustomers, [customers, isManagementProfile, ownAssignedCustomers]);
+  const customerCountSnapshot = useMemo(() => {
+    const statusCounts = new Map();
+    let assigned = 0;
+    let pool = 0;
+    let approved = 0;
+    let paid = 0;
+    let freshAssigned = 0;
+
+    visibleCustomers.forEach((customer) => {
+      const status = customer.status || "";
+      statusCounts.set(status, (statusCounts.get(status) || 0) + 1);
+      if (customer.assigned_employee) assigned += 1;
+      if (status === "pool") pool += 1;
+      if (customer.approved) approved += 1;
+      if (customer.payment_received) paid += 1;
+      if (isFreshAssignedCustomer(customer)) freshAssigned += 1;
+    });
+
+    return { statusCounts, assigned, pool, approved, paid, freshAssigned };
+  }, [visibleCustomers]);
+  const ownFreshAssignedCount = useMemo(() => ownAssignedCustomers.reduce((count, customer) => count + (isFreshAssignedCustomer(customer) ? 1 : 0), 0), [ownAssignedCustomers]);
+  const newIncomingCustomers = useMemo(() => visibleCustomers.filter(isFreshAssignedCustomer), [visibleCustomers]);
+  const ownNewIncomingCustomers = useMemo(() => ownAssignedCustomers.filter(isFreshAssignedCustomer), [ownAssignedCustomers]);
   const repNewIncomingCustomers = profileRole === "manager" ? ownNewIncomingCustomers : newIncomingCustomers;
-  const completeCustomers = profileRole === "employee"
+  const completeCustomers = useMemo(() => profileRole === "employee"
     ? visibleCustomers.filter((customer) => customer.assigned_employee === profileId)
-    : visibleCustomers;
-  const filteredCustomers = visibleCustomers
+    : visibleCustomers, [profileId, profileRole, visibleCustomers]);
+  const filteredCustomers = useMemo(() => visibleCustomers
     .filter((customer) => {
       if (customerFilter === "all") return true;
       if (customerFilter === "pool") return customer.status === "pool";
@@ -3253,22 +3278,21 @@ function App() {
       if (CUSTOMER_STATUSES.has(customerFilter)) return customer.status === customerFilter;
       return true;
     })
-    .filter((customer) => customerMatchesSearch(customer, searchTerm));
+    .filter((customer) => customerMatchesSearch(customer, searchTerm)), [customerFilter, searchTerm, visibleCustomers]);
 
-  const followUps = visibleCustomers.filter((customer) =>
+  const followUps = useMemo(() => visibleCustomers.filter((customer) =>
     ["no_answer", "busy", "appointment", "contract_appointment", "callback", "meeting_done", "not_approved"].includes(customer.status)
-  );
+  ), [visibleCustomers]);
 
   const welcomeName = profileFullName || profileEmail || "Kullanıcı";
-  const today = new Date();
-  const reminderCustomers = visibleCustomers
-    .filter(isCalendarCustomer);
-  const calendarCustomers = sortAppointmentCustomers(
+  const today = useMemo(() => new Date(), []);
+  const reminderCustomers = useMemo(() => visibleCustomers.filter(isCalendarCustomer), [visibleCustomers]);
+  const calendarCustomers = useMemo(() => sortAppointmentCustomers(
     mergeCustomersById(appointmentCustomers, reminderCustomers).filter(isCalendarCustomer)
-  );
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const overdueReminders = calendarCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart);
-  const todayWorkItems = calendarCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart);
+  ), [appointmentCustomers, reminderCustomers]);
+  const todayStart = useMemo(() => new Date(today.getFullYear(), today.getMonth(), today.getDate()), [today]);
+  const overdueReminders = useMemo(() => calendarCustomers.filter((customer) => new Date(customer.appointment_date) < todayStart), [calendarCustomers, todayStart]);
+  const todayWorkItems = useMemo(() => calendarCustomers.filter((customer) => isSameDay(customer.appointment_date, today) || new Date(customer.appointment_date) < todayStart), [calendarCustomers, today, todayStart]);
   const reportCustomers = isManagementProfile ? customers : visibleCustomers;
   const bossReportSummary = isManagementProfile ? bossLiveReport?.summary : null;
   const reportSummary = isManagementProfile ? bossReportSummary : metricSummary;
@@ -3336,13 +3360,13 @@ function App() {
     : getDataStats(reportCustomers);
   const totalCustomerCount = customerMetric("total", completeCustomers.length);
   const freshCustomerCount = profileRole === "manager"
-    ? ownCustomerMetric("fresh_assigned", ownNewIncomingCustomers.length)
-    : customerMetric("fresh_assigned", newIncomingCustomers.length);
+    ? ownCustomerMetric("fresh_assigned", ownFreshAssignedCount)
+    : customerMetric("fresh_assigned", customerCountSnapshot.freshAssigned);
   const managerCustomerCount = ownCustomerMetric("total", managerCustomers.length);
-  const assignedCustomerCount = customerMetric("assigned_total", visibleCustomers.filter((customer) => customer.assigned_employee).length);
-  const poolCustomerCount = customerMetric("pool", visibleCustomers.filter((customer) => customer.status === "pool").length);
-  const approvedCustomerCount = customerMetric("approved", visibleCustomers.filter((customer) => customer.approved).length);
-  const paidCustomerCount = customerMetric("paid", visibleCustomers.filter((customer) => customer.payment_received).length);
+  const assignedCustomerCount = customerMetric("assigned_total", customerCountSnapshot.assigned);
+  const poolCustomerCount = customerMetric("pool", customerCountSnapshot.pool);
+  const approvedCustomerCount = customerMetric("approved", customerCountSnapshot.approved);
+  const paidCustomerCount = customerMetric("paid", customerCountSnapshot.paid);
   const followUpCustomerCount = customerMetric("followups", followUps.length);
   const todayWorkCount = customerMetric("today_work", todayWorkItems.length);
   const manualDuplicate = findDuplicateCustomer(customers, form.phone);
@@ -3616,8 +3640,13 @@ function App() {
                 {lastCleanSummary && (
                   <div style={cleanSummaryBox}>
                     <strong>{lastCleanSummary.outputName}</strong>
+                    <span style={mutedText}>Indirilen dosya genelde C:\Users\yusuf\Downloads klasorune duser.</span>
                     <span>{lastCleanSummary.sheetName} · Temiz dosya indirildi, henüz CRM'e kayıt atılmadı.</span>
                     <div style={importSummaryGrid}>
+                      <span>Okunan sayfa: <strong>{(lastCleanSummary.nonEmptySheets || lastCleanSummary.totalSheets || 1).toLocaleString("tr-TR")} / {(lastCleanSummary.totalSheets || 1).toLocaleString("tr-TR")}</strong></span>
+                      {lastCleanSummary.sheetStats?.length > 0 && (
+                        <span>Sayfa detay: <strong>{lastCleanSummary.sheetStats.map((sheet) => `${sheet.sheet_name}: ${Number(sheet.cleaned || 0).toLocaleString("tr-TR")}`).join(" | ")}</strong></span>
+                      )}
                       <span>Temiz kayıt: <strong>{lastCleanSummary.cleaned.toLocaleString("tr-TR")}</strong></span>
                       <span>İkinci telefon: <strong>{lastCleanSummary.secondPhones.toLocaleString("tr-TR")}</strong></span>
                       <span>Dosya içi mükerrer: <strong>{lastCleanSummary.duplicateRows.toLocaleString("tr-TR")}</strong></span>
@@ -4370,50 +4399,48 @@ function CustomerTable({
     };
   }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, searchMode, debouncedSearchTerm, dataVersion, canManage]);
 
-  const searchedData = data
-    .filter((customer) => assigneeFilter === "all" ? !hiddenAfterAssignSet.has(customer.id) : true)
-    .filter((customer) => customerMatchesSearch(customer, searchTerm, searchMode));
-  const assigneeFilteredData = assigneeFilter === "all"
-    ? searchedData
-    : assigneeFilter === "pool"
-      ? searchedData.filter((customer) => !customer.assigned_employee)
-      : searchedData.filter((customer) => customer.assigned_employee === assigneeFilter);
-  const genderFilteredData = genderFilter === "all"
-    ? assigneeFilteredData
-    : assigneeFilteredData.filter((customer) => inferCustomerGender(customer) === genderFilter);
-  const filteredData = statusFilter === "all"
-    ? genderFilteredData
-    : genderFilteredData.filter((customer) => customer.status === statusFilter);
-  const cleanLocalDataFilter = normalizeCustomerSearch(dataFilter);
-  const dataFilteredData = cleanLocalDataFilter
-    ? filteredData.filter((customer) => normalizeCustomerSearch(customer.batch_name).includes(cleanLocalDataFilter))
-    : filteredData;
-  const showAppointmentSortOptions = Boolean(remoteScopeConfig.orderByAppointment)
-    || dataFilteredData.some((customer) => customer.appointment_date);
-  const appointmentDateFilteredData = appointmentDateFilter
-    ? dataFilteredData.filter((customer) => formatDateInputValue(customer.appointment_date) === appointmentDateFilter)
-    : dataFilteredData;
-  const sortedData = [...appointmentDateFilteredData].sort((first, second) => {
-    if (sortMode === "appointment_asc" || sortMode === "appointment_desc") {
-      const firstAppointmentTime = new Date(first.appointment_date || 8640000000000000).getTime();
-      const secondAppointmentTime = new Date(second.appointment_date || 8640000000000000).getTime();
-      const appointmentCompare = firstAppointmentTime - secondAppointmentTime;
-      if (appointmentCompare !== 0) {
-        return sortMode === "appointment_asc" ? appointmentCompare : -appointmentCompare;
+  const shouldBuildLocalRows = !isRemote || Boolean(remoteError);
+  const sortedData = useMemo(() => {
+    if (!shouldBuildLocalRows) return [];
+    const cleanLocalDataFilter = normalizeCustomerSearch(dataFilter);
+    const filteredRows = [];
+
+    data.forEach((customer) => {
+      if (assigneeFilter === "all" && hiddenAfterAssignSet.has(customer.id)) return;
+      if (!customerMatchesSearch(customer, searchTerm, searchMode)) return;
+      if (assigneeFilter === "pool" && customer.assigned_employee) return;
+      if (!["all", "pool"].includes(assigneeFilter) && customer.assigned_employee !== assigneeFilter) return;
+      if (genderFilter !== "all" && inferCustomerGender(customer) !== genderFilter) return;
+      if (statusFilter !== "all" && customer.status !== statusFilter) return;
+      if (cleanLocalDataFilter && !normalizeCustomerSearch(customer.batch_name).includes(cleanLocalDataFilter)) return;
+      if (appointmentDateFilter && formatDateInputValue(customer.appointment_date) !== appointmentDateFilter) return;
+      filteredRows.push(customer);
+    });
+
+    return filteredRows.sort((first, second) => {
+      if (sortMode === "appointment_asc" || sortMode === "appointment_desc") {
+        const firstAppointmentTime = new Date(first.appointment_date || 8640000000000000).getTime();
+        const secondAppointmentTime = new Date(second.appointment_date || 8640000000000000).getTime();
+        const appointmentCompare = firstAppointmentTime - secondAppointmentTime;
+        if (appointmentCompare !== 0) {
+          return sortMode === "appointment_asc" ? appointmentCompare : -appointmentCompare;
+        }
       }
-    }
-    if (sortMode === "data_asc" || sortMode === "data_desc") {
-      const direction = sortMode === "data_asc" ? 1 : -1;
-      const dataCompare = String(first.batch_name || "").localeCompare(String(second.batch_name || ""), "tr-TR", { numeric: true, sensitivity: "base" });
-      if (dataCompare !== 0) return dataCompare * direction;
-      const pageCompare = (Number(first.batch_page) || 0) - (Number(second.batch_page) || 0);
-      if (pageCompare !== 0) return pageCompare;
-    }
-    const firstTime = new Date(first.created_at || 0).getTime() || 0;
-    const secondTime = new Date(second.created_at || 0).getTime() || 0;
-    return sortMode === "oldest" ? firstTime - secondTime : secondTime - firstTime;
-  });
-  const remoteVisibleRows = remoteRows.filter((customer) => !hiddenAfterAssignSet.has(customer.id));
+      if (sortMode === "data_asc" || sortMode === "data_desc") {
+        const direction = sortMode === "data_asc" ? 1 : -1;
+        const dataCompare = String(first.batch_name || "").localeCompare(String(second.batch_name || ""), "tr-TR", { numeric: true, sensitivity: "base" });
+        if (dataCompare !== 0) return dataCompare * direction;
+        const pageCompare = (Number(first.batch_page) || 0) - (Number(second.batch_page) || 0);
+        if (pageCompare !== 0) return pageCompare;
+      }
+      const firstTime = new Date(first.created_at || 0).getTime() || 0;
+      const secondTime = new Date(second.created_at || 0).getTime() || 0;
+      return sortMode === "oldest" ? firstTime - secondTime : secondTime - firstTime;
+    });
+  }, [assigneeFilter, appointmentDateFilter, data, dataFilter, genderFilter, hiddenAfterAssignSet, searchMode, searchTerm, shouldBuildLocalRows, sortMode, statusFilter]);
+  const showAppointmentSortOptions = Boolean(remoteScopeConfig.orderByAppointment)
+    || (!isRemote && sortedData.some((customer) => customer.appointment_date));
+  const remoteVisibleRows = useMemo(() => remoteRows.filter((customer) => !hiddenAfterAssignSet.has(customer.id)), [hiddenAfterAssignSet, remoteRows]);
   const useLocalFallbackRows = isRemote && Boolean(remoteError) && remoteVisibleRows.length === 0 && sortedData.length > 0;
   const displayedTotal = isRemote && !useLocalFallbackRows ? remoteTotal : sortedData.length;
   const pageCount = Math.max(Math.ceil(displayedTotal / pageSize), 1);
@@ -5892,23 +5919,55 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
     ? activityLogs
     : activityLogs.filter((log) => log.user_id === selectedRep), [activityLogs, selectedRep]);
 
+  const activityLogsByRep = useMemo(() => {
+    const grouped = new Map();
+    activityLogs.forEach((log) => {
+      const key = log.user_id || "";
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(log);
+    });
+    return grouped;
+  }, [activityLogs]);
+
+  const repCustomersByRep = useMemo(() => {
+    const grouped = new Map();
+    repCustomers.forEach((customer) => {
+      const key = customer.assigned_employee || "";
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(customer);
+    });
+    return grouped;
+  }, [repCustomers]);
+
   const repRows = useMemo(() => reps.map((rep) => {
-    const logs = activityLogs.filter((log) => log.user_id === rep.id);
-    const assigned = repCustomers.filter((customer) => customer.assigned_employee === rep.id);
+    const logs = activityLogsByRep.get(rep.id) || [];
+    const assigned = repCustomersByRep.get(rep.id) || [];
     const exactStats = liveRepStats.get(rep.id);
-    const callActions = logs.filter((log) => ["no_answer", "busy", "callback"].includes(log.new_status)).length;
-    const negative = assigned.filter((customer) => REP_NEGATIVE_CUSTOMER_STATUSES.has(customer.status)).length;
-    const appointments = logs.filter((log) => ["appointment", "contract_appointment"].includes(log.new_status)).length;
-    const sales = logs.filter((log) => log.new_status === "paid").length;
-    const untouched = assigned.filter(isFreshAssignedCustomer).length;
-    const delayed = assigned.filter((customer) => {
+    let callActions = 0;
+    let appointments = 0;
+    let sales = 0;
+    let negative = 0;
+    let untouched = 0;
+    let delayed = 0;
+
+    logs.forEach((log) => {
+      if (["no_answer", "busy", "callback"].includes(log.new_status)) callActions += 1;
+      if (["appointment", "contract_appointment"].includes(log.new_status)) appointments += 1;
+      if (log.new_status === "paid") sales += 1;
+    });
+
+    assigned.forEach((customer) => {
+      if (REP_NEGATIVE_CUSTOMER_STATUSES.has(customer.status)) negative += 1;
+      const fresh = isFreshAssignedCustomer(customer);
+      if (fresh) untouched += 1;
       const reminderLate = customer.appointment_date
         && ["callback", "appointment", "contract_appointment"].includes(customer.status)
         && new Date(customer.appointment_date).getTime() < clockNow;
       const assignedAt = customer.assigned_at ? new Date(customer.assigned_at) : null;
-      const untouchedLate = isFreshAssignedCustomer(customer) && assignedAt && clockNow - assignedAt.getTime() > 24 * 60 * 60 * 1000;
-      return reminderLate || untouchedLate;
-    }).length;
+      const untouchedLate = fresh && assignedAt && clockNow - assignedAt.getTime() > 24 * 60 * 60 * 1000;
+      if (reminderLate || untouchedLate) delayed += 1;
+    });
+
     const lastLog = logs[0];
     return {
       rep,
@@ -5923,7 +5982,7 @@ function EmployeesView({ profile, users, customers, customerSummary, customerDat
       conversion: callActions ? Math.round((appointments / callActions) * 100) : 0,
       lastAction: lastLog?.created_at || null,
     };
-  }).sort((a, b) => b.logs.length - a.logs.length), [reps, activityLogs, repCustomers, liveRepStats, clockNow]);
+  }).sort((a, b) => b.logs.length - a.logs.length), [activityLogsByRep, clockNow, liveRepStats, repCustomersByRep, reps]);
 
   const delayedCustomers = useMemo(() => repCustomers
     .filter((customer) => selectedRep === "all" || customer.assigned_employee === selectedRep)
