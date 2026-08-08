@@ -2402,7 +2402,15 @@ function App() {
       ? customerOrId
       : customersRef.current.find((item) => item.id === customerOrId);
     const phones = [customer?.phone, customer?.phone_2].map(normalizePhone).filter(Boolean);
-    if (phones.length === 0) {
+    let relatedCustomerIds;
+    try {
+      relatedCustomerIds = await fetchRelatedCustomerIds(customerOrId);
+    } catch {
+      relatedCustomerIds = getRelatedCustomerIds(customerOrId);
+    }
+    relatedCustomerIds = [...new Set(relatedCustomerIds.map(String).filter(Boolean))];
+
+    if (phones.length === 0 && relatedCustomerIds.length === 0) {
       setCustomerCalls([]);
       setCustomerCallsLoading(false);
       return;
@@ -2411,14 +2419,28 @@ function App() {
     setCustomerCallsLoading(true);
     const allCalls = [];
     let loadError = null;
+    const uniquePhones = [...new Set(phones)];
+    const callFilters = [
+      relatedCustomerIds.length > 0 ? `customer_id.in.(${relatedCustomerIds.join(",")})` : "",
+      uniquePhones.length > 0 ? `phone.in.(${uniquePhones.join(",")})` : "",
+    ].filter(Boolean);
+
     for (let from = 0; customerCallsRequestRef.current === requestId; from += REP_MONITOR_PAGE_SIZE) {
-      const { data, error } = await runWithRetry(() => supabase
+      let query = supabase
         .from("call_sessions")
         .select("*")
-        .in("phone", [...new Set(phones)])
         .order("created_at", { ascending: false })
         .order("id", { ascending: false })
-        .range(from, from + REP_MONITOR_PAGE_SIZE - 1), 3);
+        .range(from, from + REP_MONITOR_PAGE_SIZE - 1);
+
+      if (callFilters.length === 1) {
+        if (relatedCustomerIds.length > 0 && uniquePhones.length === 0) query = query.in("customer_id", relatedCustomerIds);
+        else query = query.in("phone", uniquePhones);
+      } else {
+        query = query.or(callFilters.join(","));
+      }
+
+      const { data, error } = await runWithRetry(() => query, 3);
       if (error) {
         loadError = error;
         break;

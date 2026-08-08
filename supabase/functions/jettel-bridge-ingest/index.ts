@@ -358,6 +358,40 @@ function mapActiveCallRow(row: JsonRecord, extensionMap: Map<string, JsonRecord>
   };
 }
 
+async function findCustomerByPhone(supabase: ReturnType<typeof createClient>, phone: string) {
+  if (!phone) return null;
+  const variants = [phone, `0${phone}`, `90${phone}`];
+  const phoneFilters = [
+    `phone_key.eq.${phone}`,
+    `phone_2_key.eq.${phone}`,
+    ...variants.flatMap((variant) => [
+      `phone.eq.${variant}`,
+      `phone_2.eq.${variant}`,
+    ]),
+  ];
+
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id,phone,phone_2,assigned_employee,updated_at,created_at")
+    .or(phoneFilters.join(","))
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data) return data as JsonRecord;
+
+  const { data: fallbackCustomer } = await supabase
+    .from("customers")
+    .select("id,phone,phone_2,assigned_employee,updated_at,created_at")
+    .or(variants.flatMap((variant) => [`phone.eq.${variant}`, `phone_2.eq.${variant}`]).join(","))
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return fallbackCustomer as JsonRecord | null;
+}
+
 async function writeActionLog(supabase: ReturnType<typeof createClient>, row: JsonRecord) {
   try {
     await supabase.from("jettel_action_logs").insert(row);
@@ -435,14 +469,8 @@ Deno.serve(async (request) => {
     ]).filter(Boolean)));
     const customerMap = new Map<string, JsonRecord>();
     for (const phone of phones) {
-      const { data: customer } = await supabase
-        .from("customers")
-        .select("id,phone,phone_2")
-        .or(`phone.eq.${phone},phone_2.eq.${phone}`)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (customer) customerMap.set(phone, customer as JsonRecord);
+      const customer = await findCustomerByPhone(supabase, phone);
+      if (customer) customerMap.set(phone, customer);
     }
 
     const mappedCalls = rows
@@ -515,14 +543,8 @@ Deno.serve(async (request) => {
     ]).filter(Boolean)));
     const customerMap = new Map<string, JsonRecord>();
     for (const phone of phones) {
-      const { data: customer } = await supabase
-        .from("customers")
-        .select("id,phone,phone_2")
-        .or(`phone.eq.${phone},phone_2.eq.${phone}`)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (customer) customerMap.set(phone, customer as JsonRecord);
+      const customer = await findCustomerByPhone(supabase, phone);
+      if (customer) customerMap.set(phone, customer);
     }
 
     const mappedCalls = rows

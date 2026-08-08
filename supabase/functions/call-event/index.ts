@@ -40,6 +40,39 @@ function cleanMetadata(value: unknown) {
   return value as Record<string, unknown>;
 }
 
+async function findCustomerByPhone(supabase: ReturnType<typeof createClient>, phone: string) {
+  const variants = [phone, `0${phone}`, `90${phone}`];
+  const phoneFilters = [
+    `phone_key.eq.${phone}`,
+    `phone_2_key.eq.${phone}`,
+    ...variants.flatMap((variant) => [
+      `phone.eq.${variant}`,
+      `phone_2.eq.${variant}`,
+    ]),
+  ];
+
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id,updated_at,created_at")
+    .or(phoneFilters.join(","))
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data) return data;
+
+  const { data: fallbackCustomer } = await supabase
+    .from("customers")
+    .select("id,updated_at,created_at")
+    .or(variants.flatMap((variant) => [`phone.eq.${variant}`, `phone_2.eq.${variant}`]).join(","))
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return fallbackCustomer;
+}
+
 Deno.serve(async (request) => {
   if (request.method !== "POST") return json({ success: false, error: "Only POST is supported." }, 405);
 
@@ -102,13 +135,7 @@ Deno.serve(async (request) => {
   }
   if (!profile) return json({ success: false, error: "Active CRM profile not found." }, 403);
 
-  const { data: customer } = await supabase
-    .from("customers")
-    .select("id")
-    .or(`phone.eq.${phone},phone_2.eq.${phone}`)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const customer = await findCustomerByPhone(supabase, phone);
 
   const now = new Date().toISOString();
   const { data: openCall } = await supabase
