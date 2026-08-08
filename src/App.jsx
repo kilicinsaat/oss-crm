@@ -353,15 +353,18 @@ function remoteTextSearchTerms(value) {
   return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 8);
 }
 
-function remoteNameSearchTerms(value) {
-  const folded = normalizeCustomerSearchText(value).slice(0, 80);
-  const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
-  const tokens = [folded, original]
-    .flatMap((term) => term.split(" "))
+function remoteNameRequiredTerms(value) {
+  const originalTokens = normalizeCustomerSearchText(value, { foldTurkish: false })
+    .split(" ")
     .map((token) => token.trim())
-    .filter((token) => token.length >= 2)
-    .slice(0, 6);
-  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 8);
+    .filter((token) => token.length >= 2);
+  const foldedTokens = normalizeCustomerSearchText(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+
+  const preferredTokens = originalTokens.length > 0 ? originalTokens : foldedTokens;
+  return Array.from(new Set(preferredTokens)).slice(0, 4);
 }
 
 function postgrestIlikeValue(value) {
@@ -2266,6 +2269,12 @@ function App() {
         created_at: createdAt,
       }));
       setCustomerLogs((current) => [...visibleLogRows, ...current]);
+    }
+
+    if (selectedCustomer && updateIdSet.has(String(selectedCustomer.id))) {
+      const refreshedSelectedCustomer = updatedCustomerMap.get(String(selectedCustomer.id))
+        || { ...selectedCustomer, ...updates, last_action_by: profile.id };
+      window.setTimeout(() => loadCustomerLogs(refreshedSelectedCustomer), 250);
     }
 
     if (becamePaid) {
@@ -4369,15 +4378,10 @@ function CustomerTable({
         } else if (numericSearch) {
           query = query.ilike("search_text", `%${searchDigits}%`);
         } else if (searchMode === "name") {
-          const nameFilters = remoteNameSearchTerms(debouncedSearchTerm).flatMap((term) => {
-            const safeTerm = postgrestIlikeValue(term);
-            return [
-              `first_name.ilike.%${safeTerm}%`,
-              `last_name.ilike.%${safeTerm}%`,
-              `search_text.ilike.%${safeTerm}%`,
-            ];
+          const requiredNameTerms = remoteNameRequiredTerms(debouncedSearchTerm);
+          requiredNameTerms.forEach((term) => {
+            query = query.ilike("search_text", `%${postgrestIlikeValue(term)}%`);
           });
-          query = query.or(nameFilters.join(","));
         } else {
           const textFilters = remoteTextSearchTerms(debouncedSearchTerm).flatMap((term) => {
             const safeTerm = postgrestIlikeValue(term);
