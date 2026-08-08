@@ -342,18 +342,7 @@ function customerSearchTokens(value) {
     .filter((token) => token.length >= 2);
 }
 
-function remoteTextSearchTerms(value) {
-  const folded = normalizeCustomerSearchText(value).slice(0, 80);
-  const original = normalizeCustomerSearchText(value, { foldTurkish: false }).slice(0, 80);
-  const tokens = [folded, original]
-    .flatMap((term) => term.split(" "))
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2)
-    .slice(0, 6);
-  return Array.from(new Set([folded, original, ...tokens].filter((term) => term.length >= 2))).slice(0, 8);
-}
-
-function remoteNameRequiredTerms(value) {
+function remoteSearchTermGroups(value) {
   const originalTokens = normalizeCustomerSearchText(value, { foldTurkish: false })
     .split(" ")
     .map((token) => token.trim())
@@ -363,8 +352,13 @@ function remoteNameRequiredTerms(value) {
     .map((token) => token.trim())
     .filter((token) => token.length >= 2);
 
-  const preferredTokens = originalTokens.length > 0 ? originalTokens : foldedTokens;
-  return Array.from(new Set(preferredTokens)).slice(0, 4);
+  const maxTokenCount = Math.max(originalTokens.length, foldedTokens.length);
+  const groups = [];
+  for (let index = 0; index < maxTokenCount && groups.length < 4; index += 1) {
+    const variants = Array.from(new Set([originalTokens[index], foldedTokens[index]].filter(Boolean)));
+    if (variants.length > 0) groups.push(variants);
+  }
+  return groups;
 }
 
 function postgrestIlikeValue(value) {
@@ -4298,7 +4292,6 @@ function CustomerTable({
   const [genderFilter, setGenderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dataFilter, setDataFilter] = useState("");
-  const [searchMode, setSearchMode] = useState("smart");
   const [appointmentDateFilter, setAppointmentDateFilter] = useState("");
   const [sortMode, setSortMode] = useState(defaultSortMode);
   const [page, setPage] = useState(1);
@@ -4322,7 +4315,7 @@ function CustomerTable({
       setHiddenAfterAssignIds([]);
     }, 0);
     return () => window.clearTimeout(resetTimer);
-  }, [searchTerm, searchMode, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, setSelectedIds, setBulkEmployee]);
+  }, [searchTerm, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, remoteScopeKey, setSelectedIds, setBulkEmployee]);
 
   useEffect(() => {
     if (!isRemote) return undefined;
@@ -4334,7 +4327,7 @@ function CustomerTable({
       const cleanSearch = normalizeCustomerSearch(debouncedSearchTerm);
       const cleanDataFilter = normalizeCustomerSearch(dataFilter);
       const searchDigits = digitsOnly(debouncedSearchTerm);
-      const numericSearch = searchMode === "phone" || isNumericCustomerSearch(debouncedSearchTerm);
+      const numericSearch = isNumericCustomerSearch(debouncedSearchTerm);
       const exactPhoneSearch = numericSearch && normalizePhone(debouncedSearchTerm).length === 10;
 
       if (cleanSearch && cleanSearch.length < CUSTOMER_SEARCH_MIN_LENGTH) {
@@ -4345,7 +4338,7 @@ function CustomerTable({
         return;
       }
 
-      if (searchMode === "phone" && searchDigits.length < CUSTOMER_SEARCH_MIN_LENGTH) {
+      if (numericSearch && searchDigits.length < CUSTOMER_SEARCH_MIN_LENGTH) {
         setRemoteRows([]);
         setRemoteTotal(0);
         setRemoteLoading(false);
@@ -4390,30 +4383,27 @@ function CustomerTable({
       }
 
       if (cleanSearch) {
-        if (searchMode === "data") {
-          query = query.ilike("batch_name", `%${postgrestIlikeValue(cleanSearch)}%`);
-        } else if (exactPhoneSearch) {
+        if (exactPhoneSearch) {
           const phoneKey = normalizePhone(debouncedSearchTerm);
           const phoneFilters = [`phone_key.eq.${phoneKey}`, `phone_2_key.eq.${phoneKey}`];
           if (searchDigits.length >= 11) phoneFilters.push(`search_text.ilike.%${searchDigits}%`);
           query = query.or(phoneFilters.join(","));
         } else if (numericSearch) {
           query = query.ilike("search_text", `%${searchDigits}%`);
-        } else if (searchMode === "name") {
-          const requiredNameTerms = remoteNameRequiredTerms(debouncedSearchTerm);
-          requiredNameTerms.forEach((term) => {
-            query = query.ilike("search_text", `%${postgrestIlikeValue(term)}%`);
-          });
         } else {
-          const textFilters = remoteTextSearchTerms(debouncedSearchTerm).flatMap((term) => {
-            const safeTerm = postgrestIlikeValue(term);
-            return [
-              `search_text.ilike.%${safeTerm}%`,
-              `first_name.ilike.%${safeTerm}%`,
-              `last_name.ilike.%${safeTerm}%`,
-            ];
+          const termGroups = remoteSearchTermGroups(debouncedSearchTerm);
+          termGroups.forEach((group) => {
+            const groupFilters = group.flatMap((term) => {
+              const safeTerm = postgrestIlikeValue(term);
+              return [
+                `search_text.ilike.%${safeTerm}%`,
+                `first_name.ilike.%${safeTerm}%`,
+                `last_name.ilike.%${safeTerm}%`,
+                `batch_name.ilike.%${safeTerm}%`,
+              ];
+            });
+            if (groupFilters.length > 0) query = query.or(groupFilters.join(","));
           });
-          query = query.or(textFilters.join(","));
         }
       }
 
@@ -4449,7 +4439,8 @@ function CustomerTable({
           .order("id", { ascending: false });
       }
 
-      const from = (page - 1) * pageSize;
+      const forceFirstPage = Boolean(cleanSearch || cleanDataFilter || appointmentDateFilter || statusFilter !== "all" || genderFilter !== "all");
+      const from = (forceFirstPage ? 0 : page - 1) * pageSize;
       const { data: rows, error, count } = await runWithRetry(() => query.range(from, from + pageSize - 1), 2);
 
       if (cancelled) return;
@@ -4475,7 +4466,7 @@ function CustomerTable({
       cancelled = true;
       window.clearTimeout(refreshTimer);
     };
-  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, searchMode, debouncedSearchTerm, dataVersion, canManage]);
+  }, [isRemote, remoteScopeConfig, page, pageSize, assigneeFilter, genderFilter, statusFilter, dataFilter, appointmentDateFilter, sortMode, debouncedSearchTerm, dataVersion, canManage]);
 
   const shouldBuildLocalRows = !isRemote || Boolean(remoteError);
   const sortedData = useMemo(() => {
@@ -4485,7 +4476,7 @@ function CustomerTable({
 
     data.forEach((customer) => {
       if (assigneeFilter === "all" && hiddenAfterAssignSet.has(customer.id)) return;
-      if (!customerMatchesSearch(customer, searchTerm, searchMode)) return;
+      if (!customerMatchesSearch(customer, searchTerm)) return;
       if (assigneeFilter === "pool" && customer.assigned_employee) return;
       if (!["all", "pool"].includes(assigneeFilter) && customer.assigned_employee !== assigneeFilter) return;
       if (genderFilter !== "all" && inferCustomerGender(customer) !== genderFilter) return;
@@ -4515,7 +4506,7 @@ function CustomerTable({
       const secondTime = new Date(second.created_at || 0).getTime() || 0;
       return sortMode === "oldest" ? firstTime - secondTime : secondTime - firstTime;
     });
-  }, [assigneeFilter, appointmentDateFilter, data, dataFilter, genderFilter, hiddenAfterAssignSet, searchMode, searchTerm, shouldBuildLocalRows, sortMode, statusFilter]);
+  }, [assigneeFilter, appointmentDateFilter, data, dataFilter, genderFilter, hiddenAfterAssignSet, searchTerm, shouldBuildLocalRows, sortMode, statusFilter]);
   const showAppointmentSortOptions = Boolean(remoteScopeConfig.orderByAppointment)
     || (!isRemote && sortedData.some((customer) => customer.appointment_date));
   const remoteVisibleRows = useMemo(() => remoteRows.filter((customer) => !hiddenAfterAssignSet.has(customer.id)), [hiddenAfterAssignSet, remoteRows]);
@@ -4587,7 +4578,7 @@ function CustomerTable({
 
       <div style={customerToolbar}>
         <input
-          placeholder="Müşteri ara: isim, telefon, TC, data adı..."
+          placeholder="Müşteri ara: isim, soyad, telefon, TC veya data..."
           value={searchTerm}
           onChange={(event) => {
             setSearchTerm(event.target.value);
@@ -4596,21 +4587,6 @@ function CustomerTable({
           }}
           style={{ ...searchInput, marginBottom: 0 }}
         />
-        <select
-          value={searchMode}
-          onChange={(event) => {
-            setSearchMode(event.target.value);
-            clearAssignmentHiding();
-            setPage(1);
-          }}
-          title="Arama tipini seç"
-          style={toolbarSelect}
-        >
-          <option value="smart">Arama tipi: Akıllı</option>
-          <option value="name">Arama tipi: İsim</option>
-          <option value="phone">Arama tipi: Telefon / TC</option>
-          <option value="data">Arama tipi: Data</option>
-        </select>
         {canManage && (
           <select value={assigneeFilter} onChange={(event) => { setAssigneeFilter(event.target.value); clearAssignmentHiding(); setPage(1); }} style={toolbarSelect}>
             <option value="all">Tüm sorumlular</option>
